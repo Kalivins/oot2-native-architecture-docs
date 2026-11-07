@@ -77,10 +77,11 @@ class UiTest(unittest.TestCase):
         cls.tool = toolchain_or_skip()
         cls.tmp = tempfile.TemporaryDirectory(prefix="oot2-ui-", ignore_cleanup_errors=True)
         top = Path(cls.tmp.name)
-        # The runtime's headers and runtime/ui only: the library of this folder is the stand-in and nothing else.
+        # The runtime's headers and the stand-in of runtime/ui only (the menu has its own tests, test_runtime_menu.py, with
+        # the settings store it reads): the library of this folder is the stand-in and nothing else.
         cls.runtime = top / "runtime"
         shutil.copytree(RUNTIME / "include", cls.runtime / "include")
-        shutil.copytree(RUNTIME / "ui", cls.runtime / "ui", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(RUNTIME / "ui", cls.runtime / "ui", ignore=shutil.ignore_patterns("__pycache__", "menu*"))
         cls.build = build_game.Build(top / "build", cls.tool, runtime=cls.runtime, jobs=2)
         build_game.make_runtime_lib(cls.build)
         cls.nm = nm_of(cls.tool)
@@ -179,7 +180,7 @@ class UiImguiTest(unittest.TestCase):
         top = Path(cls.tmp.name)
         cls.runtime = top / "runtime"
         shutil.copytree(RUNTIME / "include", cls.runtime / "include")
-        shutil.copytree(RUNTIME / "ui", cls.runtime / "ui", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(RUNTIME / "ui", cls.runtime / "ui", ignore=shutil.ignore_patterns("__pycache__", "menu*"))
         cls.build = build_game.Build(top / "build", cls.tool, runtime=cls.runtime, jobs=2)
         build_game.make_runtime_lib(cls.build)
         cls.nm = nm_of(cls.tool)

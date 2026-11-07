@@ -45,6 +45,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {   // the menu (runtime/ui) is the one C++ reader of the store
+#endif
+
 typedef enum RtSettingType { RT_SETTING_BOOL, RT_SETTING_INT, RT_SETTING_ENUM } RtSettingType;
 typedef enum RtSettingApply { RT_APPLY_LIVE, RT_APPLY_RESTART, RT_APPLY_PREPARE } RtSettingApply;
 // Research 93 D6's groups, in menu order; each is the file's section of that name.
@@ -89,6 +93,10 @@ typedef enum RtSettingSource {
       "hold a 0.5 ms system timer resolution while the game runs; 0 leaves the system's")                              \
     X(frame_rate_target, PACING, INT, LIVE, 0, 20, 120, NULL,                                                          \
       "fixed frame rate: pace presents on their own schedule at this many a second, whatever interval the game asks for; 0 is off") \
+    X(overlay, DISPLAY, BOOL, LIVE, 0, 0, 1, NULL,                                                                     \
+      "the frame-time readout drawn over the picture; the Test preset turns it on")                                    \
+    X(counters, DEBUG, BOOL, LIVE, 0, 0, 1, NULL,                                                                      \
+      "the counters list drawn over the picture; the Test preset turns it on")                                         \
     X(page_release, DEBUG, ENUM, RESTART, 0, 0, 0, "off|count|release",                                                \
       "page ranges of lever L1: off, counted only, or counted and released")                                          \
     X(census, DEBUG, BOOL, RESTART, 0, 0, 1, NULL,                                                                     \
@@ -210,3 +218,7 @@ void rt_settings_hook(int id, RtSettingHook fn, void *ctx);   // at most 32 hook
 // runs; each applies its keys' values once as it binds. runtime/nvn/nvn_settings.c: hold_ticks, hold_placement and
 // frame_rate_target.
 void nvn_settings_bind(void);
+
+#ifdef __cplusplus
+}
+#endif

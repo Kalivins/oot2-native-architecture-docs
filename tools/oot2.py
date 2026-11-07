@@ -107,6 +107,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dav1d-dir", type=Path,
                    help="dav1d kit made by tools/fetch_dav1d.py, for the AV1 decoder of the movies (default: the "
                         "DAV1D_DIR variable)")
+    p.add_argument("--imgui", type=Path,
+                   help="Dear ImGui folder made by tools/fetch_imgui.py, for the menu (default: the OOT2_IMGUI "
+                        "variable, else fetched/imgui, which prepare fetches itself when it is not there)")
     p.add_argument("--jobs", type=positive, help="compile jobs (default: the CPU count, capped by the free memory)")
     p.add_argument("--xlate", type=Path, help="shader translator (default: the OOT2_XLATE variable, else oot2-xlate on "
                                              "PATH)")

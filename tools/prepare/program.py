@@ -19,8 +19,8 @@ In the output folder:
 
 The keys follow what each output is made from. Lift: the modules and the lifter's code. Compile: the lift's key, the
 build tool, the headers the generated C includes, the compiler and the flags. Link: the compile's key, the build tool,
-the whole runtime (its shaders included), the compiler, the flags, the Vulkan headers, Volk and glslang, and
-main.npdm. So an update of the tools that changed only the runtime runs the link alone, where Ninja compiles the
+the whole runtime (its shaders included), the compiler, the flags, the Vulkan headers, Volk and glslang, the pin of
+Dear ImGui, and main.npdm. So an update of the tools that changed only the runtime runs the link alone, where Ninja compiles the
 runtime files that changed and links again, without the 22 minutes of generated C (D4). Keys need the compiler and the
 Vulkan SDK only; Ninja and the archiver are looked for by the check step and used when a step runs.
 
@@ -30,6 +30,7 @@ Vulkan SDK only; Ninja and the archiver are looked for by the check step and use
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -42,6 +43,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import build_game  # noqa: E402  (tools/build_game.py)
+import fetch_imgui  # noqa: E402  (tools/fetch_imgui.py)
 import layout  # noqa: E402  (tools/layout.py)
 
 LIFTER = TOOLS / "lift"
@@ -65,9 +67,38 @@ def compiler_id(ctx: Context) -> str:
     return build_game.tool_id(check.compiler(ctx))
 
 
-def toolchain(ctx: Context) -> build_game.Toolchain:
+def imgui_folder(ctx: Context) -> Path:
+    """The fetched Dear ImGui that the runtime's menu is built on (runtime/ui, tools/fetch_imgui.py): the folder
+    --imgui or OOT2_IMGUI names, used as it is and refused by name when it is not exactly the pinned layout, else
+    fetched/imgui, laid out first when it is absent or another pin (git and network access; a folder laid out before
+    is replaced, anything else is refused). The link step builds the four core sources into the runtime library, so
+    oot2.exe carries the menu."""
+    named = getattr(ctx.options, "imgui", None) or os.environ.get("OOT2_IMGUI")
+    try:
+        if named:
+            return build_game.find_imgui(named)
+        dest = fetch_imgui.DEFAULT_DEST
+        if fetch_imgui.problems(dest):
+            ctx.reporter.say(f"link: fetching Dear ImGui {fetch_imgui.VERSION} into {dest}")
+            for line in fetch_imgui.fetch(dest):
+                ctx.reporter.say(f"link: {line}")
+        return dest
+    except (build_game.BuildError, fetch_imgui.FetchError, OSError) as e:
+        raise PrepareError(f"Dear ImGui, which the menu is built on: {e} (fetch it with tools/fetch_imgui.py, or "
+                           "name a fetched folder with --imgui)") from None
+
+
+def imgui_key() -> str:
+    """The part of the link step's key that Dear ImGui gives: the pin's contents hash, so that a new pin links again."""
+    return f"imgui={fetch_imgui.CONTENTS_SHA256}"
+
+
+def toolchain(ctx: Context, imgui: bool = False) -> build_game.Toolchain:
+    """The build tools. With imgui the fetched Dear ImGui goes with them (the link step builds the runtime library, and
+    the lifted code needs none)."""
     try:
         return build_game.find_toolchain(check.compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None),
+                                         imgui=imgui_folder(ctx) if imgui else None,
                                          dav1d_dir=getattr(ctx.options, "dav1d_dir", None))
     except build_game.BuildError as e:
         raise PrepareError(str(e)) from None
@@ -131,9 +162,9 @@ def romfs_key(ctx: Context) -> list:
     return ["romfs:", index.path, f"romfs-image-bytes={size}"]
 
 
-def build_for(ctx: Context) -> build_game.Build:
+def build_for(ctx: Context, imgui: bool = False) -> build_game.Build:
     jobs = getattr(ctx.options, "jobs", None) or 0
-    return build_game.Build(ctx.dest / BUILD, toolchain(ctx), gen=ctx.dest / GEN, exefs=ctx.dest / EXEFS,
+    return build_game.Build(ctx.dest / BUILD, toolchain(ctx, imgui), gen=ctx.dest / GEN, exefs=ctx.dest / EXEFS,
                             exe=ctx.dest / build_game.EXE_NAME, runtime=build_game.RUNTIME, files=game_files(ctx),
                             jobs=jobs)
 
@@ -269,7 +300,7 @@ class Link(Step):
     def key(self, ctx: Context) -> str:
         return fingerprint("link-1", TOOLS / "build_game.py", build_game.RUNTIME, compiler_id(ctx),
                            " ".join(build_game.RT_FLAGS + build_game.LINK_FLAGS), ctx.dest / EXEFS / "main.npdm",
-                           *romfs_key(ctx), *vulkan_key(ctx))
+                           *romfs_key(ctx), *vulkan_key(ctx), imgui_key())
 
     def current(self, ctx: Context, record: dict) -> bool:
         exe = ctx.dest / build_game.EXE_NAME
@@ -283,7 +314,7 @@ class Link(Step):
         return exe.is_file() and file_sha256(exe) == record.get("exe_sha256")
 
     def run(self, ctx: Context) -> dict:
-        b = build_for(ctx)
+        b = build_for(ctx, imgui=True)
         on_line, log, path = log_lines(ctx, "link", ninja_progress(ctx, "link", "files"))
         try:
             r = build_game.link_program(b, on_line)

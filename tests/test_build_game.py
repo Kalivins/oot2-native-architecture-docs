@@ -25,6 +25,7 @@ import dataclasses
 import io
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -40,6 +41,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests" / "lift"))
 
 import build_game  # noqa: E402
+import fetch_imgui  # noqa: E402
 import layout  # noqa: E402
 import synth  # noqa: E402
 from prepare import program as steps  # noqa: E402
@@ -1027,6 +1029,13 @@ class StepsTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         toolchain_or_skip()
         capstone_or_skip()
+        # prepare lays out the fetched Dear ImGui when it is absent (git and network); a test names the folder, which
+        # this checkout, or CI's fetch step, has made (tools/fetch_imgui.py).
+        cls.imgui = build_game.find_imgui()
+        if cls.imgui is None:
+            if os.environ.get("OOT2_REQUIRE_IMGUI"):
+                raise RuntimeError("OOT2_REQUIRE_IMGUI is set but no Dear ImGui folder was fetched (tools/fetch_imgui.py)")
+            raise unittest.SkipTest("no fetched Dear ImGui (tools/fetch_imgui.py lays it out)")
         cls.tmp = tempfile.TemporaryDirectory(prefix="oot2-steps-")
         cls.top = Path(cls.tmp.name)
 
@@ -1036,7 +1045,8 @@ class StepsTest(unittest.TestCase):
 
     def run_steps(self, dest: Path, upto: str = "link") -> tuple[str, str, dict]:
         out, err = io.StringIO(), io.StringIO()
-        ctx = Context(dest, argparse.Namespace(cc=None, jobs=4), Reporter(out, err), state=statefile.load(dest))
+        ctx = Context(dest, argparse.Namespace(cc=None, jobs=4, imgui=self.imgui), Reporter(out, err),
+                      state=statefile.load(dest))
         chain = [GivenModules(), steps.Lift(), steps.Compile(), steps.Link()]
         result = run_steps(chain[:[s.id for s in chain].index(upto) + 1], ctx)
         return result, out.getvalue() + err.getvalue(), ctx.state
@@ -1054,6 +1064,11 @@ class StepsTest(unittest.TestCase):
             self.assertGreater(state["steps"]["link"]["exe_bytes"], 0)
             done = run_program(dest / build_game.EXE_NAME)
             self.assertEqual(done.returncode, EXIT_GUEST_STOP, done.stderr)
+            # prepare passed the fetched Dear ImGui to the link: its core is in the runtime library the program
+            # links, and the program's own menu says so at start-up
+            for name in fetch_imgui.CORE_SOURCES:
+                self.assertTrue((dest / "build" / "obj" / "runtime" / f"imgui-{Path(name).stem}.o").is_file(), name)
+            self.assertRegex(done.stderr, rf"oot2: menu: \d+ rows, 2 presets, Dear ImGui {re.escape(fetch_imgui.VERSION)}")
 
             result, text, _ = self.run_steps(dest)
             self.assertEqual(result, "ok", text)

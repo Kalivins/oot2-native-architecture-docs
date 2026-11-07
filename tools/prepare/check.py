@@ -90,6 +90,7 @@ class Check(Step):
                 "(AVX2 and the instructions that came with it, Intel Haswell or AMD Excavator and later).")
         ctx.reporter.say(f"check: CPU {cpu_name(host)}: x86-64-v3")
         ctx.reporter.say(f"check: build tools: {build_tools(ctx)}")
+        ctx.reporter.say(f"check: menu library: {imgui_note(ctx)}")
         ctx.reporter.say(f"check: lift tools: {lift_tools()}")
         ctx.reporter.say(f"check: shader tools: {shader_tools(ctx)}")
         lines, warnings = vulkan_report(host.get("vulkan"), host.get("vulkan_items") or [])
@@ -169,6 +170,28 @@ def build_tools(ctx: Context) -> str:
     return (f"C++ driver {tools.cxx}, Ninja {tools.ninja}, archiver {tools.ar}, Vulkan headers "
             f"{vulkan_header_version(tools.vulkan)} and Volk "
             f"in {tools.vulkan}, glslang {tools.glslang}, {av1_note(tools)}")
+
+
+def imgui_note(ctx: Context) -> str:
+    """Where the runtime's menu gets Dear ImGui (tools/fetch_imgui.py): a folder already laid out as the pin (--imgui,
+    OOT2_IMGUI, or fetched/imgui), or the fetch the link step makes. Stops here when the folder named is not the pin, or
+    when the fetch is due and there is no git to make it, so that a missing piece stops the run before the extraction."""
+    import build_game
+    import fetch_imgui
+    named = getattr(ctx.options, "imgui", None) or os.environ.get("OOT2_IMGUI")
+    try:
+        folder = build_game.find_imgui(named) if named else None
+    except build_game.BuildError as e:
+        raise PrepareError(f"{e}.") from None
+    if folder is None and not fetch_imgui.problems(fetch_imgui.DEFAULT_DEST):
+        folder = fetch_imgui.DEFAULT_DEST
+    if folder is not None:
+        return f"Dear ImGui {fetch_imgui.VERSION} in {folder}"
+    if not shutil.which("git"):
+        raise PrepareError("the menu is built on Dear ImGui, which prepare fetches with git (tools/fetch_imgui.py) and "
+                           "no git was found on PATH. Install git, or give a fetched folder with --imgui.")
+    return (f"Dear ImGui {fetch_imgui.VERSION} is fetched into {fetch_imgui.DEFAULT_DEST} when the program is linked "
+            "(git and network access needed)")
 
 
 def av1_note(tools) -> str:

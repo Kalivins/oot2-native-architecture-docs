@@ -61,6 +61,7 @@
 #include "oot2/program.h"
 #include "oot2/settings.h"
 #include "oot2/texheap.h"
+#include "oot2/ui.h"
 #include "oot2/vk_required.h"
 #include "plat.h"
 
@@ -265,6 +266,11 @@ int main(int argc, char **argv) {
 
     rt_log("oot2: main() is at %p (a host pc in a log line is read against this and the program's symbols)", (void *)&main);
     log_settings();
+    {   // the menu is part of the program: its rows read the store just loaded (runtime/ui)
+        const UiBuild ui = ui_standin_build();
+        rt_log("oot2: menu: %d rows, %d presets, Dear ImGui %s", ui_menu_row_count(), ui_menu_preset_count(),
+               ui.imgui_version ? ui.imgui_version : "not built in");
+    }
     rt_log("oot2: game folder %s; %d modules, %d other files to check", g_game, rt_program.module_count,
            rt_program.file_count);
     ledger_set_folder(g_game);
