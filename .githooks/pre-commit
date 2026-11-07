@@ -3,7 +3,8 @@
 # Copyright (C) 2026 The oot2-native contributors
 #
 # Refuse a commit that stages game content, keys or generated game code.
-# Enable once per clone:  git config core.hooksPath .githooks
+# Install once per clone:  cp .githooks/pre-commit .git/hooks/pre-commit
+# (git config core.hooksPath .githooks also enables the maintainer's pre-push guard.)
 # Never bypass it with --no-verify. If it flags a file by mistake, fix the
 # check in a separate pull request and say why.
 

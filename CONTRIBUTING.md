@@ -15,8 +15,12 @@ issues, pull requests, comments and attachments alike:
 
 Evidence is text or hashes. To report what you saw, describe it in words, paste
 the relevant lines of a log, or give identifiers and hashes (a function address,
-a shader key, a SHA-256 of a file you own). If a maintainer needs more, they will
-ask a question; they will not ask for a file.
+a shader key, a SHA-256 of a file you own) in the text of an issue or a pull
+request. None of those goes into a committed file: the repository holds no
+address, offset, program key or module hash read out of the game, and a
+game-specific fix is written as a structural match over the lifted code (a table
+of sites would be a separate decision of the maintainer). If a maintainer needs
+more, they will ask a question; they will not ask for a file.
 
 Links to game files, keys or firmware get the issue or pull request closed and
 the content removed.
@@ -30,11 +34,15 @@ of functions named by address), and directories named for generated or extracted
 data (`build`, `out`, `generated`, `extracted`, `captures` and the others that
 `.gitignore` lists; a test keeps the two lists in step). It runs in two places:
 
-- before each local commit, once you enable the hook (do this after cloning):
+- before each local commit, once you install the hook (do this after cloning):
 
   ```sh
-  git config core.hooksPath .githooks
+  cp .githooks/pre-commit .git/hooks/pre-commit
   ```
+
+  Do not set `core.hooksPath` to `.githooks`: that folder also holds the
+  maintainer's `pre-push` guard, which refuses every commit made under another
+  identity and so every push of yours. It is not part of the contribution path.
 
 - in CI on every push and pull request, over every commit in the push or pull
   request (not only the last one) and over the whole tree.
@@ -83,8 +91,11 @@ against the fault it is meant to catch.
 
 By submitting a contribution you state that you wrote it, or that you have the
 right to submit it, and you license it under GPL-3.0-or-later, the licence of the
-project. Source files carry an SPDX header
-(`SPDX-License-Identifier: GPL-3.0-or-later`).
+project. A new source file starts with two lines (after a shebang, if any):
+`SPDX-License-Identifier: GPL-3.0-or-later` and
+`Copyright (C) 2026 The oot2-native contributors`, in the file's own comment
+syntax. A test (`tests/test_licence_statement.py`) checks that every file of the
+project states that licence and that the documents agree.
 
 ## Code from other projects
 
@@ -108,6 +119,18 @@ it, learn from it, write your own.
 - Commit messages are plain English sentences with a short subject line.
 - Code, comments, commit messages and documentation are in English.
 - Generated code is never edited by hand: change the generator.
+- Run the tests that cover what you changed (see above) and say which in the
+  description. The pull request template lists what to check.
+
+## Review
+
+<!-- WAITING-FOR-96: who reviews outside pull requests, how fast, and how they meet the maintainer's own work plan is
+     the author's open answer; replace this section with it before the repository is made public. -->
+The maintainer, RealZotto, reads every pull request and issue. How review is
+organised and how quickly to expect an answer is not settled yet; this section is
+written when it is. Changes to `tools/`, `tests/`, `.githooks/`, `.github/`, the
+licence files and the allowlists are always reviewed by a code owner
+(`.github/CODEOWNERS`).
 
 ## Reporting content that should not be here
 

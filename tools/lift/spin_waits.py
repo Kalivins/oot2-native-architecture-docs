@@ -25,7 +25,7 @@ A guest loop that polls memory until another thread changes it fills only its ow
 thread pinned there preempts it. Here it holds one of the program's virtual cores (runtime/core/kernel.c) and a host core,
 and when the poll takes and releases a lock on every pass, two pollers hand the lock's cache line between their cores
 so that the thread whose item it is rarely wins its exclusive store (nxnative 6d34984: Breath of the Wild's job queue,
-main+0xef62dc, CPU frames of 30-210 ms every 1-10 s). The generator sends the back-edges of such loops through
+CPU frames of 30-210 ms every 1-10 s). The generator sends the back-edges of such loops through
 rt_spin_gate (declared in runtime/include/oot2/cpu.h), which slows the poll down and hands the virtual core to a
 waiting thread once the loop has polled for a while.
 

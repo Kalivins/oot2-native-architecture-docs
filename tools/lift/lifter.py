@@ -361,7 +361,7 @@ class Lifter:
 
     def stg(self, w):
         """STG (post-index, signed offset, pre-index). Horizon runs without MTE, so storing an allocation tag
-        changes no memory; only the base writeback remains (1.4.3 sdk+0x640050)."""
+        changes no memory; only the base writeback remains."""
         mode, rn = bits(w, 10, 2), bits(w, 5, 5)
         if mode == 2:
             return Insn('op', '/* stg */')

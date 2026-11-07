@@ -99,7 +99,7 @@ typedef struct {
     nvn_texlayout L; uint8_t *mem; pool_t *pool; int64_t off;
     uint64_t serial;                     // Initialization serial: the back end uses it to find its texture in the host table (the game may copy the object by value, so object pointers cannot be stored)
 } tex_t;                                                                                     FITS(tex_t, NVNtexture);
-// TOTK: the game reserves 16 bytes for NVNtextureView on its stack (main+0x823398 SetDefaults at sp+0x30, its own
+// TOTK: the game reserves 16 bytes for NVNtextureView on its stack (SetDefaults at sp+0x30, its own
 // data at sp+0x40), so the view is packed into 16 bytes. swz = NVN view swizzle selectors. dsmode:
 // NVNtextureDepthStencilMode (nxnative nvn_obj.h:42 packs it the same way).
 typedef struct {

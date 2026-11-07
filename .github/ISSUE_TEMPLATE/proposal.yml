@@ -1,0 +1,34 @@
+name: Proposal
+description: A change or a feature you would like, before you write it.
+labels: [proposal]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Say what problem you want solved and why. Small, focused proposals get answered fastest. Read
+        docs/architecture.md in the repository first: many choices are already decided there, with
+        their reasons. **Do not attach or link game files, dumps, keys, firmware, shaders, textures, audio, generated
+        code, screenshots, screen recordings or GPU captures.**
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: checkboxes
+    id: no-game-material
+    attributes:
+      label: Confirmation
+      options:
+        - label: This issue contains no game material.
+          required: true

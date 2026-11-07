@@ -119,11 +119,11 @@ typedef struct {
 } NVNwindow;
 
 typedef struct {
-    char reserved[0x80]; /* TOTK v0 main+214c964 allocates 128 bytes. */
+    char reserved[0x80]; /* TOTK v0 allocates 128 bytes. */
 } NVNtexture;
 
 typedef struct {
-    char reserved[0x10];   /* TOTK NVN 55: 16 bytes (game stack layout at main+0x823398) */
+    char reserved[0x10];   /* TOTK NVN 55: 16 bytes (game stack layout) */
 } NVNtextureView;
 
 typedef struct {

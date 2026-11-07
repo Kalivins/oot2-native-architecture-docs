@@ -1,0 +1,70 @@
+name: Bug report
+description: Something in `oot2 prepare` or in the program you built does not work.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe what you see in words and paste log text. **Do not attach or link game files, dumps, keys, firmware,
+        shaders, textures, audio, generated code, screenshots, screen recordings or GPU captures**: issues that do are
+        closed and the content is removed. A function address, a shader key or the SHA-256 of a file you own is fine
+        in the text of the issue.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: "The commit you built (`git rev-parse HEAD`)."
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where it goes wrong
+      options:
+        - oot2 prepare (which step is named in the message)
+        - the program you built, at start-up
+        - the program you built, while running
+        - tools or tests
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran, in order, with their options.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: "The lines around the failure (the end of the `oot2 prepare` output, or the program's stderr). Text only."
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: card
+    attributes:
+      label: Graphics card and driver
+      description: "For example: GeForce RTX 3060 Ti, driver 617.14. Needed for anything the program draws."
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Windows version, CPU and RAM
+    validations:
+      required: true
+  - type: checkboxes
+    id: no-game-material
+    attributes:
+      label: Confirmation
+      options:
+        - label: This issue contains no game material (see above).
+          required: true

@@ -8,3 +8,6 @@
 /.gitattributes         @RealZotto
 /LICENSE                @RealZotto
 /THIRD_PARTY_NOTICES.md @RealZotto
+/licenses/              @RealZotto
+/README.md              @RealZotto
+/CONTRIBUTING.md        @RealZotto
