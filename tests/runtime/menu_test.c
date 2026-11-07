@@ -161,7 +161,10 @@ static void case_reload(void) {
     ui_menu_open(1);
     UiDraw d;
     frames(2, 1280, 1000, &d);
-    CHECK(d.rows > 0);
+    // the open menu draws its rows when the build has Dear ImGui; a build without it draws nothing and says so, and the
+    // row's value above is all this case can then check (the frame cases skip without the library, this one does not)
+    if (ui_standin_build().imgui_version) CHECK(d.rows > 0);
+    else CHECK(d.rows == 0);
 }
 
 static int64_t have_of(int id) {
