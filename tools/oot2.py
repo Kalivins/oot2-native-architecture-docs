@@ -14,6 +14,9 @@ with the same DIR starts at the first step that did not; --dump may then be left
 out. Running it again after an update of the tools rebuilds only what the update
 changed.
 
+--runtime-lib names a runtime library built before, which a release bundle ships; the link step then neither builds
+the runtime nor needs Dear ImGui, Volk or glslang.
+
 --check runs the check step alone (the dump, the disk, the CPU, the toolchain,
 the shader translator and Vulkan) and says which of the other steps would run and why. It records the
 dump's hash and what it found in DIR, so a later run does not hash the dump again.
@@ -47,6 +50,7 @@ Exit codes: 0 done, 1 failed (the message says why), 2 bad command line,
 from __future__ import annotations
 
 import argparse
+import contextlib
 import signal
 import sys
 from pathlib import Path
@@ -54,6 +58,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from prepare import all_steps  # noqa: E402
+from prepare import power  # noqa: E402
 from prepare import state as statefile  # noqa: E402
 from prepare.runner import Context, Reporter, run_steps  # noqa: E402
 
@@ -86,7 +91,9 @@ def prepare(args: argparse.Namespace) -> int:
     steps = all_steps()
     rep.say(f"oot2 prepare: {'first run' if ctx.fresh else 'resuming'} in {dest}; "
             f"steps: {', '.join(s.id for s in steps)}")
-    result = run_steps(steps, ctx, only={"check"} if args.check else None)
+    # The PC stays awake for the run (a first one takes an hour or more); the guard ends with it.
+    with power.keep_awake() if power.wanted() else contextlib.nullcontext():
+        result = run_steps(steps, ctx, only={"check"} if args.check else None)
     rep.say(f"oot2 prepare: {result}")
     return EXIT[result]
 
@@ -113,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--imgui", type=Path,
                    help="Dear ImGui folder made by tools/fetch_imgui.py, for the menu (default: the OOT2_IMGUI "
                         "variable, else fetched/imgui, which prepare fetches itself when it is not there)")
+    p.add_argument("--runtime-lib", type=Path,
+                   help="a runtime library built before (liboot2rt.a) to link instead of building one (default: the "
+                        "OOT2_RUNTIME_LIB variable, else the release bundle's, else the runtime is built from runtime/)")
     p.add_argument("--jobs", type=positive, help="compile jobs (default: the CPU count, capped by the free memory)")
     p.add_argument("--xlate", type=Path, help="shader translator (default: the OOT2_XLATE variable, else oot2-xlate on "
                                              "PATH)")
@@ -131,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--zbic-archive", type=Path,
                    help="source archive of the ZBIC decoder, instead of downloading it")
     args = ap.parse_args(argv)
+    if power.wanted():
+        power.install()   # children of this run are not throttled either
     # Ctrl+Break and a terminate request end the run the way Ctrl+C does: the finished steps stay recorded.
     for name in ("SIGBREAK", "SIGTERM"):
         if hasattr(signal, name):

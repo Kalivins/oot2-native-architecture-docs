@@ -60,7 +60,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import nup as nupfile
-from .nup import Entry, Nup, NupError
+from .nup import Entry, Nup, NupError, refuse_links
 from .runner import Context, PrepareError, Step, file_sha256, fingerprint
 
 FORMAT = 2                                  # changes when the outputs change shape: the step runs again
@@ -174,6 +174,8 @@ def extract(path: Path, dest: Path, rep, copy: bool = False) -> dict:
         form, why = romfs_form(romfs)
         if copy and form == IN_PLACE:
             form, why = COPY, "a copy was asked for"
+        for folder in (DUMP_EXEFS, ROMFS):
+            refuse_links(dest / folder, dest)
         written = write_exefs(nup, exefs, dest / DUMP_EXEFS)
         total = sum(e.size for e in romfs.values())
         if form == IN_PLACE:
@@ -276,6 +278,7 @@ def write_exefs(nup: Nup, tree: dict[str, Entry], out: Path) -> dict[str, int]:
         target = (out / name).resolve()
         if target.parent != root:
             raise NupError(f"refusing to write {name!r} outside {out}")
+        refuse_links(out / name, out.parent)
         tmp = target.with_name(target.name + ".part")
         try:
             with open(tmp, "wb") as f:

@@ -47,6 +47,12 @@ from pathlib import Path
 
 from .runner import Context, PrepareError, Step, file_sha256
 
+TOOLS = Path(__file__).resolve().parent.parent
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
+
+import bundle_env  # noqa: E402  (tools/bundle_env.py)
+
 GiB = 1 << 30
 # Architecture section 3. The outputs without shaders, with the RomFS copied, measured on the player's dump: 25.3 GiB,
 # 23.5 of it the image. The translate step keeps about 6 GiB (its pack and the split) and holds about 5.5 GiB more
@@ -193,12 +199,26 @@ def memory_report(total: int | None, free: int | None) -> tuple[str, list[str]]:
 
 
 def compiler(ctx: Context) -> str:
-    name = getattr(ctx.options, "cc", None) or os.environ.get("OOT2_CC") or "clang"
+    """The C compiler: --cc, else the OOT2_CC variable, else the release bundle's clang, else clang on PATH. The
+    bundle's comes before PATH, so that a player's own clang never decides what a bundle builds."""
+    name = getattr(ctx.options, "cc", None) or os.environ.get("OOT2_CC") or bundle_env.compiler() or "clang"
     found = shutil.which(name)
     if not found:
         raise PrepareError(f"no C compiler named {name!r} was found. Give one with --cc or the OOT2_CC variable; "
                            "the compile step needs it too.")
     return found
+
+
+def runtime_lib(ctx: Context) -> Path | None:
+    """The prebuilt runtime library the program is linked with instead of building one: --runtime-lib, else the
+    OOT2_RUNTIME_LIB variable, else the release bundle's (tools/bundle.py makes it with the same build_game.py, the
+    menu library and the shaders inside). None builds the runtime from runtime/ in the checkout. A named library that is
+    not there is a failure by name, not a silent build from source."""
+    named = getattr(ctx.options, "runtime_lib", None) or os.environ.get("OOT2_RUNTIME_LIB")
+    found = Path(named) if named else bundle_env.runtime_lib()
+    if found is not None and not Path(found).is_file():
+        raise PrepareError(f"the prebuilt runtime library {found} is not a file (--runtime-lib or OOT2_RUNTIME_LIB)")
+    return Path(found).resolve() if found is not None else None
 
 
 def build_tools(ctx: Context) -> str:
@@ -208,11 +228,16 @@ def build_tools(ctx: Context) -> str:
     # tools/ is on the path (tools/oot2.py, prepare/program.py)
     from build_game import BuildError, find_toolchain, vulkan_header_version
     try:
+        lib = runtime_lib(ctx)
         tools = find_toolchain(compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None),
                                dav1d_dir=getattr(ctx.options, "dav1d_dir", None),
-                               sdl3_dir=getattr(ctx.options, "sdl3_dir", None))
+                               sdl3_dir=getattr(ctx.options, "sdl3_dir", None), prebuilt=lib is not None)
     except BuildError as e:
         raise PrepareError(f"{e}.") from None
+    if lib is not None:
+        return (f"compiler {compiler(ctx)}, C++ driver {tools.cxx}, Ninja {tools.ninja}, archiver {tools.ar}, "
+                f"Vulkan headers {vulkan_header_version(tools.vulkan)} in {tools.vulkan} (the host probe's), the "
+                f"prebuilt runtime library {lib}, {av1_note(tools)}")
     return (f"C++ driver {tools.cxx}, Ninja {tools.ninja}, archiver {tools.ar}, Vulkan headers "
             f"{vulkan_header_version(tools.vulkan)} and Volk "
             f"in {tools.vulkan}, glslang {tools.glslang}, {av1_note(tools)}")
@@ -224,6 +249,8 @@ def imgui_note(ctx: Context) -> str:
     when the fetch is due and there is no git to make it, so that a missing piece stops the run before the extraction."""
     import build_game
     import fetch_imgui
+    if runtime_lib(ctx) is not None:
+        return "inside the prebuilt runtime library (nothing to fetch)"
     named = getattr(ctx.options, "imgui", None) or os.environ.get("OOT2_IMGUI")
     try:
         folder = build_game.find_imgui(named) if named else None
@@ -278,7 +305,8 @@ def lift_tools() -> str:
 def translator(ctx: Context) -> Path:
     """The shader translator the translate step runs: --xlate, else the OOT2_XLATE variable, else oot2-xlate on PATH,
     the way the compiler is found (tools/build_xlate.py builds it)."""
-    name = getattr(ctx.options, "xlate", None) or os.environ.get("OOT2_XLATE") or "oot2-xlate"
+    bundled = bundle_env.translator()
+    name = getattr(ctx.options, "xlate", None) or os.environ.get("OOT2_XLATE") or (str(bundled) if bundled else None)         or "oot2-xlate"
     given = Path(name)
     if given.is_file():
         return given.resolve()
@@ -345,7 +373,7 @@ def vulkan_include(ctx: Context) -> Path | None:
     """The Include folder of the Vulkan SDK (--vulkan-sdk, else VULKAN_SDK) with the Vulkan headers and Volk, found as
     the build finds it (tools/build_game.py, vulkan_include), or None: the probe then reports the CPU and the list."""
     from build_game import vulkan_include as find   # tools/ is on the path (tools/oot2.py, prepare/program.py)
-    return find(getattr(ctx.options, "vulkan_sdk", None))
+    return find(getattr(ctx.options, "vulkan_sdk", None), need_volk=runtime_lib(ctx) is None)
 
 
 def build_probe(cc: str, out: Path, include: Path | None, extra: tuple[str, ...] = ()) -> Path:

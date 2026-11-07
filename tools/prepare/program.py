@@ -43,6 +43,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import build_game  # noqa: E402  (tools/build_game.py)
+import bundle_env  # noqa: E402  (tools/bundle_env.py)
 import fetch_imgui  # noqa: E402  (tools/fetch_imgui.py)
 import fetch_sdl3  # noqa: E402  (tools/fetch_sdl3.py)
 import layout  # noqa: E402  (tools/layout.py)
@@ -89,6 +90,9 @@ def imgui_folder(ctx: Context) -> Path:
                            "name a fetched folder with --imgui)") from None
 
 
+runtime_lib = check.runtime_lib   # the prebuilt runtime library, or None (check.py finds it for both steps)
+
+
 def imgui_key() -> str:
     """The part of the link step's key that Dear ImGui gives: the pin's contents hash, so that a new pin links again."""
     return f"imgui={fetch_imgui.CONTENTS_SHA256}"
@@ -96,18 +100,24 @@ def imgui_key() -> str:
 
 def toolchain(ctx: Context, imgui: bool = False) -> build_game.Toolchain:
     """The build tools. With imgui the fetched Dear ImGui goes with them (the link step builds the runtime library, and
-    the lifted code needs none)."""
+    the lifted code needs none); with a prebuilt runtime library there is no Dear ImGui to fetch, no Volk and no glslang."""
+    prebuilt = runtime_lib(ctx) is not None
     try:
         return build_game.find_toolchain(check.compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None),
-                                         imgui=imgui_folder(ctx) if imgui else None,
+                                         imgui=imgui_folder(ctx) if imgui and not prebuilt else None,
                                          dav1d_dir=getattr(ctx.options, "dav1d_dir", None),
-                                         sdl3_dir=getattr(ctx.options, "sdl3_dir", None))
+                                         sdl3_dir=getattr(ctx.options, "sdl3_dir", None), prebuilt=prebuilt)
     except build_game.BuildError as e:
         raise PrepareError(str(e)) from None
 
 
 def vulkan_key(ctx: Context) -> list:
-    """The part of the link step's key that the Vulkan SDK gives (build_game.vulkan_inputs)."""
+    """The part of the link step's key that the Vulkan SDK gives (build_game.vulkan_inputs), or, with a prebuilt runtime
+    library, the library itself: its bytes are what the headers, Volk, glslang and Dear ImGui became."""
+    lib = runtime_lib(ctx)
+    if lib is not None:
+        return ["prebuilt-runtime:", lib, *build_game.dav1d_inputs(build_game.find_dav1d(
+            getattr(ctx.options, "dav1d_dir", None)))]
     include = build_game.vulkan_include(getattr(ctx.options, "vulkan_sdk", None))
     kit = build_game.find_dav1d(getattr(ctx.options, "dav1d_dir", None))
     return build_game.vulkan_inputs(include, build_game.find_glslang(include)) + build_game.dav1d_inputs(kit)
@@ -178,7 +188,7 @@ def build_for(ctx: Context, imgui: bool = False) -> build_game.Build:
     jobs = getattr(ctx.options, "jobs", None) or 0
     return build_game.Build(ctx.dest / BUILD, toolchain(ctx, imgui), gen=ctx.dest / GEN, exefs=ctx.dest / EXEFS,
                             exe=ctx.dest / build_game.EXE_NAME, runtime=build_game.RUNTIME, files=game_files(ctx),
-                            jobs=jobs)
+                            jobs=jobs, runtime_lib=runtime_lib(ctx))
 
 
 def ninja_progress(ctx: Context, tag: str, what: str):
@@ -310,9 +320,11 @@ class Link(Step):
     needs = ("compile",)
 
     def key(self, ctx: Context) -> str:
-        return fingerprint("link-1", TOOLS / "build_game.py", build_game.RUNTIME, compiler_id(ctx),
+        prebuilt = runtime_lib(ctx) is not None
+        return fingerprint("link-1", TOOLS / "build_game.py", build_game.RUNTIME / "include" if prebuilt else
+                           build_game.RUNTIME, compiler_id(ctx),
                            " ".join(build_game.RT_FLAGS + build_game.LINK_FLAGS), ctx.dest / EXEFS / "main.npdm",
-                           *romfs_key(ctx), *vulkan_key(ctx), *sdl3_key(ctx), imgui_key())
+                           *romfs_key(ctx), *vulkan_key(ctx), *sdl3_key(ctx), "prebuilt" if prebuilt else imgui_key())
 
     def current(self, ctx: Context, record: dict) -> bool:
         exe = ctx.dest / build_game.EXE_NAME
@@ -327,6 +339,8 @@ class Link(Step):
 
     def run(self, ctx: Context) -> dict:
         b = build_for(ctx, imgui=True)
+        if b.runtime_lib:
+            ctx.reporter.say(f"link: the prebuilt runtime library {b.runtime_lib} (menu library and shaders inside)")
         on_line, log, path = log_lines(ctx, "link", ninja_progress(ctx, "link", "files"))
         try:
             r = build_game.link_program(b, on_line)
@@ -340,7 +354,7 @@ class Link(Step):
         ctx.reporter.say(f"link: {b.exe.name} {mib(r['exe_bytes'])} (image {mib(r['image_bytes'])}) in "
                          f"{r['seconds']:.1f} s, peak {mib(r['peak_process'])}; {r['manifest']['verified']:,} "
                          f"objects verified, {r['manifest']['recompiled']} recompiled")
-        lib = b.lib.stat().st_size if b.lib.is_file() else 0
+        lib = b.lib.stat().st_size if b.lib.is_file() and not b.runtime_lib else 0
         return {"exe_bytes": r["exe_bytes"], "exe_mtime_ns": r["exe_mtime_ns"], "exe_sha256": file_sha256(b.exe),
                 "image_bytes": r["image_bytes"], "link_seconds": r["seconds"], "peak_process": r["peak_process"],
                 "bytes": r["exe_bytes"] + lib}

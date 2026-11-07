@@ -87,11 +87,61 @@ class Package:
         return KINDS.get(self.kind, f"kind {self.kind}")
 
 
+# Names Windows keeps for devices: a file called any of these, with or without an extension (CON.txt), is the device.
+# COM and LPT also take the superscript digits. A path with one would write to a device or fail in a way that names no
+# file, on the player's machine, from a container someone handed over.
+DEVICE_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} |
+                         {f"{base}{d}" for base in ("COM", "LPT") for d in "123456789" + chr(0xb9) + chr(0xb2) + chr(0xb3)})
+FORBIDDEN_CHARS = set("/" + chr(92) + ":" + chr(0) + '*?"<>|')
+
+
 def safe_name(name: str) -> str:
-    """A container is a file someone handed over: refuse a name that could leave the output folder."""
-    if not name or name in (".", "..") or any(c in name for c in "/\\:\0"):
+    """A container is a file someone handed over: refuse a name that could leave the output folder or that Windows
+    would not take as written. Refused: an empty name, "." and "..", the separators, a drive colon, the wildcards
+    * and ?, the characters " < > | that Windows file names cannot hold, control characters, a trailing space or dot
+    (Windows drops them, so two names become one), and a device name with or without an extension (CON, NUL, COM1,
+    LPT1 and the rest of DEVICE_NAMES)."""
+    if not name or name in (".", ".."):
         raise NupError(f"unsafe name in the container: {name!r}")
+    bad = sorted({c for c in name if c in FORBIDDEN_CHARS or ord(c) < 32})
+    if bad:
+        raise NupError(f"unsafe name in the container: {name!r} holds {', '.join(repr(c) for c in bad)}")
+    if name[-1] in " .":
+        raise NupError(f"unsafe name in the container: {name!r} ends with a space or a dot, which Windows removes")
+    if name.split(".", 1)[0].rstrip(" ").upper() in DEVICE_NAMES:
+        raise NupError(f"unsafe name in the container: {name!r} is the name of a Windows device")
     return name
+
+
+def link_in_path(path: Path, base: Path) -> Path | None:
+    """The first link or reparse point (symbolic link, junction, mount point) on the way from base down to path, or None.
+    base itself is not asked: the player may keep the whole folder on a junction they made. What is below it was made
+    by prepare, so a link there came from somewhere else and would carry a write out of the folder."""
+    base, path = Path(base), Path(path)
+    try:
+        parts = path.relative_to(base).parts
+    except ValueError:
+        return path
+    here = base
+    for part in parts:
+        here = here / part
+        try:
+            st = os.lstat(here)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return here
+        if os.path.islink(here) or getattr(st, "st_file_attributes", 0) & 0x400 or                 (hasattr(os.path, "isjunction") and os.path.isjunction(here)):
+            return here
+    return None
+
+
+def refuse_links(path: Path, base: Path) -> None:
+    """NupError naming the link when one lies between base and path (link_in_path)."""
+    found = link_in_path(path, base)
+    if found is not None:
+        raise NupError(f"{found} is a link or a reparse point on the way to {path}; prepare writes only into real "
+                       f"folders of its own output folder. Remove it, or choose another output folder.")
 
 
 class Nup:

@@ -197,6 +197,11 @@ class Pipelines(Step):
         if getattr(ctx.options, "skip_pipelines", False):
             rep.warning("pipelines: skipped, as --skip-pipelines asked. The game starts without prepared pipelines.")
             return {"skipped": "--skip-pipelines"}
+        if check.runtime_lib(ctx) is not None:
+            rep.warning("pipelines: skipped. A release bundle holds the runtime library already built and not the "
+                        "runtime's sources the pipeline builder is linked with, so it cannot build them yet. The game "
+                        "starts without prepared pipelines.")
+            return {"skipped": "release bundle"}
         device, why = usable_device(ctx.state.get("host") or {})
         if device is None:
             if check.REQUIRE_VULKAN_ITEMS:

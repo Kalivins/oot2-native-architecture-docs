@@ -36,6 +36,7 @@ import os
 import struct
 from pathlib import Path
 
+import bundle_env
 import layout
 from lift.nso import NsoError, lz4_block
 
@@ -206,7 +207,7 @@ class Modules(Step):
     def decoder(self, ctx: Context):
         if self.decoder_factory is not None:
             return self.decoder_factory(ctx)
-        archive = getattr(ctx.options, "zbic_archive", None)
+        archive = getattr(ctx.options, "zbic_archive", None) or bundle_env.zbic_archive()
         return zbic.prepare_decoder(compiler(ctx), ctx.dest / TEMP / "zbic", ctx.reporter,
                                     archive=Path(archive) if archive else None)
 

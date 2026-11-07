@@ -1,0 +1,345 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 The oot2-native contributors
+"""Tests for the release bundle's builder (tools/bundle.py) and for how prepare finds a bundle's tools
+(tools/bundle_env.py).
+
+Every input here is synthetic: archives and files written by the test, never a download, never a game file. The real
+notices table is read, so a component added to the builder without its row fails here.
+
+Run: python -m unittest discover -s tests -p test_bundle.py -v
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+
+import bundle  # noqa: E402
+import bundle_env  # noqa: E402
+
+NOTICES_TEXT = (ROOT / bundle.NOTICES).read_text(encoding="utf-8")
+
+
+def row(component: str) -> str:
+    return f"| `bundle/{component}/`: something | a | b | c | d | No |"
+
+
+ALL_ROWS = "| File | Source |\n| --- | --- |\n" + "\n".join(row(c) for c in bundle.COMPONENTS) + "\n"
+
+
+def tmp() -> Path:
+    d = Path(tempfile.mkdtemp(prefix="oot2-bundle-test-"))
+    return d
+
+
+def small_stage(root: Path) -> bundle.Stage:
+    """A stage with one file for two components and a licence text for each, the least a bundle can be."""
+    st = bundle.Stage(root)
+    st.put("ninja", "bin/ninja.exe", b"MZ" + b"\0" * 64)
+    st.put("ninja", "licenses/ninja/LICENSE", b"Apache-2.0 text\n")
+    st.put("oot2", "tools/oot2.py", b"print('hi')\n")
+    return st
+
+
+class NoticesTable(unittest.TestCase):
+    def test_every_component_has_a_row_in_the_real_table(self):
+        have = bundle.notice_components(NOTICES_TEXT)
+        self.assertEqual(sorted(set(bundle.COMPONENTS) - have), [])
+
+    def test_a_row_is_read_from_the_first_cell_only(self):
+        text = "| `x` | mentions `bundle/ninja/` in the second cell |\n"
+        self.assertEqual(bundle.notice_components(text), set())
+        self.assertEqual(bundle.notice_components(row("ninja") + "\n"), {"ninja"})
+
+
+class RefusesAFileWithoutARow(unittest.TestCase):
+    """The counter-run: a bundle whose file has no notices row is refused, the file named."""
+
+    def setUp(self):
+        self.dir = tmp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def test_complete_table_passes(self):
+        rows = small_stage(self.dir).listing()
+        bundle.check_notices(rows, ALL_ROWS)
+
+    def test_one_row_removed_is_refused_and_names_the_file(self):
+        rows = small_stage(self.dir).listing()
+        without = "\n".join(l for l in ALL_ROWS.splitlines() if "bundle/ninja/" not in l) + "\n"
+        with self.assertRaises(bundle.BundleError) as cm:
+            bundle.check_notices(rows, without)
+        self.assertIn("bin/ninja.exe", str(cm.exception))
+        self.assertIn("bundle/ninja/", str(cm.exception))
+
+    def test_the_real_table_with_one_row_removed_is_refused(self):
+        rows = small_stage(self.dir).listing()
+        cut = "\n".join(l for l in NOTICES_TEXT.splitlines()
+                        if not (l.startswith("|") and "`bundle/ninja/`" in l.split("|")[1])) + "\n"
+        self.assertNotIn("| `bundle/ninja/`", cut)
+        with self.assertRaises(bundle.BundleError):
+            bundle.check_notices(rows, cut)
+        bundle.check_notices(rows, NOTICES_TEXT)
+
+    def test_a_component_without_a_licence_text_is_refused(self):
+        st = bundle.Stage(self.dir)
+        st.put("ninja", "bin/ninja.exe", b"MZ")
+        with self.assertRaises(bundle.BundleError) as cm:
+            bundle.check_notices(st.listing(), ALL_ROWS)
+        self.assertIn("ninja", str(cm.exception))
+
+    def test_a_file_no_component_put_there_is_refused(self):
+        st = small_stage(self.dir)
+        (self.dir / "stray.bin.txt").write_text("x")
+        with self.assertRaises(bundle.BundleError) as cm:
+            st.listing()
+        self.assertIn("stray.bin.txt", str(cm.exception))
+
+    def test_a_component_nobody_declared_is_refused(self):
+        with self.assertRaises(bundle.BundleError):
+            bundle.Stage(self.dir).put("made-up", "x.txt", b"x")
+
+    def test_a_path_cannot_leave_the_bundle_or_repeat(self):
+        st = bundle.Stage(self.dir)
+        st.put("oot2", "a.txt", b"1")
+        with self.assertRaises(bundle.BundleError):
+            st.put("oot2", "a.txt", b"2")
+        with self.assertRaises(bundle.BundleError):
+            st.put("oot2", "../out.txt", b"2")
+
+
+class ContentRules(unittest.TestCase):
+    """The rules of check_content that name the game apply to every file of the bundle."""
+
+    def setUp(self):
+        self.dir = tmp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def write(self, rel: str, data: bytes) -> Path:
+        path = self.dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def test_an_executable_and_a_text_file_pass(self):
+        self.assertEqual(bundle.guard_file("bin/tool.exe", self.write("bin/tool.exe", b"MZ\x90\0" + b"\1" * 5000)), [])
+        self.assertEqual(bundle.guard_file("a.py", self.write("a.py", b"print(1)\n")), [])
+
+    def test_a_game_container_signature_is_refused(self):
+        name = "NSO" + "0"
+        found = bundle.guard_file("x.dat", self.write("x.dat", name.encode() + b"\0" * 64))
+        self.assertTrue(any("NSO" in f for f in found), found)
+
+    def test_a_module_name_a_key_suffix_and_a_game_folder_are_refused(self):
+        self.assertTrue(bundle.guard_file("llvm/main", self.write("llvm/main", b"x")))
+        self.assertTrue(bundle.guard_file("x.nca", self.write("x.nca", b"x")))
+        self.assertTrue(bundle.guard_file("romfs/a.txt", self.write("romfs/a.txt", b"x")))
+
+    def test_the_generated_code_marker_is_refused_anywhere_in_a_big_file(self):
+        marker = bundle.MARKER
+        data = b"\0" * (9 << 20) + marker + b"\0" * 10
+        found = bundle.guard_file("big.dll", self.write("big.dll", data))
+        self.assertTrue(any("generated" in f for f in found), found)
+
+    def test_the_marker_split_across_two_reads_is_found(self):
+        marker = bundle.MARKER
+        cut = 8 << 20
+        data = b"\0" * (cut - 5) + marker + b"\0" * 10
+        self.assertTrue(bundle.guard_file("split.dll", self.write("split.dll", data)))
+
+    def test_a_key_sized_value_is_refused_except_in_the_kit_record_named_for_it(self):
+        text = ('{"recipe": "' + "ab" * 32 + '"}').encode()
+        self.assertTrue(bundle.guard_file("notes.json", self.write("notes.json", text)))
+        rel = "runtime/sdl3/fetch_sdl3.json"
+        self.assertEqual(bundle.guard_file(rel, self.write(rel, text)), [])
+        key = ("-----BEGIN " + "RSA PRIVATE KEY-----" + chr(10) + "abc" + chr(10)).encode()
+        self.assertTrue(bundle.guard_file(rel, self.write(rel, key)), "a private key is refused even there")
+
+    def test_a_private_key_in_a_text_file_is_refused(self):
+        key = ("-----BEGIN " + "RSA PRIVATE KEY-----\nabc\n").encode()
+        self.assertTrue(bundle.guard_file("k.txt", self.write("k.txt", key)))
+
+    def test_an_archive_passes_only_where_the_bundle_carries_one(self):
+        zipped = b"PK\x03\x04" + b"\0" * 64
+        self.assertEqual(bundle.guard_file("python/python314.zip", self.write("python/python314.zip", zipped)), [])
+        self.assertTrue(bundle.guard_file("data/other.zip", self.write("data/other.zip", zipped)))
+
+    def test_guard_names_the_file_when_the_bundle_is_refused(self):
+        self.write("a.nca", b"x")
+        with self.assertRaises(bundle.BundleError) as cm:
+            bundle.guard(self.dir, [{"path": "a.nca"}])
+        self.assertIn("a.nca", str(cm.exception))
+
+
+class FinishAndZip(unittest.TestCase):
+    def setUp(self):
+        self.dir = tmp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def test_finish_writes_the_manifest_and_the_contents_list(self):
+        st = small_stage(self.dir / "b")
+        rows = bundle.finish(st, "v", "abc123", ALL_ROWS, say=lambda s: None)
+        manifest = json.loads((self.dir / "b" / "bundle.json").read_text(encoding="utf-8"))
+        self.assertEqual([r["path"] for r in manifest["files"]], [r["path"] for r in rows])
+        self.assertEqual(manifest["source_commit"], "abc123")
+        self.assertEqual(manifest["total_bytes"], sum(r["bytes"] for r in rows))
+        self.assertIn("bin/ninja.exe", [r["path"] for r in rows])
+        tsv = (self.dir / "b" / "CONTENTS.tsv").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(tsv[0], "path\tbytes\tsha256\tcomponent\tnotices_row")
+        self.assertIn("bin/ninja.exe", "\n".join(tsv))
+        self.assertIn("\tninja\tbundle/ninja/", "\n".join(tsv))
+        self.assertTrue(all(len(r["sha256"]) == 64 for r in rows))
+
+    def test_finish_refuses_before_it_writes_anything_when_a_row_is_missing(self):
+        st = small_stage(self.dir / "b")
+        with self.assertRaises(bundle.BundleError):
+            bundle.finish(st, "v", "abc", "| File |\n", say=lambda s: None)
+        self.assertFalse((self.dir / "b" / "bundle.json").exists())
+
+    def test_finish_refuses_a_game_file_even_with_every_row(self):
+        st = small_stage(self.dir / "b")
+        st.put("oot2", "tools/romfs/x.txt", b"x")
+        with self.assertRaises(bundle.BundleError) as cm:
+            bundle.finish(st, "v", "abc", ALL_ROWS, say=lambda s: None)
+        self.assertIn("romfs", str(cm.exception))
+
+    def test_the_zip_is_deterministic(self):
+        st = small_stage(self.dir / "b")
+        bundle.finish(st, "v", "abc", ALL_ROWS, say=lambda s: None)
+        a, b = self.dir / "a.zip", self.dir / "b.zip"
+        bundle.write_zip(self.dir / "b", a)
+        os.utime(self.dir / "b" / "tools" / "oot2.py", (1, 1))
+        bundle.write_zip(self.dir / "b", b)
+        self.assertEqual(bundle.sha256_file(a), bundle.sha256_file(b))
+        with zipfile.ZipFile(a) as zf:
+            names = zf.namelist()
+            self.assertEqual(names, sorted(names))
+            self.assertTrue(all(n.startswith("b/") for n in names))
+            self.assertEqual({i.date_time for i in zf.infolist()}, {bundle.ZIP_DATE})
+
+    def test_summary_counts_by_component(self):
+        rows = small_stage(self.dir / "b").listing()
+        lines = bundle.summary(rows)
+        self.assertTrue(any(l.strip().startswith("ninja") for l in lines))
+        self.assertIn("total", lines[-1])
+
+
+class FetchChecksTheHash(unittest.TestCase):
+    def setUp(self):
+        self.dir = tmp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def test_a_file_that_matches_is_used(self):
+        data = b"payload"
+        pin = bundle.Pin("x.bin", "http://invalid.invalid/x", hashlib.sha256(data).hexdigest())
+        (self.dir / "x.bin").write_bytes(data)
+        self.assertEqual(bundle.fetch(pin, self.dir, say=lambda s: None), self.dir / "x.bin")
+
+    def test_a_file_that_does_not_match_is_deleted_and_refused(self):
+        pin = bundle.Pin("x.bin", "http://invalid.invalid/x", "0" * 64)
+        (self.dir / "x.bin").write_bytes(b"payload")
+        with self.assertRaises(bundle.BundleError) as cm:
+            bundle.fetch(pin, self.dir, say=lambda s: None)
+        self.assertIn("deleted", str(cm.exception))
+        self.assertFalse((self.dir / "x.bin").exists())
+
+    def test_a_download_that_fails_leaves_no_part_file(self):
+        pin = bundle.Pin("y.bin", "http://invalid.invalid/y", "0" * 64)
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("no network")):
+            with self.assertRaises(bundle.BundleError):
+                bundle.fetch(pin, self.dir, say=lambda s: None)
+        self.assertEqual(list(self.dir.iterdir()), [])
+
+    def test_every_pin_is_a_sha256_and_a_https_address(self):
+        for pin in bundle.PINS:
+            self.assertRegex(pin.sha256, r"^[0-9a-f]{64}$")
+            self.assertTrue(pin.url.startswith("https://"), pin.url)
+        self.assertRegex(bundle.TCLTK_MSI_SHA256, r"^[0-9a-f]{64}$")
+
+
+class LlvmSubset(unittest.TestCase):
+    def test_the_wanted_files(self):
+        wanted = bundle.llvm_wanted
+        self.assertTrue(wanted("bin/clang.exe"))
+        self.assertTrue(wanted("include/c++/v1/vector"))
+        self.assertTrue(wanted("x86_64-w64-mingw32/lib/libc++.a"))
+        self.assertTrue(wanted("lib/clang/22/include/stddef.h"))
+        self.assertTrue(wanted("lib/clang/22/lib/windows/libclang_rt.builtins-x86_64.a"))
+        self.assertFalse(wanted("bin/clangd.exe"))
+        self.assertFalse(wanted("bin/liblldb.dll"))
+        self.assertFalse(wanted("aarch64-w64-mingw32/lib/libc++.a"))
+        self.assertFalse(wanted("include/ddk/ntddk.h"))
+        self.assertFalse(wanted("include/mshtml.idl"))
+        self.assertFalse(wanted("python/bin/python.exe"))
+
+    def test_an_archive_missing_a_file_of_the_list_is_refused_by_name(self):
+        d = tmp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        archive = d / "llvm.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("llvm-mingw-x/LICENSE.TXT", "text")
+            zf.writestr("llvm-mingw-x/bin/clang.exe", "MZ")
+        with self.assertRaises(bundle.BundleError) as cm:
+            bundle.stage_llvm(bundle.Stage(d / "s"), archive)
+        self.assertIn("bin/ld.lld.exe", str(cm.exception))
+
+    def test_the_subset_keeps_what_the_link_needs(self):
+        for name in ("bin/clang++.exe", "bin/ld.lld.exe", "bin/llvm-ar.exe", "bin/libLLVM-22.dll", "bin/libc++.dll",
+                     "bin/libunwind.dll", "bin/x86_64-w64-windows-gnu.cfg"):
+            self.assertIn(name, bundle.LLVM_FILES)
+
+
+class BundleEnv(unittest.TestCase):
+    def setUp(self):
+        self.dir = tmp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        (self.dir / "bundle.json").write_text("{}", encoding="utf-8")
+        for rel in (bundle_env.CLANG, bundle_env.NINJA, bundle_env.XLATE, bundle_env.RUNTIME_LIB):
+            path = self.dir / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x")
+        patcher = mock.patch.dict(os.environ, {"OOT2_BUNDLE_ROOT": str(self.dir)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_bundle_is_found_by_its_manifest(self):
+        root = self.dir.resolve()
+        self.assertEqual(bundle_env.root(), root)
+        self.assertEqual(Path(bundle_env.compiler()), root / bundle_env.CLANG)
+        self.assertEqual(bundle_env.runtime_lib(), root / bundle_env.RUNTIME_LIB)
+        self.assertIsNone(bundle_env.zbic_archive())
+
+    def test_without_a_manifest_there_is_no_bundle(self):
+        (self.dir / "bundle.json").unlink()
+        self.assertIsNone(bundle_env.root())
+        self.assertIsNone(bundle_env.compiler())
+        self.assertEqual(bundle_env.environment({"PATH": "a"}), {"PATH": "a"})
+
+    def test_the_environment_puts_the_bundle_first_and_drops_other_toolchains(self):
+        (self.dir / "python").mkdir()
+        env = bundle_env.environment({"PATH": os.pathsep.join(["other"]), "VULKAN_SDK": "x", "OOT2_CC": "y",
+                                      "KEEP": "1", "PYTHONPATH": "z"})
+        folders = env["PATH"].split(os.pathsep)
+        self.assertEqual(folders[0], str(self.dir.resolve() / bundle_env.LLVM_BIN))
+        self.assertEqual(folders[-1], "other")
+        for gone in ("VULKAN_SDK", "OOT2_CC", "PYTHONPATH"):
+            self.assertNotIn(gone, env)
+        self.assertEqual(env["KEEP"], "1")
+
+    def test_a_bundled_translator_and_library_are_found(self):
+        self.assertEqual(bundle_env.translator(), self.dir.resolve() / bundle_env.XLATE)
+        self.assertEqual(bundle_env.ninja(), str(self.dir.resolve() / bundle_env.NINJA))
+
+
+if __name__ == "__main__":
+    unittest.main()

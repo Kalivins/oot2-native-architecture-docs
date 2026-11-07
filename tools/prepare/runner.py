@@ -204,6 +204,7 @@ def run_steps(steps: list[Step], ctx: Context, only: Iterable[str] | None = None
         return "ok"
     except PrepareError as e:
         rep.error(f"{e}" if current is None else f"step {current}: {e}")
+        name_failure(ctx, current)
         return "failed"
     except KeyboardInterrupt:
         rep.say(f"cancelled during step {current}; the steps finished before it are kept")
@@ -211,7 +212,19 @@ def run_steps(steps: list[Step], ctx: Context, only: Iterable[str] | None = None
     except Exception as e:
         rep.error(f"internal error in step {current}: {type(e).__name__}: {e}")
         traceback.print_exc(file=rep.err)
+        name_failure(ctx, current)
         return "failed"
+
+
+def name_failure(ctx: Context, step_id: str | None) -> None:
+    """After a failure, say which step it was and where to read why: the lines above that start with the step's id,
+    which the run printed as it went, and the step's own log under temp/logs when it keeps one."""
+    if step_id is None:
+        return
+    logs = ctx.dest / "temp" / "logs"
+    ctx.reporter.say(f"the step that failed is {step_id}. Read the lines above that start with \"{step_id}:\""
+                       + (f" and the logs in {logs}" if logs.is_dir() else "") +
+                       "; running oot2 prepare again resumes at this step.")
 
 
 def now_utc() -> str:

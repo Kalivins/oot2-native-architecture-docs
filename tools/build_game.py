@@ -111,6 +111,7 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
+import bundle_env  # noqa: E402
 import fetch_imgui  # noqa: E402
 import fetch_sdl3  # noqa: E402
 import layout  # noqa: E402
@@ -199,24 +200,26 @@ def find_imgui(folder: str | os.PathLike | None = None) -> Path | None:
     return path
 
 
-def vulkan_include(sdk: str | os.PathLike | None = None) -> Path | None:
-    """The Include folder of the Vulkan SDK sdk (else the VULKAN_SDK variable) when it holds the Vulkan headers
-    (vulkan/vulkan_core.h) and Volk (Volk/volk.c and volk.h), else None. Windows SDKs name it Include, others include."""
-    sdk = sdk or os.environ.get("VULKAN_SDK")
+def vulkan_include(sdk: str | os.PathLike | None = None, need_volk: bool = True) -> Path | None:
+    """The Include folder of the Vulkan SDK sdk (else the release bundle's, else the VULKAN_SDK variable) when it holds
+    the Vulkan headers (vulkan/vulkan_core.h) and, with need_volk, Volk (Volk/volk.c and volk.h), else None. Windows SDKs
+    name it Include, others include. A bundle holds the headers only (the host probe reads them, and the runtime
+    library it ships is built already), so a build that links a prebuilt library asks for no Volk."""
+    sdk = sdk or bundle_env.vulkan_sdk() or os.environ.get("VULKAN_SDK")
     if not sdk:
         return None
     for name in ("Include", "include"):
         inc = Path(sdk) / name
-        if (inc / "vulkan" / "vulkan_core.h").is_file() and all((inc / "Volk" / f).is_file() for f in VOLK_FILES):
+        if (inc / "vulkan" / "vulkan_core.h").is_file() and                 (not need_volk or all((inc / "Volk" / f).is_file() for f in VOLK_FILES)):
             return inc.resolve()
     return None
 
 
 def find_dav1d(kit: str | os.PathLike | None = None) -> Path | None:
-    """The dav1d kit (else the DAV1D_DIR variable) when it holds the headers and the library tools/fetch_dav1d.py
+    """The dav1d kit (else the release bundle's, else the DAV1D_DIR variable) when it holds the headers and the library tools/fetch_dav1d.py
     lays out, else None. Without a kit the runtime builds with no AV1 decoder (runtime/video): its movie decoder then
     refuses to open, and the game stops at the first movie by name."""
-    kit = kit or os.environ.get("DAV1D_DIR")
+    kit = kit or bundle_env.dav1d_kit() or os.environ.get("DAV1D_DIR")
     if not kit:
         return None
     root = Path(kit)
@@ -234,10 +237,10 @@ def dav1d_inputs(kit: Path | None) -> list:
 
 
 def find_sdl3(kit: str | os.PathLike | None = None) -> Path | None:
-    """The SDL3 kit: kit, else the SDL3_DIR variable; None when neither is set, which is a build without a window. A kit
+    """The SDL3 kit: kit, else the release bundle's, else the SDL3_DIR variable; None when none is set, which is a build without a window. A kit
     that was named must be exactly what tools/fetch_sdl3.py lays out (fetch_sdl3.problems); BuildError says how it is
     not, since a wrong SDL linked silently would put unchecked code in the program."""
-    named = kit or os.environ.get(fetch_sdl3.DEFAULT_ENV)
+    named = kit or bundle_env.sdl3_kit() or os.environ.get(fetch_sdl3.DEFAULT_ENV)
     if not named:
         return None
     root = Path(named).resolve()
@@ -303,14 +306,16 @@ def find_cxx(cc_path: str, cxx: str | None = None) -> str | None:
 def find_toolchain(cc: str | None = None, ninja: str | None = None, ar: str | None = None,
                    vulkan_sdk: str | os.PathLike | None = None, cxx: str | None = None,
                    imgui: Path | None = None, dav1d_dir: str | os.PathLike | None = None,
-                   sdl3_dir: str | os.PathLike | None = None) -> Toolchain:
-    """The C compiler (cc, else OOT2_CC, else clang), its C++ driver (find_cxx), Ninja (ninja, else OOT2_NINJA, else
-    ninja on PATH), the archiver (ar, else llvm-ar beside the compiler, else llvm-ar or ar on PATH), the Vulkan headers
-    and Volk (the Vulkan SDK vulkan_sdk, else VULKAN_SDK) and glslang (find_glslang). imgui is a folder find_imgui
-    returned, or None for a build without Dear ImGui. The dav1d kit (dav1d_dir, else DAV1D_DIR) is optional
-    (find_dav1d), and so is the SDL3 kit (sdl3_dir, else SDL3_DIR: find_sdl3, which refuses a folder that is not the
-    layout). BuildError names what is missing."""
-    name = cc or os.environ.get("OOT2_CC") or "clang"
+                   sdl3_dir: str | os.PathLike | None = None, prebuilt: bool = False) -> Toolchain:
+    """The C compiler (cc, else OOT2_CC, else the release bundle's, else clang), its C++ driver (find_cxx), Ninja
+    (ninja, else OOT2_NINJA, else the bundle's, else ninja on PATH), the archiver (ar, else llvm-ar beside the compiler,
+    else llvm-ar or ar on PATH), the Vulkan headers and Volk (the Vulkan SDK vulkan_sdk, else the bundle's, else
+    VULKAN_SDK) and glslang (find_glslang). imgui is a folder find_imgui returned, or None for a build without Dear
+    ImGui. The dav1d kit (dav1d_dir, else the bundle's, else DAV1D_DIR) is optional (find_dav1d), and so is the SDL3 kit
+    (sdl3_dir, else SDL3_DIR: find_sdl3, which refuses a folder that is not the layout). With prebuilt (the program
+    links a runtime library made before) the runtime is not compiled here, so Volk and glslang are not needed and only
+    the Vulkan headers are looked for, for the host probe. BuildError names what is missing."""
+    name = cc or os.environ.get("OOT2_CC") or bundle_env.compiler() or "clang"
     cc_path = shutil.which(name)
     if not cc_path:
         raise BuildError(f"no C compiler named {name!r} was found (give one with --cc or the OOT2_CC variable)")
@@ -318,7 +323,7 @@ def find_toolchain(cc: str | None = None, ninja: str | None = None, ar: str | No
     if not cxx_path:
         raise BuildError(f"no C++ compiler was found for {cc_path}: clang++ comes with clang and links the program "
                          "(give one with --cxx or the OOT2_CXX variable)")
-    name = ninja or os.environ.get("OOT2_NINJA") or "ninja"
+    name = ninja or os.environ.get("OOT2_NINJA") or bundle_env.ninja() or "ninja"
     ninja_path = shutil.which(name)
     if not ninja_path:
         raise BuildError(f"Ninja ({name!r}) was not found: install it (ninja-build.org) or name it with OOT2_NINJA")
@@ -335,15 +340,15 @@ def find_toolchain(cc: str | None = None, ninja: str | None = None, ar: str | No
     ar_path = ar_path or shutil.which("llvm-ar") or shutil.which("ar")
     if not ar_path:
         raise BuildError("no archiver (llvm-ar or ar) was found beside the compiler or on PATH")
-    include = vulkan_include(vulkan_sdk)
+    include = vulkan_include(vulkan_sdk, need_volk=not prebuilt)
     if include is None:
         where = vulkan_sdk or os.environ.get("VULKAN_SDK")
         raise BuildError(
             "the Vulkan headers and Volk were not found" + (f" in {where}" if where else " (VULKAN_SDK is not set)") +
             ": the runtime's Vulkan back end compiles against them. Install the Vulkan SDK (vulkan.lunarg.com) and set "
             "VULKAN_SDK to it, or run tools/fetch_vulkan.py --dest DIR and set VULKAN_SDK to DIR")
-    glslang = find_glslang(include)
-    if not glslang:
+    glslang = None if prebuilt else find_glslang(include)
+    if not glslang and not prebuilt:
         raise BuildError("glslang was not found (OOT2_GLSLANG, the Vulkan SDK's Bin folder or PATH): it compiles the "
                          "runtime's own shaders (runtime/gpu/shaders)")
     return Toolchain(cc_path, ar_path, ninja_path, include, glslang, cxx_path, imgui, find_dav1d(dav1d_dir),
@@ -1234,7 +1239,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         tool = find_toolchain(args.cc, args.ninja, vulkan_sdk=args.vulkan_sdk, cxx=args.cxx,
-                              imgui=find_imgui(args.imgui), dav1d_dir=args.dav1d_dir, sdl3_dir=args.sdl3_dir)
+                              imgui=find_imgui(args.imgui), dav1d_dir=args.dav1d_dir, sdl3_dir=args.sdl3_dir,
+                              prebuilt=bool(args.runtime_lib))
         files = [GameFile(w, p.resolve(), True) for w, p in args.file]
         files += [GameFile(w, p.resolve(), False) for w, p in args.file_size]
         b = Build(args.out, tool, gen=args.gen.resolve() if args.gen else None,
