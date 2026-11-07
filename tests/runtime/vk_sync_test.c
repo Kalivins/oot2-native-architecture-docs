@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Ticket 37's synchronisation checks on the Vulkan back end, on a real device (runtime/gpu/vk_replay_report.c,
+// The synchronisation checks of the NVN2 queue and sync work, on the Vulkan back end, on a real device (runtime/gpu/vk_replay_report.c,
 // runtime/gpu/vk_capture.c), driven by tests/test_runtime_vk_sync.py: `vk_sync_test <case> [imports] [--pack PACK]
 // [--mutant NAME]`, one case per process. They need a Vulkan device and skip without one, unless OOT2_REQUIRE_GPU is set.
 //
