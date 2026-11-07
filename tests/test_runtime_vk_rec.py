@@ -30,7 +30,7 @@ import unittest
 from pathlib import Path
 
 from test_runtime_gpu import (EXIT_FATAL, ROOT, build_program, case_env, clang_or_skip, fatal_lines,  # sets the path of tools/
-                              vulkan_or_skip)
+                              skip_on_partial_device, vulkan_or_skip)
 
 import build_game  # noqa: E402
 
@@ -165,6 +165,7 @@ class DeviceTest(RecorderBase):
         super().setUpClass()
         done = subprocess.run([str(cls.exes["-O2"]), "dev_usable"], capture_output=True, text=True, timeout=120,
                               env=case_env())
+        skip_on_partial_device(done)
         cls.usable = done.returncode == 0 and "usable 1" in done.stdout
         if not cls.usable:
             why = f"no Vulkan device here that has every item the renderer requires ({done.stderr.strip()[-200:]})"

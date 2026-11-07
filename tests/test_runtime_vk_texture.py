@@ -22,7 +22,9 @@ On a device with every item of oot2/vk_required.h (the desktop; the device is th
   stops the run by name.
 
 Without clang or the Vulkan SDK the program tests skip, unless OOT2_REQUIRE_CLANG or OOT2_REQUIRE_VULKAN is set; without a
-usable device they skip, unless OOT2_REQUIRE_GPU is set.
+usable device they skip, unless OOT2_REQUIRE_GPU is set. A machine whose GPU lacks some item the renderer requires (the
+start stops with "no Vulkan device has every item") skips them too, with the missing items in the message; with
+OOT2_REQUIRE_VK_DEVICE (or OOT2_REQUIRE_GPU) set that stop fails the test by name instead (test_runtime_gpu.py).
 
 Run: python -m unittest discover -s tests -p test_runtime_vk_texture.py -v
 """
@@ -37,7 +39,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_runtime_gpu import EXIT_FATAL, ROOT, build_program, case_env, clang_or_skip, fatal_lines, vulkan_or_skip
+from test_runtime_gpu import (EXIT_FATAL, ROOT, build_program, case_env, clang_or_skip, fatal_lines,
+                              skip_on_partial_device, vulkan_or_skip)
 
 TEST_SOURCE = ROOT / "tests" / "runtime" / "vk_texture_test.c"
 LEVEL = "-O2"
@@ -65,6 +68,7 @@ def run(case: str, env: dict[str, str] | None = None, timeout: int = 900) -> sub
 class DeviceTest(unittest.TestCase):
     def device(self, case: str, env: dict[str, str] | None = None, timeout: int = 900) -> subprocess.CompletedProcess:
         done = run(case, {**VALIDATION, **(env or {})}, timeout)
+        skip_on_partial_device(done)
         if done.returncode == EXIT_NO_DEVICE:
             why = f"no Vulkan device here ({done.stdout.strip()})"
             if os.environ.get("OOT2_REQUIRE_GPU"):

@@ -33,7 +33,7 @@ import unittest
 from pathlib import Path
 
 from test_runtime_gpu import (EXIT_FATAL, ROOT, build_program, case_env, clang_or_skip, fatal_lines,  # sets the path of tools/
-                              vulkan_or_skip)
+                              skip_on_partial_device, vulkan_or_skip)
 
 import test_runtime_vk_pipeline as tp  # noqa: E402  (its synthetic pack and its device check)
 
@@ -154,6 +154,7 @@ class MissDeviceTest(MissBase):
     def setUpClass(cls) -> None:
         super().setUpClass()
         done = tp.run("usable")
+        skip_on_partial_device(done)
         if done.returncode == EXIT_NO_DEVICE:
             why = f"no Vulkan device here ({done.stdout.strip()})"
             if require_gpu():

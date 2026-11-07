@@ -20,6 +20,13 @@ Needs clang (OOT2_CC, else PATH) and a Vulkan SDK with the headers, Volk and gls
 lays one out). Without them the tests skip, unless OOT2_REQUIRE_CLANG or OOT2_REQUIRE_VULKAN is set, as continuous
 integration sets them.
 
+The device tests of the other test_runtime_vk*.py files and of test_runtime_bindless.py share one rule from here
+(skip_on_partial_device): a program that stops with "no Vulkan device has every item the renderer requires" (a machine
+whose only GPU lacks some items, such as a GTX 1060) skips the test, with the stop and the missing items in
+the message; with OOT2_REQUIRE_VK_DEVICE set (OOT2_REQUIRE_GPU does the same) it fails by name instead. Neither is set
+in continuous integration, whose runners have no GPU; a machine with a device that has every item runs the tests as
+before.
+
 Run: python -m unittest discover -s tests -v
 """
 
@@ -34,6 +41,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -109,6 +117,34 @@ def case_env(env: dict[str, str] | None = None) -> dict[str, str]:
 
 def fatal_lines(stderr: str) -> list[str]:
     return [line for line in stderr.splitlines() if line.startswith("FATAL")]
+
+
+# The stop of a start on a machine whose Vulkan devices each lack an item the renderer requires
+# (runtime/gpu/vk_device.c); the line goes on to name each device and what it lacks.
+NO_COMPLETE_DEVICE = "no Vulkan device has every item"
+
+
+def partial_device_stop(done: subprocess.CompletedProcess) -> str | None:
+    """The FATAL line of a finished program that stopped because no Vulkan device has every item the renderer requires,
+    or None for any other run (a clean exit, another stop, a stop that names something else)."""
+    if done.returncode != EXIT_FATAL:
+        return None
+    return next((line for line in fatal_lines(done.stderr or "") if NO_COMPLETE_DEVICE in line), None)
+
+
+def skip_on_partial_device(done: subprocess.CompletedProcess) -> None:
+    """Return when done is not that stop. When it is, skip the test, naming the stop and so the missing items; with
+    OOT2_REQUIRE_VK_DEVICE (or OOT2_REQUIRE_GPU, which asks for a usable device already) set, fail by name instead.
+    Continuous integration has no device at all and sets neither; a device that has every item never reaches the skip.
+    """
+    line = partial_device_stop(done)
+    if line is None:
+        return
+    why = f"no Vulkan device here has every item the renderer requires ({line})"
+    for name in ("OOT2_REQUIRE_VK_DEVICE", "OOT2_REQUIRE_GPU"):
+        if os.environ.get(name):
+            raise RuntimeError(f"{name} is set but {why}")
+    raise unittest.SkipTest(why)
 
 
 def compile_now(glslang: str, source: Path, out: Path) -> bytes:
@@ -413,6 +449,45 @@ class GpuTest(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in (Path(d) / "logs").iterdir()),
                              sorted([paths[0].name, paths[0].with_suffix(".bin").name, paths[1].name]))
             self.assertRegex(done.stdout, r"refused: cannot make the folder .*blocker/logs: ")
+
+
+class PartialDeviceSkipTest(unittest.TestCase):
+    """skip_on_partial_device over fake finished programs: no device and no program needed."""
+
+    STOP = ("FATAL: gfx: vulkan: no Vulkan device has every item the renderer requires: device 0 Test GPU (discrete) "
+            "lacks: mesh and task shaders, ray queries")
+
+    @staticmethod
+    def done(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(["fake"], returncode, stdout, stderr)
+
+    def env(self, **set_vars: str):
+        base = {k: v for k, v in os.environ.items() if k not in ("OOT2_REQUIRE_VK_DEVICE", "OOT2_REQUIRE_GPU")}
+        return mock.patch.dict(os.environ, {**base, **set_vars}, clear=True)
+
+    def test_the_stop_skips_and_names_the_missing_items(self) -> None:
+        with self.env(), self.assertRaises(unittest.SkipTest) as caught:
+            skip_on_partial_device(self.done(EXIT_FATAL, "", "[rt] gfx: the vulkan back end\n" + self.STOP + "\n"))
+        self.assertIn("lacks: mesh and task shaders, ray queries", str(caught.exception))
+
+    def test_the_stop_fails_by_name_when_a_device_is_required(self) -> None:
+        for name in ("OOT2_REQUIRE_VK_DEVICE", "OOT2_REQUIRE_GPU"):
+            with self.subTest(name=name), self.env(**{name: "1"}), self.assertRaises(RuntimeError) as caught:
+                skip_on_partial_device(self.done(EXIT_FATAL, "", self.STOP + "\n"))
+            self.assertIn(f"{name} is set", str(caught.exception))
+            self.assertIn("no Vulkan device has every item the renderer requires", str(caught.exception))
+
+    def test_a_run_without_the_stop_passes_through(self) -> None:
+        for env in ({}, {"OOT2_REQUIRE_VK_DEVICE": "1"}):
+            with self.subTest(env=env), self.env(**env):
+                skip_on_partial_device(self.done(0, "ok case\n", ""))
+                skip_on_partial_device(self.done(EXIT_FATAL, "", "FATAL: gfx: vulkan: there is no Vulkan loader\n"))
+                skip_on_partial_device(self.done(1, "", self.STOP + "\n"))   # not the exit of a stop
+                skip_on_partial_device(self.done(EXIT_FATAL, self.STOP + "\n", "[rt] no FATAL line here\n"))
+
+    def test_another_fatal_is_not_taken_for_the_stop(self) -> None:
+        self.assertIsNone(partial_device_stop(self.done(EXIT_FATAL, "", "FATAL: validation: 2 errors\n")))
+        self.assertEqual(partial_device_stop(self.done(EXIT_FATAL, "", self.STOP + "\n")), self.STOP)
 
 
 if __name__ == "__main__":

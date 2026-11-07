@@ -28,7 +28,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_runtime_gpu import EXIT_FATAL, ROOT, build_program, case_env, clang_or_skip, fatal_lines, vulkan_or_skip
+from test_runtime_gpu import (EXIT_FATAL, ROOT, build_program, case_env, clang_or_skip, fatal_lines,
+                              skip_on_partial_device, vulkan_or_skip)
 
 TEST_SOURCE = ROOT / "tests" / "runtime" / "vk_test.c"
 LEVEL = "-O2"
@@ -50,6 +51,7 @@ class VkDeviceTest(unittest.TestCase):
         cls.exe = build_program(cc, include, glslang, TEST_SOURCE, Path(cls.tmp.name), levels=(LEVEL,))[LEVEL]
         done = cls.run_case("devices")
         cls.devices = done
+        skip_on_partial_device(done)
         if done.returncode == EXIT_NO_DEVICE:
             why = f"no Vulkan device here ({done.stdout.strip()})"
             if require_gpu():

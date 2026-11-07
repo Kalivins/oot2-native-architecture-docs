@@ -37,7 +37,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_runtime_gpu import EXIT_FATAL, ROOT, build_program, case_env, clang_or_skip, fatal_lines, vulkan_or_skip
+from test_runtime_gpu import (EXIT_FATAL, ROOT, build_program, case_env, clang_or_skip, fatal_lines,
+                              skip_on_partial_device, vulkan_or_skip)
 
 sys.path.insert(0, str(ROOT / "tools"))
 import build_game  # noqa: E402
@@ -326,6 +327,7 @@ class DeviceTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         done = run("usable")
+        skip_on_partial_device(done)
         if done.returncode == EXIT_NO_DEVICE:
             why = f"no Vulkan device here ({done.stdout.strip()})"
             if require_gpu():

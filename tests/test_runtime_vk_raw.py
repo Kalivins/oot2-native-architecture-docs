@@ -36,7 +36,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_runtime_gpu import ROOT, build_program, case_env, clang_or_skip, fatal_lines, vulkan_or_skip
+from test_runtime_gpu import (ROOT, build_program, case_env, clang_or_skip, fatal_lines, skip_on_partial_device,
+                              vulkan_or_skip)
 from test_xlate_host import EXE as XLATE, SKIP_NO_EXE, ampere, bit, compute_job, EXIT
 from test_xlate_phi import B32, ldg, s2r, scheduled
 import pool  # noqa: E402  (tools/shaders, put on the path by test_xlate_host)
@@ -134,6 +135,7 @@ class VkRawTest(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix="oot2-vkraw-spv-", ignore_cleanup_errors=True)
         cls.spv = translate(Path(cls.tmp.name))
         done = run("usable")
+        skip_on_partial_device(done)
         if done.returncode == EXIT_NO_DEVICE:
             why = f"no Vulkan device here ({done.stdout.strip()})"
             if os.environ.get("OOT2_REQUIRE_GPU"):

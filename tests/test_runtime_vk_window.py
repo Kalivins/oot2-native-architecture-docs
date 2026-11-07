@@ -49,7 +49,7 @@ import test_runtime_nvn as nvn  # noqa: E402
 import build_game  # noqa: E402  (tools/ is on the path through test_runtime_nvn)
 import fetch_sdl3  # noqa: E402
 from test_build_game import toolchain_or_skip  # noqa: E402
-from test_runtime_gpu import NO_VULKAN, case_env  # noqa: E402
+from test_runtime_gpu import NO_VULKAN, case_env, skip_on_partial_device  # noqa: E402
 
 ROOT = nvn.ROOT
 RUNTIME = ROOT / "runtime"
@@ -130,6 +130,7 @@ class WindowTest(unittest.TestCase):
         if not WINDOWS:
             self.skipTest("opens a window on the desktop: set OOT2_WINDOW_TESTS=1")
         done = self.run_case(*args, **env)
+        skip_on_partial_device(done)
         if done.returncode == EXIT_NO_DEVICE or any(m in done.stdout + done.stderr for m in NO_VULKAN):
             if os.environ.get("OOT2_REQUIRE_GPU"):
                 self.fail(f"OOT2_REQUIRE_GPU is set but the case could not run:\n{done.stdout}{done.stderr}")
