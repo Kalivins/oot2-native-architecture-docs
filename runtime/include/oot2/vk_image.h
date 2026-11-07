@@ -56,6 +56,13 @@ void *vkb_view_make(const tex_t *t, const view_t *v, int type);
 // Likewise, for a texture the replay binds now (BindlessOps.view_demand): a texture the CPU writes gets its arena image,
 // whose memory is taken now; vkb_view_make makes none for it, so that registering thousands of textures takes no memory.
 void *vkb_view_demand(const tex_t *t, const view_t *v, int type);
+// A view of t for stores (a storage image of a program), of view type `type` at the view's base level, for the
+// submission `value`: its image (an arena image made current as vkb_image_demand_current makes it) used by `value`.
+// The caller destroys the view (vkDestroyImageView, as an attachment view is) once that submission is done: the use keeps
+// the image until then, no count does, so the completion thread can destroy it without this layer's lock, which a thread
+// holds while the backing map waits for the timeline, and the timeline waits for the completion thread. A texture whose
+// image cannot be stored to stops by name.
+VkImageView vkb_storage_view(const tex_t *t, const view_t *v, int type, uint64_t value);
 // The submission being recorded, `value`, reads the view (BindlessOps.view_use): an arena image is made current for it.
 void vkb_view_use(void *view, uint64_t value);
 // The image of a texture for a copy of a submission being recorded (value): vkb_image_get's, else the arena image of a

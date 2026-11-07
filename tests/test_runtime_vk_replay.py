@@ -16,7 +16,9 @@ largest point size and the base instance, NVN2 compute's the group counts and it
 bound handles, bank 24 the pushed root tables, the support buffer the viewport; a uniform range in host memory is copied
 at submit (the copy holds the bytes of that moment, and the next submission takes a copy of its own) while a mirror binds
 live; a storage buffer binds from its bank's words, rounded down to 16 bytes, and one the module writes is declared and
-listed; a texture's push constant slot holds its bindless slot and its sampler; draws, indexed and indirect draws, direct
+listed; a storage image binds the view the ops make of the texture its c[2] image handle names, in the general layout, and the
+stores into one placed in its storage are declared written (an arena image holds its own stores, and a module that only
+reads declares nothing); a texture's push constant slot holds its bindless slot and its sampler; draws, indexed and indirect draws, direct
 and indirect dispatches and clears become their packets (an indirect dispatch's counts are copied by the GPU into a bank
 of its own); a GPU write over a copied uniform range drops the copy, so that every later read of the range is live; copies,
 fills, updates and texture clears are one transfer command each behind a full barrier, with the channel's strides, their
@@ -29,7 +31,7 @@ conditional rendering reads a report not done yet as 0 (a timestamp) or as visib
 
 Each check of the ticket's new behaviour has a counter-run, a test-only switch of the replay that breaks the mechanism
 (vkr_no_flip: the origin's flip; vkr_no_snapshot: the uniform copy at submit; vkr_no_drop: the drop rule;
-vkr_no_declare: the declaration of a transfer's write; vkr_no_features: the states of the core features;
+vkr_no_declare: the declaration of a transfer's or a storage image's write; vkr_no_features: the states of the core features;
 vkr_no_pending: the reports not done at the condition; vkr_reverse_results: the op-stream order of completion).
 The check must then fail.
 
@@ -157,6 +159,21 @@ def check_storage(out: str) -> None:
     assert len(w) == 3 and all(x == "SB buf=0xb3 off=0x100 range=0x44" for x in w), w
     # declared once a frame: the later writes of the same range lie inside the first
     assert out.count("op wrote V+0x100 0x44 frame 1\n") == 1 and "op wrote V+0x100 0x44 frame 2\n" in out
+
+
+CS_IMG_KEY = "00000000000000c5.00000001"
+
+
+def check_storage_image(out: str) -> None:
+    """The storage-image case: ID 9 (an image placed in its storage) and ID 10 (an arena image) bound by frame 1's two
+    dispatches, ID 9 again, read only, by frame 2's. Each dispatch asks the ops for its view; the stores into the placed
+    image's storage are declared written (once, by the first dispatch) and nothing else is."""
+    ops = [line for line in out.splitlines() if line.startswith(("op storage_image ", "op wrote "))]
+    assert ops == ["op storage_image id 9 frame 1", "op wrote V+0x50000 0x4000 frame 1", "op storage_image id 10 frame 1",
+                   "op storage_image id 9 frame 2"], ops
+    for n, views in ((1, ["SI view=0x5d09 layout=1", "SI view=0x5d0a layout=1"]), (2, ["SI view=0x5d09 layout=1"])):
+        got = writes(frame(out, n), 25)
+        assert got == views, (n, got)
 
 
 def check_push_slot(out: str) -> None:
@@ -495,6 +512,29 @@ class ComputeTest(ReplayBase):
         self.assertEqual(writes(f, 4), ["SB buf=0xb3 off=0x300 range=0x20"] * 2)
         self.assertNotIn("op wrote", out)   # the module only reads it
 
+    def test_a_storage_image_binds_its_view_and_only_one_placed_in_its_storage_is_declared_written(self) -> None:
+        out = self.passing("storage_image")
+        check_storage_image(out)
+        self.assertIn("stats storage_images 3 writes 1", out)
+
+    def test_counter_run_without_declaring_the_image_writes(self) -> None:
+        out = self.passing("storage_image", "--mutant", "nodeclare")
+        with self.assertRaises(AssertionError):
+            check_storage_image(out)
+
+    def test_a_storage_image_that_cannot_be_bound_stops_by_name(self) -> None:
+        prefix = f"FATAL: gfx: vulkan: replay of submission 1, after 0 draws and dispatches: stage {CS_IMG_KEY}"
+        want = {
+            "unregistered": " stores to image ID 11, where nothing is registered",
+            "buffer": " stores to a buffer texture",
+            "set": " has a storage image at set 2",
+            "slot": " stores to image slot -1",
+            "no_ops": " binds a storage image, and these ops make no storage view",
+        }
+        for what, text in want.items():
+            with self.subTest(stop=what):
+                line = self.stopping("storage_stop", what)
+                self.assertTrue(line.startswith(prefix + text), line)
 
     def test_an_indirect_dispatch_has_its_counts_copied_by_the_gpu_into_a_bank_of_its_own(self) -> None:
         f = frame(self.passing("indirect"), 1)

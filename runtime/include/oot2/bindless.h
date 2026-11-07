@@ -135,6 +135,9 @@ void *bindless_acquire(uint64_t value, const dpool_ref *textures, const dpool_re
 // whose texture the host made no view of at registration gets it now (view_demand), and the view about to be read is
 // told to the host (view_use, with the value of the submission the copy was acquired for).
 uint32_t bindless_image_slot(uint32_t id, int type);
+// The texture and view registered at `id` in the texture pool of the copy being replayed (an image handle names a
+// texture pool ID, as nvnDeviceGetImageHandle makes it): copied into *t and *v; 0 for an ID nothing is registered at.
+int bindless_texture_entry(uint32_t id, tex_t *t, view_t *v);
 // The index into binding 1 for sampler ID `id`: `id`, after the check against the array.
 uint32_t bindless_sampler_slot(uint32_t id);
 

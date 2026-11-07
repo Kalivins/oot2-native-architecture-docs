@@ -602,6 +602,16 @@ void *bindless_acquire(uint64_t value, const dpool_ref *textures, const dpool_re
     return set;
 }
 
+int bindless_texture_entry(uint32_t id, tex_t *t, view_t *v) {
+    plat_mutex_lock(&g_mu);
+    Copy *c = g.cur;
+    Entry *e = c && c->tp && id < g.primary ? entry_at(c->tp, id, 0) : NULL;
+    int ok = e && e->used;
+    if (ok) *t = e->t, *v = e->v;
+    plat_mutex_unlock(&g_mu);
+    return ok;
+}
+
 uint32_t bindless_image_slot(uint32_t id, int type) {
     plat_mutex_lock(&g_mu);
     Copy *c = g.cur;

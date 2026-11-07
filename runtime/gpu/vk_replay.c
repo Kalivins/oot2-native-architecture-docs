@@ -628,6 +628,7 @@ static const ShaderBinds *binds_of(const nvn_stage *s, int kind) {
 typedef struct {
     VkWriteDescriptorSet w[VKP_SET1_MAX];
     VkDescriptorBufferInfo bi[VKP_SET1_MAX];
+    VkDescriptorImageInfo ii[VKP_SET1_MAX];
     uint32_t n;
     uint32_t push[VKP_PUSH_BYTES / 4];
 } Set1;
@@ -647,6 +648,15 @@ static void put_buffer(Set1 *s, uint32_t binding, VkDescriptorType type, Bound b
     s->bi[s->n] = (VkDescriptorBufferInfo){b.buf, b.off, range};
     s->w[s->n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = binding,
                                         .descriptorCount = 1, .descriptorType = type, .pBufferInfo = &s->bi[s->n]};
+    s->n++;
+}
+
+static void put_image(Set1 *s, uint32_t binding, VkImageView view) {
+    if (s->n == VKP_SET1_MAX) stop("more than %u descriptors at set 1", VKP_SET1_MAX);
+    s->ii[s->n] = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
+    s->w[s->n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = binding,
+                                        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                        .pImageInfo = &s->ii[s->n]};
     s->n++;
 }
 
@@ -723,8 +733,22 @@ static void stage_resources(Set1 *s, int st, const nvn_stage *stage, const prog_
                    range);
         if (sb->write) vkr_wrote(base, range, 0, F.draws + 1);   // the draw being prepared
     }
-    if (b->nimg) stop("stage %s binds %u storage image(s): their views by texture ID are not replayed yet", stage->key,
-                      b->nimg);
+    // Storage images: the handle in c[2]'s image rows names a texture pool ID (nvnDeviceGetImageHandle), whose texture
+    // the device views for stores, in the general layout every image keeps (D18)
+    for (uint32_t i = 0; i < b->nimg; i++) {
+        const ShdImg *m = &b->img[i];
+        if (!F.ops->storage_image) stop("stage %s binds a storage image, and these ops make no storage view", stage->key);
+        if (m->set != 1) stop("stage %s has a storage image at set %u", stage->key, (unsigned)m->set);
+        if (m->view == BV_NONE) stop("stage %s stores to a buffer texture", stage->key);
+        if (m->c2_slot < 0 || m->c2_slot >= IMG_SLOTS) stop("stage %s stores to image slot %d", stage->key, m->c2_slot);
+        uint32_t id = nvn_handle_texture_id(S.img[st][m->c2_slot]);
+        uint64_t storage = 0, bytes = 0;
+        VkImageView view = F.ops->storage_image(id, m->view, F.value, &storage, &bytes);
+        if (!view) stop("stage %s stores to image ID %u, where nothing is registered", stage->key, id);
+        put_image(s, m->binding, view);
+        g_stats.storage_images++;
+        if (m->write && bytes) vkr_wrote(storage, bytes, 1, F.draws + 1);   // the draw or dispatch being prepared
+    }
     for (uint32_t i = 0; i < b->ntex; i++) {
         const ShdTex *t = &b->tex[i];
         if (t->via == SHD_VIA_POOL) continue;   // the shader reads the pool by a handle from memory

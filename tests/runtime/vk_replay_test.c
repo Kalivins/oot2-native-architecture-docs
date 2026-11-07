@@ -91,9 +91,9 @@ static void lput(Log *l, const char *fmt, ...) {
 }
 
 // ---------- the stages and their bindings
-// g_vs_raw and g_cs_raw: stages that reach memory through the page table
-static nvn_stage g_vs, g_ps, g_cs, g_vs_raw, g_cs_raw;
-static ShaderBinds g_vs_binds, g_ps_binds, g_cs_binds, g_vs_raw_binds, g_cs_raw_binds;
+// g_vs_raw and g_cs_raw: stages that reach memory through the page table; g_cs_img: a compute stage that stores to an image
+static nvn_stage g_vs, g_ps, g_cs, g_vs_raw, g_cs_raw, g_cs_img;
+static ShaderBinds g_vs_binds, g_ps_binds, g_cs_binds, g_vs_raw_binds, g_cs_raw_binds, g_cs_img_binds;
 
 static void stage(nvn_stage *s, const char *key, int kind, uint32_t c1_at, uint32_t c1_end) {
     memset(s, 0, sizeof *s);
@@ -142,6 +142,11 @@ static void make_stages(void) {
     stage(&g_vs_raw, "00000000000000a2.00000001", NVN_STAGE_VS, 0x100, 0x140);   // and g_vs, with the page table
     g_vs_raw_binds = g_vs_binds;
     g_vs_raw_binds.raw = 1;
+    // the same layout as g_cs, and a module that stores to the image its c[2] image handle 2 names, at binding 25 (compute: storage images 25 to 31)
+    stage(&g_cs_img, "00000000000000c5.00000001", NVN_STAGE_CS, 0, 0);
+    g_cs_img.ctl[0xA9] = 2, g_cs_img.ctl[0xB1] = 3, g_cs_img.ctl[0xB2] = 2;
+    g_cs_img_binds = g_cs_binds;
+    g_cs_img_binds.img[g_cs_img_binds.nimg++] = (ShdImg){.set = 1, .write = 1, .view = BV_2D, .binding = 25, .c2_slot = 2};
 }
 
 // ---------- the stand-in ops
@@ -162,7 +167,7 @@ static VkPipeline op_compute(const VkpStage *cs) {
 }
 static const ShaderBinds *op_binds(const nvn_stage *s) {
     return s == &g_vs ? &g_vs_binds : s == &g_ps ? &g_ps_binds : s == &g_cs ? &g_cs_binds
-           : s == &g_vs_raw ? &g_vs_raw_binds : s == &g_cs_raw ? &g_cs_raw_binds : NULL;
+           : s == &g_vs_raw ? &g_vs_raw_binds : s == &g_cs_raw ? &g_cs_raw_binds : s == &g_cs_img ? &g_cs_img_binds : NULL;
 }
 static int g_log_resolves;   // a case that checks the order of the resolves against the raw path's begin sets it
 static void op_resolve(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out) {
@@ -226,6 +231,18 @@ static VkDescriptorSet op_acquire(uint64_t value, const dpool_ref *textures, con
     return (VkDescriptorSet)(uintptr_t)0x5E7;
 }
 static uint32_t op_image_slot(uint32_t id, int type) { return 1000 + id * 8 + (uint32_t)type; }
+// A storage view by texture ID: 9 is an image placed in its storage, a range of VRAM that the stores write; 10 is an arena
+// image, which holds the stores itself (no range); nothing is registered at any other ID. The view names the ID.
+#define STORE_AT (VRAM + 0x50000)
+#define STORE_BYTES 0x4000
+static VkImageView op_storage_image(uint32_t id, int type, uint64_t value, uint64_t *storage, uint64_t *bytes) {
+    CHECK(type == BV_2D);
+    lput(&g_ops, "op storage_image id %u frame %llu\n", id, (ull)value);
+    *storage = *bytes = 0;
+    if (id != 9 && id != 10) return VK_NULL_HANDLE;
+    if (id == 9) *storage = STORE_AT, *bytes = STORE_BYTES;
+    return (VkImageView)(uintptr_t)(0x5D00 + id);
+}
 static void *op_scratch(uint64_t value, uint32_t bytes, uint32_t align, VkBuffer *buffer, VkDeviceSize *offset) {
     (void)value;
     uint32_t at = (g_arena_used + align - 1) & ~(align - 1);
@@ -257,7 +274,8 @@ static const VkReplayOps g_fake_ops = {
     .graphics_layout = (VkPipelineLayout)(uintptr_t)0x6100, .compute_layout = (VkPipelineLayout)(uintptr_t)0x6200,
     .binds = op_binds, .resolve = op_resolve, .gpu_wrote = op_gpu_wrote, .target = op_target, .image = op_image,
     .acquire = op_acquire,
-    .image_slot = op_image_slot, .scratch = op_scratch, .raw = op_raw, .frame_begin = op_frame_begin,
+    .image_slot = op_image_slot, .storage_image = op_storage_image, .scratch = op_scratch, .raw = op_raw,
+    .frame_begin = op_frame_begin,
     .frame_end = op_frame_end, .queries = op_queries, .query_results = op_query_results, .cpu_reads = op_cpu_reads};
 
 // ---------- the stand-in recorder calls: one line per call
@@ -317,7 +335,14 @@ static void VKAPI_CALL fake_PushDescriptorSetKHR(VkCommandBuffer cb, VkPipelineB
     CHECK(cb == FAKE_CB);
     lput(&g_pkt, "pkt PushDescriptorSetKHR %d 0x%llx set %u writes %u\n", (int)bp, (ull)(uintptr_t)l, set, n);
     for (uint32_t i = 0; i < n; i++) {
-        CHECK(w[i].descriptorCount == 1 && w[i].pBufferInfo);
+        CHECK(w[i].descriptorCount == 1);
+        if (w[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) {   // a storage image: its view, in the general layout
+            CHECK(w[i].pImageInfo && !w[i].pBufferInfo && !w[i].pImageInfo->sampler);
+            lput(&g_pkt, "pkt  w b=%u SI view=0x%llx layout=%d\n", w[i].dstBinding,
+                 (ull)(uintptr_t)w[i].pImageInfo->imageView, (int)w[i].pImageInfo->imageLayout);
+            continue;
+        }
+        CHECK(w[i].pBufferInfo);
         const VkDescriptorBufferInfo *b = w[i].pBufferInfo;
         lput(&g_pkt, "pkt  w b=%u %s buf=0x%llx off=0x%llx range=0x%llx", w[i].dstBinding,
              w[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ? "UB" : "SB", (ull)(uintptr_t)b->buffer,
@@ -771,6 +796,75 @@ static void case_raw_first(void) {
     printf("ok raw_first\n");
 }
 
+// ---------- storage images
+static p_bind_program program_img(void) {
+    p_bind_program p = program(1);
+    p.id[0] = &g_cs_img;
+    return p;
+}
+static p_bind_handles image_handle(uint64_t h) { return (p_bind_handles){.stage = 5, .first = 2, .n = 1, .h = {h}}; }
+
+// A compute module that stores to the image its c[2] image handle 2 names: the replay takes the view of that texture ID
+// from the ops and binds it at the module's binding, in the general layout. Frame 1: ID 9, an image placed in its
+// storage, whose storage the replay declares written (as an image write) for the dispatch; ID 10, an arena image, which
+// holds the stores itself: bound, and nothing declared. Frame 2: the module only reads ID 9: bound, nothing declared.
+static void case_storage_image(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    PUT(r, OP_BIND_PROGRAM, program_img());
+    PUT(r, OP_BIND_IMG, image_handle(9));
+    PUT(r, OP_DISPATCH, (p_dispatch){1, 1, 1, 0});
+    PUT(r, OP_BIND_IMG, image_handle(10));
+    PUT(r, OP_DISPATCH, (p_dispatch){1, 1, 1, 0});
+    uint64_t h = rec_end(r);
+    uint64_t v = vkr_submit(&h, 1);
+    g_cs_img_binds.img[0].write = 0;
+    r = rec_begin(1);
+    PUT(r, OP_BIND_IMG, image_handle(9));
+    PUT(r, OP_DISPATCH, (p_dispatch){1, 1, 1, 0});
+    uint64_t h2 = rec_end(r);
+    uint64_t v2 = vkr_submit(&h2, 1);
+    CHECK(v2 == v + 1);
+    uint32_t n;
+    const VkrWrite *w = vkr_writes(v, &n);
+    CHECK(w && n == 1 && w[0].addr == STORE_AT && w[0].size == STORE_BYTES && w[0].image && w[0].draw == 1);
+    vkr_writes(v2, &n);
+    CHECK(n == 0);
+    VkrStats st;
+    vkr_stats(&st);
+    printf("stats storage_images %llu writes %llu\n", (ull)st.storage_images, (ull)st.storage_writes);
+    close_fakes();
+    printf("ok storage_image\n");
+}
+
+// A storage image the replay cannot bind stops by name: an ID nothing is registered at, a buffer texture, an image in a
+// set other than 1, a handle slot the translator could not tell (-1), and ops that make no storage view.
+static VkReplayOps g_ops_no_storage;
+static void case_storage_stop(const char *what) {
+    open_fakes();
+    ShdImg *m = &g_cs_img_binds.img[0];
+    uint64_t id = 9;
+    if (!strcmp(what, "unregistered")) id = 11;
+    else if (!strcmp(what, "buffer")) m->view = BV_NONE;
+    else if (!strcmp(what, "set")) m->set = 2;
+    else if (!strcmp(what, "slot")) m->c2_slot = -1;
+    else if (!strcmp(what, "no_ops")) {
+        g_ops_no_storage = g_fake_ops;
+        g_ops_no_storage.storage_image = NULL;
+        vkr_set_ops(&g_ops_no_storage);
+    } else {
+        fprintf(stderr, "unknown stop %s\n", what);
+        exit(2);
+    }
+    Rec *r = rec_begin(0);
+    PUT(r, OP_BIND_PROGRAM, program_img());
+    PUT(r, OP_BIND_IMG, image_handle(id));
+    PUT(r, OP_DISPATCH, (p_dispatch){1, 1, 1, 0});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    printf("submit returned\n");
+}
+
 // A uniform range copied at submit and a GPU write over it in the same submission, in either order: the drop rule. The
 // vertex stage's uniform buffer and the pixel stage's storage buffer (which its module writes) are one range of host
 // memory. Read first: the first draw reads the copy and its pixel stage then writes the range, which drops the copy, so
@@ -1150,6 +1244,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "depth")) case_depth();
     else if (!strcmp(cs, "compute")) case_compute();
     else if (!strcmp(cs, "raw_first")) case_raw_first();
+    else if (!strcmp(cs, "storage_image")) case_storage_image();
+    else if (!strcmp(cs, "storage_stop") && argc >= 3) case_storage_stop(argv[2]);
     else if (!strcmp(cs, "conflict_read_first")) case_conflict(0);
     else if (!strcmp(cs, "conflict_write_first")) case_conflict(1);
     else if (!strcmp(cs, "transfers")) case_transfers();

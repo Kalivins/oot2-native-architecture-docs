@@ -38,6 +38,7 @@ struct VkbImage {
     VkFormat format;
     VkImageAspectFlags aspect, all_aspects;   // the one a copy takes; every aspect of the format
     VkImageCreateFlags flags;
+    VkImageUsageFlags usage;
     uint64_t size;                // the game's storage bytes
     int placed, doomed, refs, pending;
     int arena;                    // its memory is an extent of the texture arena: the CPU writes its texels (vk_texture.c)
@@ -150,12 +151,15 @@ static uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryP
 
 // ---------- images
 
-// The usage of an arena image: sampled, and copies in (the upload) and out (the checks).
+// The usage of an arena image: sampled, copies in (the upload) and out (the checks), and stores where the format takes
+// them.
 static VkImageUsageFlags arena_usage(VkFormat f) {
     VkFormatFeatureFlags ft = features(f);
     VkImageUsageFlags u = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (ft & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) u |= VK_IMAGE_USAGE_SAMPLED_BIT;
     if (ft & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) u |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    // a program may store to a texture the CPU wrote (the title's compute passes do, into an RGBA8 one)
+    if (ft & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) u |= VK_IMAGE_USAGE_STORAGE_BIT;
     return u;
 }
 
@@ -257,7 +261,7 @@ static VkbImage *image_make(const tex_t *t, const VkfRow *row, VkFormat vk, cons
     }
     VkbImage *i = calloc(1, sizeof *i);
     if (!i) rt_fatal("gfx: vulkan: out of memory for an image");
-    i->key = *key, i->image = image, i->dedicated = dedicated, i->format = fmt, i->flags = flags;
+    i->key = *key, i->image = image, i->dedicated = dedicated, i->format = fmt, i->flags = flags, i->usage = usage;
     i->aspect = (row->flags & VKF_DEPTH) ? VK_IMAGE_ASPECT_DEPTH_BIT : (row->flags & VKF_STENCIL) ? VK_IMAGE_ASPECT_STENCIL_BIT
                                                                                               : VK_IMAGE_ASPECT_COLOR_BIT;
     i->all_aspects = i->aspect | ((row->flags & (VKF_DEPTH | VKF_STENCIL)) == (VKF_DEPTH | VKF_STENCIL) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
@@ -607,6 +611,49 @@ static void *view_make(const tex_t *t, const view_t *v, int type, int demand) {
 }
 
 void *vkb_view_make(const tex_t *t, const view_t *v, int type) { return view_make(t, v, type, 0); }
+
+VkImageView vkb_storage_view(const tex_t *t, const view_t *v, int type, uint64_t value) {
+    VkbImage *img = vkb_image_get(t);
+    if (!img) img = vkb_image_demand_current(t, value);
+    int nvn_format = v && v->set_format ? (int)v->format : t->d.format;
+    if (!img)
+        rt_fatal("gfx: vulkan: a storage image over the texture at %#llx (NVN format %#x) has no image on this device",
+                 (ull)(uintptr_t)t->mem, nvn_format);
+    if (!(img->usage & VK_IMAGE_USAGE_STORAGE_BIT) || !view_ok(img, type))
+        rt_fatal("gfx: vulkan: a storage image over the texture at %#llx (NVN format %#x, view type %d): its image was made "
+                 "without storage usage or cannot be seen as that type", (ull)img->key.storage, nvn_format, type);
+    const VkfRow *row = vkf_row(nvn_format);
+    uint8_t swz[4];
+    const char *why;
+    VkFormat vf = vkf_pick(row, supported, NULL, swz, &why);
+    VkFormatProperties fp;
+    vkGetPhysicalDeviceFormatProperties(gpu_vk.phys, vf, &fp);
+    if (vf == VK_FORMAT_UNDEFINED || !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) ||
+        (vkf_class(vf) != vkf_class(img->format) && vf != img->format))
+        rt_fatal("gfx: vulkan: a storage image over the texture at %#llx reads NVN format %#x, which this device does not "
+                 "store to through its image (Vulkan format %d)", (ull)img->key.storage, nvn_format, (int)vf);
+    uint32_t level = v && v->set_levels ? v->base_level : 0;
+    uint32_t base_layer = v && v->set_layers ? v->min_layer : 0;
+    uint32_t layers = v && v->set_layers && v->nlayers ? v->nlayers : img->key.layers - base_layer;
+    if (type == BV_1D || type == BV_2D || type == BV_3D) layers = 1;
+    else if (type == BV_CUBE) layers = 6;
+    if (img->key.type == VK_IMAGE_TYPE_3D) base_layer = 0, layers = 1;
+    if (level >= img->key.levels || base_layer + layers > img->key.layers)
+        rt_fatal("gfx: vulkan: a storage image over the texture at %#llx asks level %u and layers %u..%u of an image of %u "
+                 "levels and %u layers", (ull)img->key.storage, level, base_layer, base_layer + layers, img->key.levels,
+                 img->key.layers);
+    VkImageViewUsageCreateInfo uc = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+                                     .usage = VK_IMAGE_USAGE_STORAGE_BIT};
+    VkImageViewCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = &uc, .image = img->image,
+                                .viewType = (VkImageViewType)type, .format = vf,
+                                .subresourceRange = {img->aspect, level, 1, base_layer, layers}};
+    VkImageView view;
+    GPU_VK_OK(vkCreateImageView(gpu_vk.device, &ci, NULL, &view), "vkCreateImageView (a storage view)");
+    // Not counted (no refs, no g_mu): the use keeps the image until the submission is done, and the view is destroyed by
+    // the completion thread at that point, which must not wait for this layer's lock (oot2/vk_image.h).
+    vkb_image_use(img, value);
+    return view;
+}
 void *vkb_view_demand(const tex_t *t, const view_t *v, int type) { return view_make(t, v, type, 1); }
 
 // A submission that is being recorded reads this view: the image of a texture the CPU writes is made current for it

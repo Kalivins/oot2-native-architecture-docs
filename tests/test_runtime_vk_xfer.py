@@ -16,6 +16,12 @@ serves the draw and the dispatches (no game data).
 - storage: a compute module's stores reach the CPU-visible pool, a uniform an update rewrote between two dispatches is read
   anew, and an indirect dispatch takes group counts an update wrote in the same submission; with the writes declared to no
   one, the CPU never sees the stores of a mirror (the counter-run).
+- storage_image: a compute module stores a known value to every texel of two textures registered at texture pool IDs, one in a
+  pool the CPU cannot see (an image placed in its extent) and one in CPU-visible storage (an arena image), and a copy reads each
+  back; a hundred more submissions then make storage views the completion thread destroys, and the images still read back
+  whole with no view left at the device's end (validation counts them); a store into a corner of a texture the CPU wrote
+  leaves the rest as the CPU wrote it, read back by a later submission (the CPU's bytes are uploaded before the stores, in
+  the submission that binds the texture, and not again over them).
 
 Every case runs under synchronization validation, which must report nothing. Without a usable device they skip, unless
 OOT2_REQUIRE_GPU is set.
@@ -48,6 +54,18 @@ void main() {
 """
 HEAD_KEY = "5100000000000005.00000000"
 
+# A compute module that stores (x, y, 0, 1) to the texel (x, y) of the storage image at binding 25 (compute storage images are
+# bindings 25 to 31), without a format as the translator's modules do.
+IMG_GLSL = """#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 1, binding = 25) uniform writeonly image2D img;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    imageStore(img, p, vec4(float(p.x) / 255.0, float(p.y) / 255.0, 0.0, 1.0));
+}
+"""
+IMG_KEY = "5100000000000006.00000000"
+
 
 def exe() -> Path:
     if "exe" not in _exe:
@@ -72,9 +90,9 @@ class TransferTest(vp.DeviceTestCase):
     def setUpClass(cls) -> None:
         super().setUpClass()
         cls.head_dir = vp.scratch()
-        patches = (mock.patch.dict(vp.GLSL, {"head.comp": HEAD_GLSL}),
-                   mock.patch.dict(vp.SYNTH_KEYS, {"head.comp": HEAD_KEY}),
-                   mock.patch.dict(vp.SYNTH_STAGE, {"head.comp": "cs"}))
+        patches = (mock.patch.dict(vp.GLSL, {"head.comp": HEAD_GLSL, "img.comp": IMG_GLSL}),
+                   mock.patch.dict(vp.SYNTH_KEYS, {"head.comp": HEAD_KEY, "img.comp": IMG_KEY}),
+                   mock.patch.dict(vp.SYNTH_STAGE, {"head.comp": "cs", "img.comp": "cs"}))
         for patch in patches:
             patch.start()
             cls.addClassCleanup(patch.stop)
@@ -142,6 +160,16 @@ class TransferTest(vp.DeviceTestCase):
             with self.subTest(destinations=mode):
                 out = self.clean("head", "gated", "--pack", str(self.head_pack), *(("imports",) if mode == "imports" else ()))
                 self.assertIn("direct (5 6 7), indirect after an update (2 1 1), direct again (3 1 1)", out)
+
+    def test_compute_stores_to_images_by_texture_id_read_back_whole(self) -> None:
+        for mode in ("mirror", "imports"):
+            with self.subTest(destinations=mode):
+                out = self.clean("storage_image", "--pack", str(self.head_pack), *(("imports",) if mode == "imports" else ()))
+                self.assertIn("placed image: 0 of 65536 texels wrong", out)
+                self.assertIn("arena image: 0 of 65536 texels wrong", out)
+                self.assertIn("after 100 more submissions: placed 0, arena 0 texels wrong", out)
+                self.assertIn("partial store into a texture the CPU wrote: 0 of 16384 texels wrong", out)
+                print("\n" + out)
 
     def test_counter_run_the_stores_of_a_mirror_are_lost_when_not_declared(self) -> None:
         err = self.failing("storage", "gated", "--pack", str(self.pack), "--mutant", "nodeclare")

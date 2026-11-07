@@ -19,6 +19,12 @@
 //                  snapshot of host memory is on); the picture is read back through a texture to buffer copy
 //   storage        a compute module stores into the CPU-visible pool (the stores reach the CPU), reads a uniform an update
 //                  rewrote between two dispatches, and an indirect dispatch takes the group counts an update wrote
+//   storage_image  a compute module stores to textures registered at texture pool IDs, one standing in a pool the CPU
+//                  cannot see (an image placed in its extent) and one in CPU-visible storage (an arena image): a copy
+//                  reads each back and every texel is the stored value; then a hundred more submissions make and drop
+//                  storage views while the completion thread destroys them, and the images still read back whole; and a
+//                  store into a corner of a texture the CPU wrote leaves the rest as the CPU wrote it, read back by a
+//                  later submission
 //
 // --mutant nodrop (the drop rule off) and nodeclare (writes declared to no one) are the counter-runs: the case must fail.
 #include <stdio.h>
@@ -29,6 +35,7 @@
 
 #include "layout.h"
 #include "oot2/backing.h"
+#include "oot2/bindless.h"
 #include "oot2/gfx.h"
 #include "oot2/gpu.h"
 #include "oot2/gpu_vk.h"
@@ -37,6 +44,7 @@
 #include "oot2/nvn_tex.h"
 #include "oot2/runtime.h"
 #include "oot2/vk_pipeline.h"
+#include "oot2/vk_image.h"
 #include "oot2/vk_rec.h"
 #include "oot2/vk_replay.h"
 #include "plat.h"
@@ -59,6 +67,7 @@ typedef unsigned long long ull;
 #define PS_KEY "5100000000000002.00000000"
 #define CS_KEY "5100000000000003.00000000"
 #define HEAD_KEY "5100000000000005.00000000"   // reads the group counts the replay puts in its driver bank
+#define IMG_KEY "5100000000000006.00000000"    // stores (x, y, 0, 1) to the texel (x, y) of the image at binding 25
 
 static Cpu g_cpu;
 static uint64_t g_heap;
@@ -320,8 +329,8 @@ static void case_textures(int imports, int gated) {
 }
 
 // ---------- the stages of the synthetic pack and what they bind
-static nvn_stage g_vs, g_ps, g_cs, g_head;
-static ShaderBinds g_vs_binds, g_ps_binds, g_cs_binds, g_head_binds;
+static nvn_stage g_vs, g_ps, g_cs, g_head, g_img;
+static ShaderBinds g_vs_binds, g_ps_binds, g_cs_binds, g_head_binds, g_img_binds;
 static VkReplayOps g_ops;
 
 static void stage(nvn_stage *s, const char *key, int kind) {
@@ -333,7 +342,8 @@ static void stage(nvn_stage *s, const char *key, int kind) {
 static void cbuf(ShaderBinds *b, uint8_t slot, uint16_t binding) { b->cb[b->ncb++] = (ShdCbuf){slot, 1, binding}; }
 
 static const ShaderBinds *my_binds(const nvn_stage *s) {
-    return s == &g_vs ? &g_vs_binds : s == &g_ps ? &g_ps_binds : s == &g_cs ? &g_cs_binds : s == &g_head ? &g_head_binds : vkr_device_ops()->binds(s);
+    return s == &g_vs ? &g_vs_binds : s == &g_ps ? &g_ps_binds : s == &g_cs ? &g_cs_binds : s == &g_head ? &g_head_binds
+           : s == &g_img ? &g_img_binds : vkr_device_ops()->binds(s);
 }
 
 // After setup: the pack opened, the stages and their bindings made (the pack's modules, tests/test_runtime_vk_pipeline.py:
@@ -350,6 +360,7 @@ static void open_pack(const char *pack) {
     stage(&g_ps, PS_KEY, NVN_STAGE_PS);
     stage(&g_cs, CS_KEY, NVN_STAGE_CS);
     stage(&g_head, HEAD_KEY, NVN_STAGE_CS);
+    stage(&g_img, IMG_KEY, NVN_STAGE_CS);
     ShaderBinds *v = &g_vs_binds, *p = &g_ps_binds, *c = &g_cs_binds;
     memset(v, 0, sizeof *v), memset(p, 0, sizeof *p), memset(c, 0, sizeof *c);
     v->kind = SHD_VS, v->fits = 1;
@@ -366,6 +377,10 @@ static void open_pack(const char *pack) {
     hd->kind = SHD_CS, hd->fits = 1, hd->local_size[0] = hd->local_size[1] = hd->local_size[2] = 1;
     cbuf(hd, 0, 2);   // the driver bank c[0]
     hd->sb[hd->nsb++] = (ShdSbuf){.set = 1, .ordinal = 0, .cb_slot = 0, .write = 1, .binding = 9, .address_byte_offset = 0x310};
+    ShaderBinds *im = &g_img_binds;   // compute storage images are bindings 25 to 31 (oot2/vk_pipeline.h)
+    memset(im, 0, sizeof *im);
+    im->kind = SHD_CS, im->fits = 1, im->local_size[0] = im->local_size[1] = 8, im->local_size[2] = 1;
+    im->img[im->nimg++] = (ShdImg){.set = 1, .write = 1, .view = BV_2D, .binding = 25, .c2_slot = 3};
     g_ops = *vkr_device_ops();
     g_ops.binds = my_binds;
     vkr_set_ops(&g_ops);
@@ -495,6 +510,126 @@ static void case_storage(int imports, int gated, const char *pack) {
     finish_and_report("storage");
 }
 
+// ---------- storage_image: compute stores to textures by their texture pool ID
+#define IMG_W 256
+#define IMG_H 256
+static const dpool_ref k_pool = {0x900000, 33025, 0};
+
+// How many texels of the tight RGBA8 readback at `at` are not the (x, y, 0, 255) the module stores at texel (x, y).
+static int texels_wrong(uint64_t at) {
+    int bad = 0;
+    for (uint32_t y = 0; y < IMG_H; y++)
+        for (uint32_t x = 0; x < IMG_W; x++) {
+            const uint8_t want[4] = {(uint8_t)x, (uint8_t)y, 0, 0xFF};
+            bad += memcmp((const void *)(uintptr_t)(at + 4 * ((uint64_t)y * IMG_W + x)), want, 4) != 0;
+        }
+    return bad;
+}
+
+// One submission: the module stores to the first gx by gy groups of 8 by 8 texels of the texture at pool ID `id`, and a copy
+// of `copy_of` (when given) reads that texture back, whole, into guest memory at `out` behind it.
+static uint64_t store_part(uint32_t id, uint32_t gx, uint32_t gy, const nvn_tex_rec *copy_of, uint64_t out) {
+    Rec *r = rec_begin();
+    PUT(r, OP_SET_TEX_POOL, (p_set_pool){.pool = k_pool});
+    PUT(r, OP_BIND_PROGRAM, program_of(&g_img));
+    PUT(r, OP_BIND_IMG, (p_bind_handles){.stage = 5, .first = 3, .n = 1, .h = {id}});
+    PUT(r, OP_DISPATCH, (p_dispatch){gx, gy, 1, 0});
+    if (copy_of)
+        PUT(r, OP_COPY_T2B, (p_copy_b2t){.addr = out, .tex = *copy_of,
+                                         .r = region(0, 0, (int)copy_of->tex.d.width, (int)copy_of->tex.d.height)});
+    return submit(r);
+}
+static uint64_t store_to(uint32_t id, const nvn_tex_rec *copy_of, uint64_t out) {
+    return store_part(id, IMG_W / 8, IMG_H / 8, copy_of, out);
+}
+// A submission of its own that reads a texture back whole.
+static uint64_t copy_back(const nvn_tex_rec *t, uint64_t out) {
+    Rec *r = rec_begin();
+    PUT(r, OP_COPY_T2B, (p_copy_b2t){.addr = out, .tex = *t, .r = region(0, 0, (int)t->tex.d.width, (int)t->tex.d.height)});
+    return submit(r);
+}
+
+// A texture the CPU wrote, stored to in part: the stored texels are the module's, every other one is what the CPU wrote.
+// The copy that reads it back is a submission of its own, after the one that stored, so the CPU's bytes cannot be
+// uploaded again over the stores (they were uploaded before them, in the submission that bound the texture).
+#define PART_W 128
+#define PART_STORED 32
+static void cpu_texel(uint32_t x, uint32_t y, uint8_t out[4]) {
+    out[0] = (uint8_t)(0xC0 | (x & 0x3F)), out[1] = (uint8_t)(0x80 | (y & 0x3F)), out[2] = 0x55, out[3] = 0x80;
+}
+static int part_wrong(uint64_t at) {
+    int bad = 0;
+    for (uint32_t y = 0; y < PART_W; y++)
+        for (uint32_t x = 0; x < PART_W; x++) {
+            uint8_t want[4];
+            if (x < PART_STORED && y < PART_STORED) memcpy(want, (uint8_t[]){(uint8_t)x, (uint8_t)y, 0, 0xFF}, 4);
+            else cpu_texel(x, y, want);
+            bad += memcmp((const void *)(uintptr_t)(at + 4 * ((uint64_t)y * PART_W + x)), want, 4) != 0;
+        }
+    return bad;
+}
+
+static void case_storage_image(int imports, const char *pack) {
+    setup(imports, 0);
+    open_pack(pack);
+    VkpStage cs = {.key = IMG_KEY};
+    CHECK(vkp_compute(&cs));
+    const uint64_t placed_at = G + 0x40000, arena_at = P + 0x200000, out_placed = P + 0x100000, out_arena = P + 0x300000;
+    const tex_t placed = tex_at(placed_at, NVN_FORMAT_RGBA8, IMG_W, IMG_H);
+    const tex_t arena = tex_at(arena_at, NVN_FORMAT_RGBA8, IMG_W, IMG_H);
+    dpool_ref pool = k_pool;
+    bindless_texture_register(&pool, 5, &placed, NULL);
+    bindless_texture_register(&pool, 6, &arena, NULL);
+    // the texture in the GPU's pool has its image when registered, standing in the pool's extent; the one in CPU-visible
+    // storage gets its arena image at its first bind
+    VkbImage *img = vkb_image_get(&placed);
+    CHECK(img && vkb_image_placed(img));
+    CHECK(!vkb_image_get(&arena));
+    const nvn_tex_rec cp = trec(placed_at, NVN_FORMAT_RGBA8, IMG_W, IMG_H), ca = trec(arena_at, NVN_FORMAT_RGBA8, IMG_W, IMG_H);
+    store_to(5, &cp, out_placed);
+    uint64_t v = store_to(6, &ca, out_arena);
+    wait_done(v);
+    int bad_placed = texels_wrong(out_placed), bad_arena = texels_wrong(out_arena);
+    printf("placed image: %d of %d texels wrong\n", bad_placed, IMG_W * IMG_H);
+    printf("arena image: %d of %d texels wrong\n", bad_arena, IMG_W * IMG_H);
+    CHECK(bad_placed == 0 && bad_arena == 0);
+    // a hundred submissions more, each with storage views of its own that the completion thread destroys once it is done
+    // with them: nothing leaks (the validation layer counts the views left at the device's end), and both images still read
+    // back whole
+    uint64_t last = 0;
+    for (int i = 0; i < 100; i++) last = store_to(i & 1 ? 6 : 5, NULL, 0);
+    wait_done(last);
+    memset((void *)(uintptr_t)out_placed, 0, 4ull * IMG_W * IMG_H);
+    memset((void *)(uintptr_t)out_arena, 0, 4ull * IMG_W * IMG_H);
+    store_to(5, &cp, out_placed);
+    v = store_to(6, &ca, out_arena);
+    wait_done(v);
+    bad_placed = texels_wrong(out_placed), bad_arena = texels_wrong(out_arena);
+    printf("after 100 more submissions: placed %d, arena %d texels wrong\n", bad_placed, bad_arena);
+    CHECK(bad_placed == 0 && bad_arena == 0);
+    // the module stores to a corner of a texture the CPU wrote, in one submission, and a later one reads the texture back
+    const uint64_t part_at = P + 0x340000, out_part = P + 0x360000;
+    const tex_t part = tex_at(part_at, NVN_FORMAT_RGBA8, PART_W, PART_W);
+    static uint8_t cpu[PART_W * PART_W * 4];
+    for (uint32_t y = 0; y < PART_W; y++)
+        for (uint32_t x = 0; x < PART_W; x++) cpu_texel(x, y, cpu + 4 * ((size_t)y * PART_W + x));
+    NVNcopyRegion whole = region(0, 0, PART_W, PART_W);
+    vkb_write_texels(&part, NULL, &whole, cpu, 4 * PART_W, 4ull * PART_W * PART_W);
+    bindless_texture_register(&pool, 7, &part, NULL);
+    const nvn_tex_rec cq = trec(part_at, NVN_FORMAT_RGBA8, PART_W, PART_W);
+    store_part(7, PART_STORED / 8, PART_STORED / 8, NULL, 0);
+    v = copy_back(&cq, out_part);
+    wait_done(v);
+    int bad_part = part_wrong(out_part);
+    printf("partial store into a texture the CPU wrote: %d of %d texels wrong\n", bad_part, PART_W * PART_W);
+    CHECK(bad_part == 0);
+    VkrStats st;
+    vkr_stats(&st);
+    printf("storage images bound %llu, written ranges declared %llu\n", (ull)st.storage_images, (ull)st.storage_writes);
+    CHECK(st.storage_images == 105);
+    finish_and_report("storage_image");
+}
+
 // ---------- head: the group counts in the driver bank c[0], which the module reads
 static void case_head(int imports, int gated, const char *pack) {
     setup(imports, gated);
@@ -560,6 +695,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "uniform_draw") && pack) case_uniform_draw(imports, gated, pack);
     else if (!strcmp(cs, "head") && pack) case_head(imports, gated, pack);
     else if (!strcmp(cs, "storage") && pack) case_storage(imports, gated, pack);
+    else if (!strcmp(cs, "storage_image") && pack) case_storage_image(imports, pack);
     else {
         fprintf(stderr, "unknown case %s\n", cs);
         return 2;

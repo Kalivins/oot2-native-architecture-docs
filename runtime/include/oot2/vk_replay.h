@@ -133,6 +133,11 @@ typedef struct VkReplayOps {
     // seen as a view type (vkb_image_slot); UINT32_MAX for none.
     VkDescriptorSet (*acquire)(uint64_t value, const dpool_ref *textures, const dpool_ref *samplers);
     uint32_t (*image_slot)(uint32_t id, int type);
+    // A storage view of the texture registered at texture pool ID `id`, of view type `type` (BV_*), for the frame
+    // `value` and freed once it is done (vkb_storage_view); VK_NULL_HANDLE for an ID nothing is registered at. *storage
+    // and *bytes: the texture's storage, for the written ranges, when its image is placed in it (0 bytes otherwise: an
+    // arena image holds the stores itself). NULL: a storage image stops by name.
+    VkImageView (*storage_image)(uint32_t id, int type, uint64_t value, uint64_t *storage, uint64_t *bytes);
     // `bytes` of host-visible memory the device reads, for the frame `value` (freed once it is done): the pointer, and
     // the buffer and offset that bind it. Offsets are aligned to `align`.
     void *(*scratch)(uint64_t value, uint32_t bytes, uint32_t align, VkBuffer *buffer, VkDeviceSize *offset);
@@ -202,6 +207,7 @@ typedef struct VkrStats {
     uint64_t transfers, transfer_bytes;             // copies, fills, updates and texture clears, and the bytes they move
     uint64_t live_uniforms;                         // uniform ranges bound live (a mirror or VRAM)
     uint64_t storage_writes;                        // storage ranges declared written
+    uint64_t storage_images;                        // storage images bound (a view of a texture pool ID each)
     uint64_t unregistered_textures;                 // slots whose texture ID had no entry (the placeholder is read)
     uint64_t scratch_bytes;
     // Recorded against replayed (the Hookshot survey): the draw and dispatch records that reached the replay, those not made

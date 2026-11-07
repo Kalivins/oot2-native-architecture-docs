@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "oot2/backing.h"
+#include "oot2/bindless.h"
 #include "oot2/gpu_vk.h"
 #include "oot2/nvn_program.h"
 #include "oot2/runtime.h"
@@ -120,6 +121,21 @@ static VkDescriptorSet dev_acquire(uint64_t value, const dpool_ref *textures, co
     return vkb_acquire(gpu_vk_prologue(), value, textures, samplers);
 }
 static uint32_t dev_image_slot(uint32_t id, int type) { return vkb_image_slot(gpu_vk_prologue(), id, type); }
+// A storage view is destroyed by the completion thread as an attachment view is (view_gone): it holds nothing of the image
+// layer's, whose lock a thread may hold while the timeline waits for the completion thread.
+static VkImageView dev_storage_image(uint32_t id, int type, uint64_t value, uint64_t *storage, uint64_t *bytes) {
+    tex_t t;
+    view_t v;
+    if (!bindless_texture_entry(id, &t, &v)) return VK_NULL_HANDLE;
+    VkImageView view = vkb_storage_view(&t, &v, type, value);
+    gpu_vk_effect(view_gone, (void *)(uintptr_t)view);
+    // A placed image is its storage's VRAM extent: the stores are a GPU write there. An arena image keeps them in the
+    // image, newer than the guest storage the CPU sees (oot2/vk_image.h): nothing is declared to the backing map.
+    VkbImage *img = vkb_image_get(&t);
+    int placed = img && vkb_image_placed(img);
+    *storage = placed ? (uint64_t)(uintptr_t)t.mem : 0, *bytes = placed ? t.L.size : 0;
+    return view;
+}
 
 // ---------- scratch memory
 #define CHUNK_BYTES (4u << 20)
@@ -263,7 +279,8 @@ const VkReplayOps *vkr_device_ops(void) {
                               .binds = dev_binds,
                               .resolve = backing_resolve, .gpu_wrote = backing_gpu_wrote, .target = dev_target,
                               .image = dev_image,
-                              .acquire = dev_acquire, .image_slot = dev_image_slot, .scratch = dev_scratch,
+                              .acquire = dev_acquire, .image_slot = dev_image_slot,
+                              .storage_image = dev_storage_image, .scratch = dev_scratch,
                               .raw = gpu_vk_raw_begin, .frame_begin = dev_frame_begin, .frame_end = dev_frame_end,
                               .queries = dev_queries, .query_results = dev_query_results, .cpu_reads = dev_cpu_reads};
     const VkpLayouts *l = vkp_layouts();   // read at every call: the pipeline builder may open after the first frame
