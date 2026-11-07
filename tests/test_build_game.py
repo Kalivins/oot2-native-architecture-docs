@@ -130,9 +130,11 @@ def copy_runtime(dst: Path) -> Path:
 
 def run_program(exe: Path, *args: str, cwd: Path | None = None,
                 env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    """Run the program with this process's environment, less OOT2_GFX and census mode (OOT2_CENSUS*, a run for a gap list,
+    """Run the program with this process's environment, less OOT2_GFX, OOT2_TIMER_RESOLUTION (a shell that turned the
+    timer request off would silently change the log of every run) and census mode (OOT2_CENSUS*, a run for a gap list,
     never inherited from the shell that runs the suite), plus env."""
-    full = {k: v for k, v in os.environ.items() if k != "OOT2_GFX" and not k.startswith("OOT2_CENSUS")}
+    full = {k: v for k, v in os.environ.items()
+            if k not in ("OOT2_GFX", "OOT2_TIMER_RESOLUTION") and not k.startswith("OOT2_CENSUS")}
     full.update(env or {})
     return subprocess.run([str(exe), *args], cwd=cwd or exe.parent.parent, capture_output=True, text=True, timeout=120,
                           env=full)
@@ -636,6 +638,31 @@ class ProgramTest(unittest.TestCase):
         self.assertRegex(done.stderr, r"(?m)^\[rt\] oot2: main\(\) is at (?:0x)?[0-9A-Fa-f]+ \(a host pc in a log line is read "
                                       r"against this and the program's symbols\)$")
         self.assertEqual(self.compiled["objects"], lifted_objects(self.game / "build"))
+
+    def test_the_system_timer_is_requested_at_start_unless_the_setting_is_off(self) -> None:
+        # Ticket 116: main calls rt_timer_hold_start right after the settings load, before the first thread and before
+        # main()'s own log line. The request itself is read back by tests/test_runtime_timer.py; here the real main is
+        # shown to make the call, once, and to honour the setting.
+        done = run_program(self.exe, cwd=Path(self.tmp.name))
+        self.assert_boots_the_sdk(done, self.game)
+        timer = [line for line in done.stderr.splitlines() if line.startswith("[rt] timer: ")]
+        self.assertEqual(len(timer), 1, done.stderr)
+        self.assertLess(done.stderr.index("[rt] timer: "), done.stderr.index("main() is at"))
+        if os.name == "nt":
+            self.assertRegex(timer[0], r"^\[rt\] timer: holding 0\.500 ms \(the system granted \d+\.\d{3} ms, "
+                                       r"\d+\.\d{3} ms in force now; timer_resolution = 1, the default\)$")
+        else:
+            self.assertIn("this platform has no system timer resolution to hold", timer[0])
+        for args, env, source in ((("--set", "timer_resolution=0"), None, "--set"),
+                                  ((), {"OOT2_TIMER_RESOLUTION": "0"}, "OOT2_TIMER_RESOLUTION")):
+            with self.subTest(source=source):
+                done = run_program(self.exe, *args, env=env, cwd=Path(self.tmp.name))
+                self.assert_boots_the_sdk(done, self.game)
+                self.assertIn(f"[rt] timer: the system's resolution is left as it is, not requested "
+                              f"(timer_resolution = 0, {source})", done.stderr)
+                self.assertNotIn("timer: holding", done.stderr)
+                self.assertIn(f"not at their default: timer_resolution=0 ({source})", done.stderr)
+                self.assertLess(done.stderr.index("[rt] timer: "), done.stderr.index("main() is at"))
 
     def test_the_library_is_linked_whole(self) -> None:
         done = run_program(self.exe)

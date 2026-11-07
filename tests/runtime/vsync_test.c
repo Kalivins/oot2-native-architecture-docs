@@ -25,6 +25,7 @@
 #include "endmark.h"
 #include "oot2/kernel.h"
 #include "oot2/memory.h"
+#include "oot2/settings.h"
 #include "oot2/vsync.h"
 #include "plat.h"
 
@@ -382,9 +383,17 @@ static int cmp_u64(const void *a, const void *b) {
 // wake after the due time of the tick it fell in, as the guest thread saw it (the signal, the kernel's wake-up and the
 // thread taking its core). The bound is loose for continuous integration runners, whose timing margins are not
 // measured; OOT2_VSYNC_P99_US sets a tighter one for a run on a quiet desktop.
+//
+// The case holds the system timer the way the program does (rt_timer_hold_start, ticket 116; timer.c), so the default,
+// which holds 0.5 ms, is what runs, in CI too, and it prints the resolution it saw at the start and at the end of the
+// run. The desktop's bound of 0.6 ms (research 55, Q3) is a variable of the run and never a default:
+//   OOT2_VSYNC_P99_US=600 py -3.14 -I -m unittest discover -s tests -p test_runtime_vsync.py -v
+// CI keeps the 4 ms above. OOT2_TIMER_RESOLUTION=0 runs the case on the system's own resolution, for an A/B run.
 static void case_realtime(void) {
     const char *env = getenv("OOT2_VSYNC_P99_US");
     uint64_t bound_ns = (env && *env ? strtoull(env, NULL, 10) : 4000) * 1000ull;
+    rt_timer_hold_start();
+    uint64_t timer_start = plat_timer_resolution_ns();
     boot(0xF);
     bind_all();
     rt_kernel_run(G(4), 0);
@@ -422,6 +431,10 @@ static void case_realtime(void) {
     RtVsyncStats s = rt_vsync_stats();
     printf("realtime: the clock signalled %llu ticks, skipped %llu, its signals at most %.3f ms after a due time\n",
            (unsigned long long)s.ticks, (unsigned long long)s.skipped, (double)s.late_max_ns / 1e6);
+    printf("realtime: system timer resolution %llu ns at the start and %llu ns at the end (finest %llu ns; "
+           "timer_resolution = %d, so the request %s)\n", (unsigned long long)timer_start,
+           (unsigned long long)plat_timer_resolution_ns(), (unsigned long long)plat_timer_finest_ns(),
+           (int)rt_setting(RT_SET_timer_resolution), rt_setting(RT_SET_timer_resolution) ? "was made" : "was not made");
     CHECK(!bad);
 }
 

@@ -84,6 +84,8 @@ typedef enum RtSettingSource {
       "experiment E2: hold every present for this many ticks of the 60 Hz clock, whatever the game asks for; 0 is off") \
     X(hold_placement, PACING, ENUM, LIVE, 0, 0, 0, "sync|acquire",                                                    \
       "where AcquireTexture's pacing hold is: sync, in the sync the call returns, as on the console; acquire, in the call") \
+    X(timer_resolution, PACING, BOOL, RESTART, 1, 0, 1, NULL,                                                          \
+      "hold a 0.5 ms system timer resolution while the game runs; 0 leaves the system's")                              \
     X(page_release, DEBUG, ENUM, RESTART, 0, 0, 0, "off|count|release",                                                \
       "page ranges of lever L1: off, counted only, or counted and released")                                          \
     X(census, DEBUG, BOOL, RESTART, 0, 0, 1, NULL,                                                                     \

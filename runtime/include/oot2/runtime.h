@@ -61,6 +61,14 @@ void rt_set_stop_flush(void (*flush)(void));
 void rt_add_stop_writer(void (*writer)(int code, const char *line));
 void rt_run_stop_hook(int code, const char *line);
 
+// ---- the system timer resolution (timer.c, ticket 116)
+// Hold a 0.5 ms system timer resolution while the process runs unless the setting timer_resolution is 0, and log one
+// "timer:" line either way. Call it once, after the settings are loaded and before any thread starts, so the vsync
+// clock's first wait already runs on the finer timer. The request is given back on every exit path (plat.h): a normal
+// return from main, plat_exit, a fatal error and a console control event. A request the system refuses is logged and the
+// run goes on.
+void rt_timer_hold_start(void);
+
 // ---- modules and indirect dispatch (dispatch.c, architecture D8)
 //
 // The lifter writes, for each module <mod>, three tables in its function-table file:

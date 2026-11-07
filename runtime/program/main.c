@@ -11,9 +11,11 @@
 //   1. the settings (oot2/settings.h): --set KEY=VALUE (and --gfx NAME, the setting gfx), the OOT2_ variables, then the
 //      file: --config PATH, else the OOT2_CONFIG variable, else oot2.ini in the game folder. They are read before the
 //      first log line, because a log line reads census mode, which is a setting. An unknown key, or a value its key
-//      does not take, stops the start with exit code 2. Then the graphics back end the setting gfx names (null by
-//      default), installed by gfx_select (runtime/gpu/gpu.c) long before rt_dispatch_init, with the name of the layer
-//      that chose it; the Vulkan back end opens its device there, or stops the start by name (its settings:
+//      does not take, stops the start with exit code 2. Then the system timer resolution (rt_timer_hold_start, ticket
+//      116): 0.5 ms held until the process ends, unless timer_resolution is 0, before any thread starts. Then the
+//      graphics back end the setting gfx names (null by default), installed by gfx_select (runtime/gpu/gpu.c) long
+//      before rt_dispatch_init, with the name of the layer that chose it; the Vulkan back end opens its device there, or
+//      stops the start by name (its settings:
 //      oot2/gpu_vk.h)
 //   2. rt_mem_init, with main.npdm's system resource size (the pool is still the planning figure, memory.h)
 //   3. every file of the glue checked: its size, and its SHA-256 where the glue has one, or the SHA-256 of fixed ranges
@@ -246,6 +248,7 @@ int main(int argc, char **argv) {
           : snprintf(path, sizeof path, "%s/oot2.ini", g_game);
     if (n < 0 || n >= (int)sizeof path) return usage("the settings file's path is too long");
     if (!rt_settings_load(sets, nsets, path, why, sizeof why)) return usage(why);
+    rt_timer_hold_start();   // before the first thread: the vsync clock's first wait runs on the held resolution
     const char *gfx_from;
     char gfx[RT_SETTING_TEXT];
     rt_setting_source(RT_SET_gfx, &gfx_from);

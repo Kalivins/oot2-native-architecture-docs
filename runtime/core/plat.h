@@ -92,6 +92,34 @@ void plat_sleep_ns(uint64_t ns);
 int plat_random(void *p, size_t n);     // bytes from the system's generator; 1 on success
 __attribute__((noreturn)) void plat_exit(int code);   // flushes the C streams, then ends the process
 
+// ---- the system timer resolution (ticket 116). The Windows scheduler wakes a waiting thread at its timer's tick, 15.6
+// ms by default and as fine as 0.5 ms when some process asks for it; the request is a flag of the calling process, not a
+// count, and the system drops it when the process ends, however it ends. plat_timer_hold asks for want_ns; the policy
+// (the setting, the log line) is rt_timer_hold_start in timer.c, so this layer stays free of settings.
+// Returns 1 when the request is held (also when it already was: a second call changes nothing), 0 when the system
+// refused it; *granted_ns, when not NULL, is the resolution the system reports, which is the finest it allows when
+// want_ns is finer than that. The first call also makes the process release the request at a normal exit and when a
+// console control event ends it (Ctrl+C, Ctrl+Break, closing the console, log-off, shutdown). Every other exit path of
+// the runtime calls plat_timer_release itself: plat_exit, and fatal.c's end of a stop.
+int plat_timer_hold(uint64_t want_ns, uint64_t *granted_ns);
+// Give the request back. Lock-free, silent and idempotent, so a fatal error and a control event on a thread the system
+// made can call it: only the call that finds the request held makes the system call.
+void plat_timer_release(void);
+// The resolution in force now, any process's request included, in nanoseconds; 0 where the platform has none (POSIX).
+uint64_t plat_timer_resolution_ns(void);
+// The finest resolution the system allows, in nanoseconds; 0 where the platform has none.
+uint64_t plat_timer_finest_ns(void);
+// A test's view of the system call, so the request and the release can be recorded on every platform and in a process
+// that must not touch the machine-wide setting: set(want_ns, on, &now_ns) asks (on) or gives back (off) and returns 0
+// on success, with the resolution in force afterwards in now_ns; now() is the current resolution. A NULL member keeps
+// the system's, and a NULL table restores both. Install it before the first plat_timer_hold, while no other thread uses
+// the timer; each test case is a process of its own.
+typedef struct PlatTimerOps {
+    int (*set)(uint64_t want_ns, int on, uint64_t *now_ns);
+    uint64_t (*now)(void);
+} PlatTimerOps;
+void plat_timer_ops(const PlatTimerOps *ops);
+
 // ---- fibres: contexts with host stacks of their own that threads switch between (nn::os fibres, oot2/kernel.h). A
 // fibre not running may be resumed by any thread. Every switch names both sides, so no thread-local state is read across
 // it: a frame that spans a switch may wake on another host thread, where its compiler-cached thread-local addresses

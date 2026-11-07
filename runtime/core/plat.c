@@ -305,7 +305,54 @@ int plat_random(void *p, size_t n) {
     return 1;
 }
 
+// ---- the system timer resolution. ntdll's NtSetTimerResolution takes the units of 100 ns that timeBeginPeriod cannot
+// ask for (it takes whole milliseconds). It is undocumented, so it is resolved at run time (no import library, as
+// plat_sys.c does for pdh.dll), and a missing or failing call is the caller's to log. Measured in research 55: a request
+// of 5000 is granted 5000, and a finer one is clamped to the finest the hardware allows.
+typedef LONG(NTAPI *NtSetTimerResolutionFn)(ULONG want, BOOLEAN on, PULONG now);
+typedef LONG(NTAPI *NtQueryTimerResolutionFn)(PULONG coarsest, PULONG finest, PULONG now);
+static NtSetTimerResolutionFn g_nt_set;
+static NtQueryTimerResolutionFn g_nt_query;
+
+static void nt_timer_resolve(void) {   // idempotent: racing callers store the same pointers
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return;
+    g_nt_set = (NtSetTimerResolutionFn)(void *)GetProcAddress(ntdll, "NtSetTimerResolution");
+    g_nt_query = (NtQueryTimerResolutionFn)(void *)GetProcAddress(ntdll, "NtQueryTimerResolution");
+}
+
+static int sys_timer_set(uint64_t want_ns, int on, uint64_t *now_ns) {
+    if (!g_nt_set) nt_timer_resolve();
+    if (!g_nt_set) return -1;
+    ULONG now = 0;
+    LONG status = g_nt_set((ULONG)(want_ns / 100), on ? TRUE : FALSE, &now);
+    if (now_ns) *now_ns = (uint64_t)now * 100;
+    return status < 0 ? (int)status : 0;
+}
+
+static uint64_t sys_timer_query(int finest) {
+    if (!g_nt_query) nt_timer_resolve();
+    ULONG coarsest = 0, fine = 0, now = 0;
+    if (!g_nt_query || g_nt_query(&coarsest, &fine, &now) < 0) return 0;
+    return (uint64_t)(finest ? fine : now) * 100;
+}
+
+static uint64_t sys_timer_now(void) { return sys_timer_query(0); }
+static uint64_t sys_timer_finest(void) { return sys_timer_query(1); }
+
+// The console control events that end the process by default (Ctrl+C, Ctrl+Break, close, log-off, shutdown). The default
+// handler runs after this one, because it returns FALSE, so the exit code stays the system's. The stop hooks are not run
+// from here: this is a thread the system made while guest threads run.
+static BOOL WINAPI timer_ctrl_event(DWORD type) {
+    (void)type;
+    plat_timer_release();
+    return FALSE;
+}
+
+static void timer_exit_hooks(void) { SetConsoleCtrlHandler(timer_ctrl_event, TRUE); }
+
 void plat_exit(int code) {
+    plat_timer_release();
     fflush(NULL);
     _Exit(code);
 }
@@ -643,7 +690,18 @@ int plat_random(void *p, size_t n) {
     return done == n;
 }
 
+// ---- the system timer resolution: the POSIX scheduler has none to ask for (the test seam still records the calls)
+static int sys_timer_set(uint64_t want_ns, int on, uint64_t *now_ns) {
+    (void)want_ns, (void)on;
+    if (now_ns) *now_ns = 0;
+    return 0;
+}
+static uint64_t sys_timer_now(void) { return 0; }
+static uint64_t sys_timer_finest(void) { return 0; }
+static void timer_exit_hooks(void) {}
+
 void plat_exit(int code) {
+    plat_timer_release();
     fflush(NULL);
     _Exit(code);
 }
@@ -804,3 +862,47 @@ void plat_fibre_free(PlatFibre *f) {
     free(f);
 }
 #endif
+
+// ---- the system timer resolution, both platforms: the flag, the seam and the exit hooks (declared in plat.h)
+static const PlatTimerOps g_sys_timer_ops = {sys_timer_set, sys_timer_now};
+static PlatTimerOps g_timer_ops = {sys_timer_set, sys_timer_now};
+static int g_timer_held;          // atomic: the request is in force
+static int g_timer_hooked;        // the exit hooks are installed (by the first plat_timer_hold, before any other thread asks)
+static uint64_t g_timer_want_ns;  // written before g_timer_held is
+
+void plat_timer_ops(const PlatTimerOps *ops) {
+    g_timer_ops = ops ? *ops : g_sys_timer_ops;
+    if (!g_timer_ops.set) g_timer_ops.set = g_sys_timer_ops.set;
+    if (!g_timer_ops.now) g_timer_ops.now = g_sys_timer_ops.now;
+}
+
+// Windows 11 ignores a process's request while its window is minimized or hidden, unless the process opts out with
+// SetProcessInformation (ProcessPowerThrottling, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION). Decided with the
+// maintainer on 2026-11-07: no opt-out. A minimized or occluded game needs no sub-millisecond pacing, and the system's
+// power saving stays intact. Not tested: the development machine runs Windows 10 (research/116-timer-resolution.md).
+int plat_timer_hold(uint64_t want_ns, uint64_t *granted_ns) {
+    if (__atomic_load_n(&g_timer_held, __ATOMIC_ACQUIRE)) {
+        if (granted_ns) *granted_ns = plat_timer_resolution_ns();
+        return 1;
+    }
+    if (!g_timer_hooked) {   // before the request, so no exit between the two leaves it held
+        g_timer_hooked = 1;
+        atexit(plat_timer_release);
+        timer_exit_hooks();
+    }
+    uint64_t now = 0;
+    if (g_timer_ops.set(want_ns, 1, &now) != 0) return 0;
+    if (granted_ns) *granted_ns = now;
+    g_timer_want_ns = want_ns;
+    __atomic_store_n(&g_timer_held, 1, __ATOMIC_RELEASE);
+    return 1;
+}
+
+void plat_timer_release(void) {
+    if (!__atomic_exchange_n(&g_timer_held, 0, __ATOMIC_ACQ_REL)) return;
+    uint64_t now;
+    g_timer_ops.set(g_timer_want_ns, 0, &now);
+}
+
+uint64_t plat_timer_resolution_ns(void) { return g_timer_ops.now(); }
+uint64_t plat_timer_finest_ns(void) { return sys_timer_finest(); }
