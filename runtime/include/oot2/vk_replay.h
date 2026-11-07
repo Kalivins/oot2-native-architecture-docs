@@ -55,6 +55,14 @@
 // device lacks is a named stop. A dispatch's indirect group counts are copied by the GPU into the driver bank c[0] just
 // before the dispatch: they may be the output of earlier work of the frame, or of an earlier frame still in flight.
 //
+// Reports, events and conditions (vk_replay_report.c, gfx.h's Synchronisation). Event signals, counter reports and
+// WaitEvent checks are copied in op-stream order and done by one effect on the completion thread, queued after the
+// frame's end (after the backing map's write-backs of the frame), before the frame's value is done. A report's
+// timestamp is the guest's tick when it completes; samples passed are counted by occlusion queries, one per pass from
+// the channel's first samples-passed reset or report on, summed in order on the completion thread; every other counter
+// reports 0. SetRenderEnableConditional is decided at replay from earlier reports (a report not done yet counts as 0, or
+// as visible for samples passed). A report into memory the CPU cannot see is dropped.
+//
 // Named stops. Every op of nvn_obj.h's list is replayed or stops by name (a named fatal, rt_fatal: the replay has no
 // guest CPU to stop): vkr_op_ticket names the ticket a stopped op waits for, and the stop's message names the op and
 // the ticket. So does any state the replay cannot say yet (a masked clear, a storage image, a separate sampler).
@@ -76,7 +84,7 @@ struct nvn_stage;
 // ---- the op list: replayed, or the ticket a stopped op waits for
 #define VKR_REPLAYED NULL
 // NULL for an op this replay makes packets of (or ignores by contract, as OP_HINT), else the name of what it waits for
-// ("reports, events and conditional rendering (ticket 68)", ...). Past OP_COUNT_: "unknown".
+// ("task and mesh draws (ticket 73)", ...). Past OP_COUNT_: "unknown".
 const char *vkr_op_ticket(uint32_t op);
 
 // ---- what the replay needs of a device (the device's, or a test's stand-ins: continuous integration checks the
@@ -136,7 +144,18 @@ typedef struct VkReplayOps {
     // Either may be NULL.
     void (*frame_begin)(void);
     void (*frame_end)(uint64_t value);
+    // Occlusion queries for the samples-passed counter: a pool of VKR_QUERIES for the frame `value`, reset before the
+    // frame's work (the prologue); and, on the completion thread once the frame is done, the results of its first n
+    // queries into out, after which the pool is taken back. NULL when the ops count nothing (a frame that counts stops
+    // by name).
+    VkQueryPool (*queries)(uint64_t value);
+    void (*query_results)(VkQueryPool pool, uint32_t n, uint64_t *out);
+    // 1 when the CPU may read [addr, addr + size) now (a memory pool it sees holds it): the words of a conditional
+    // rendering condition. NULL: never (the condition renders).
+    int (*cpu_reads)(uint64_t addr, uint64_t size);
 } VkReplayOps;
+#define VKR_QUERIES 512u       // occlusion queries in one pool
+#define VKR_QUERY_POOLS 8u     // pools a frame may take (one query per pass while counting, one more per report)
 
 // Use these ops from now on (NULL: the device's, vkr_device_ops). A test's ops stay valid while it replays.
 void vkr_set_ops(const VkReplayOps *ops);
@@ -162,6 +181,10 @@ extern int vkr_no_declare;
 // Tests only: while non-zero, the dynamic state of the core features (line and point fill, depth bias clamp, depth
 // clamp, depth bounds, wide lines, more than one viewport) is left at the default a device without them would say.
 extern int vkr_no_features;
+// Tests only, the counter-runs of the reports (vk_replay_report.c): the condition reads memory even under a report not
+// done yet; samples passed are never counted; a timestamp is the tick at replay, not at completion; the completion
+// thread walks a frame's events and reports backwards.
+extern int vkr_no_pending, vkr_no_queries, vkr_stamp_at_replay, vkr_reverse_results;
 
 // ---- what the last frames wrote: the storage and image ranges a draw or dispatch may write, and the ranges a copy, a
 // fill or an update wrote, for the frame `value`; *n how many. Kept for the frames in flight.
@@ -189,3 +212,12 @@ typedef struct VkrStats {
     uint64_t raw_binds;                             // draws and dispatches with a raw-access stage (D15)
 } VkrStats;
 void vkr_stats(VkrStats *out);
+
+// ---- reports, events and waits as the completion thread did them, and the conditions decided at replay
+typedef struct VkrReportStats {
+    uint64_t reports, dropped;              // counter reports written, and those into memory the CPU cannot see
+    uint64_t resets, events, queries;       // samples-passed resets, event signals, occlusion queries read back
+    uint64_t waits, waits_unsatisfied;      // WaitEvents checked, and those the work before them did not satisfy
+    uint64_t conditions, conditions_false;  // SetRenderEnableConditional decided, and those that disabled rendering
+} VkrReportStats;
+void vkr_report_stats(VkrReportStats *out);

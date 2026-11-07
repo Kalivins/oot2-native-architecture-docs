@@ -29,6 +29,7 @@
 #include "oot2/bindless.h"
 #include "oot2/gpu_vk.h"
 #include "oot2/runtime.h"
+#include "oot2/vk_capture.h"
 #include "oot2/vk_image.h"
 #include "oot2/vk_miss.h"
 #include "oot2/vk_replay.h"
@@ -213,10 +214,6 @@ static int vk_fence_wait(uint64_t value, uint64_t timeout_ns) { return gpu_sync_
 static uint64_t vk_fence_done(void) { return gpu_sync_done(); }
 static void vk_finish(void) { gpu_sync_finish(); }
 
-// What later tickets bring: a call stops by name.
-__attribute__((noreturn)) static void not_built(const char *what) {
-    rt_fatal("gfx: vulkan: %s is not built yet in the Vulkan back end", what);
-}
 // The bindless tables (oot2/bindless.h): a registration changes one entry of its pool's shadow table and appends one
 // record to the change log; the copies of set 0 take it when a submission does.
 static void vk_texture_register(const dpool_ref *pool, int id, const tex_t *t, const view_t *v) {
@@ -225,11 +222,8 @@ static void vk_texture_register(const dpool_ref *pool, int id, const tex_t *t, c
 static void vk_sampler_register(const dpool_ref *pool, int id, const samp_par *s) {
     bindless_sampler_register(pool, id, s);
 }
-static void vk_present(const tex_t *t, const int crop[4]) {
-    (void)t;
-    (void)crop;
-    not_built("present");
-}
+// The offscreen capture (oot2/vk_capture.h) until the window's swapchain: after the work submitted before the call.
+static void vk_present(const tex_t *t, const int crop[4]) { vkc_present(t, crop); }
 static void vk_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row,
                            uint64_t img) {
     vkb_read_texels(t, v, r, dst, row, img);

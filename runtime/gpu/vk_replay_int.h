@@ -40,3 +40,15 @@ void vkr_count_transfer(uint64_t bytes);
 int vkr_xfer_op(const op_hdr *r);
 // Forget the copy strides (vkr_reset).
 void vkr_xfer_reset(void);
+
+// The reports, events and waits (vk_replay_report.c): one op of them, or 0 when it is not one of them; the condition of
+// SetRenderEnableConditional (1: render); a draw about to be recorded in the open pass (it begins a samples-passed query
+// when counting); the pass about to end (the open query ends); the frame's begin, and its end after the frame's own end
+// op (the list goes to the completion thread); and the forgetting of the channel's counting (vkr_reset).
+int vkr_report_op(const op_hdr *r);
+int vkr_condition(const p_render_cond *p);
+void vkr_report_draw(void);
+void vkr_report_pass_end(void);
+void vkr_report_frame_begin(void);
+void vkr_report_frame_end(void);
+void vkr_report_reset(void);

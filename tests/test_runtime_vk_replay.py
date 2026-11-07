@@ -21,10 +21,16 @@ and indirect dispatches and clears become their packets (an indirect dispatch's 
 of its own); a GPU write over a copied uniform range drops the copy, so that every later read of the range is live; copies,
 fills, updates and texture clears are one transfer command each behind a full barrier, with the channel's strides, their
 writes into memory the CPU can see declared once; every op of the list is replayed or stops by name with its ticket; a recording that is not whole stops by name.
+Reports, events and waits are done by the completion thread in op-stream order (an event WRITE then ADD leaves their
+sum; a samples-passed report writes the running sum of the occlusion queries before it, one per pass from the first
+reset, ended at each samples-passed report or reset and at the pass's end; a reset sets the count to 0; a timestamp
+report's counter word is 0; a report into memory the CPU cannot see is dropped; a WaitEvent is checked at its place);
+conditional rendering reads a report not done yet as 0 (a timestamp) or as visible (samples passed), and memory otherwise.
 
 Each check of the ticket's new behaviour has a counter-run, a test-only switch of the replay that breaks the mechanism
 (vkr_no_flip: the origin's flip; vkr_no_snapshot: the uniform copy at submit; vkr_no_drop: the drop rule;
-vkr_no_declare: the declaration of a transfer's write; vkr_no_features: the states of the core features).
+vkr_no_declare: the declaration of a transfer's write; vkr_no_features: the states of the core features;
+vkr_no_pending: the reports not done at the condition; vkr_reverse_results: the op-stream order of completion).
 The check must then fail.
 
 Run: python -m unittest discover -s tests -v
@@ -55,7 +61,8 @@ REPLAYED = {
     "SET_SAMP_POOL", "BLEND_COLOR", "DEPTH_CLAMP", "RENDER_ENABLE", "RASTER_DISCARD", "PRIM_RESTART", "PUSH_CONST",
     "WAIT_SYNC", "SAMPLE_MASK", "DEPTH_BOUNDS", "CONSERVATIVE", "SHADING_RATE_IMAGE", "SHADING_RATE_MODE", "SCRATCH",
     "HINT", "COPY_B2B", "UPDATE_UB", "COPY_B2T", "COPY_STRIDE", "COPY_T2B", "COPY_T2T", "CLEAR_TEX", "CLEAR_BUF",
-    "COPY_IMAGE_STRIDE",
+    "COPY_IMAGE_STRIDE", "SIGNAL_EVENT", "REPORT_COUNTER", "RESET_COUNTER", "RENDER_COND", "WAIT_EVENT",
+    "SHADING_RATE_PALETTE",
 }
 
 
@@ -481,6 +488,47 @@ class ComputeTest(ReplayBase):
         bank_offsets = [int(re.search(r" off=(0x[0-9a-f]+) ", x).group(1), 16) for x in banks]
         self.assertEqual([bank_offsets[0], bank_offsets[1], bank_offsets[3]], dst)
         self.assertEqual(len(set(bank_offsets)), 4)
+
+
+REPORTS = [
+    "event 8",
+    "samples 10 70 0",
+    "timestamp counter 0, ticks in order 1, nonzero 1",
+    "reports 6 dropped 1 resets 2 events 2 queries 4 waits 2 unsatisfied 1 conditions 4 false 2",
+    "draws 6",
+]
+
+
+class ReportsTest(ReplayBase):
+    def test_reports_events_and_conditions_complete_in_op_stream_order(self) -> None:
+        out = self.passing("reports")
+        for line in REPORTS:
+            self.assertIn(line, out.splitlines())
+        pkt = [x for x in out.splitlines() if x.startswith("pkt ")]
+        queries = [x.split()[1] for x in pkt if x.split()[1] in ("BeginQuery", "EndQuery", "Draw", "EndRendering")]
+        # frame 1: query 0 over draws 1 and 2, query 1 over draw 3, query 2 over draws 4 and 6, ended by the pass;
+        # frame 2: query 0 over draw 8
+        self.assertEqual(queries, ["BeginQuery", "Draw", "Draw", "EndQuery", "BeginQuery", "Draw", "EndQuery", "BeginQuery",
+                                   "Draw", "Draw", "EndQuery", "EndRendering",
+                                   "BeginQuery", "Draw", "EndQuery", "EndRendering"])
+        self.assertIn("pkt BeginQuery 0x9901 2 0", pkt)
+        self.assertIn("query results pool 0x9901 n 3", out)
+        self.assertIn("query results pool 0x9902 n 1", out)
+
+    def test_a_frame_past_one_query_pool_takes_another(self) -> None:
+        out = self.passing("many_queries")
+        # each query i of a pool counted 10 * (i + 1): 512 in the first pool, 88 in the second
+        self.assertIn(f"samples {10 * (512 * 513 // 2 + 88 * 89 // 2)}", out.splitlines())
+        self.assertIn("query results pool 0x9901 n 512", out)
+        self.assertIn("query results pool 0x9901 n 88", out)
+
+    def test_counter_run_without_the_reports_not_done(self) -> None:
+        out = self.passing("reports", "--mutant", "nopending")
+        self.assertIn("draws 7", out.splitlines())   # draw 5 read the old 7 in memory and rendered
+
+    def test_counter_run_completed_out_of_order(self) -> None:
+        out = self.passing("reports", "--mutant", "reverse")
+        self.assertIn("event 5", out.splitlines())   # the ADD before the WRITE
 
 
 class OpListTest(ReplayBase):

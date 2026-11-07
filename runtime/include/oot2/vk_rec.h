@@ -77,7 +77,10 @@ struct nvn_stage;
     F(SetLogicOpEnableEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)                                                 \
     F(SetDepthClipNegativeOneToOneEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)                                     \
     F(FillBuffer, (VkBuffer b, VkDeviceSize o, VkDeviceSize n, uint32_t v), (b, o, n, v),                              \
-      (cb, a->b, a->o, a->n, a->v), VkBuffer b; VkDeviceSize o, n; uint32_t v;)
+      (cb, a->b, a->o, a->n, a->v), VkBuffer b; VkDeviceSize o, n; uint32_t v;)                                        \
+    F(BeginQuery, (VkQueryPool p, uint32_t q, VkQueryControlFlags f), (p, q, f), (cb, a->p, a->q, a->f),               \
+      VkQueryPool p; uint32_t q; VkQueryControlFlags f;)                                                               \
+    F(EndQuery, (VkQueryPool p, uint32_t q), (p, q), (cb, a->p, a->q), VkQueryPool p; uint32_t q;)
 
 #define VKREC_DRAWS(D)                                                                                                 \
     D(Draw, 'd', (uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi), (vc, ic, fv, fi),                               \

@@ -10,7 +10,8 @@
 // and :1012-1032 (c[0]), runtime/vk_pipeline.c:3639-3644 (the front face under the flip: unchanged for the upper-left
 // origin, mirrored for the lower-left one as LAS Recomp does), runtime/vk_usnap.c:1-21 (the snapshot: imported
 // uniform ranges copied at submit, a GPU write over a copy drops it). The code is ours: the replay writes packets and binds
-// through the uni layout's push descriptors and push constant texture slots. The transfers are vk_replay_xfer.c's.
+// through the uni layout's push descriptors and push constant texture slots. The transfers are vk_replay_xfer.c's; the
+// reports, events, waits and conditions vk_replay_report.c's.
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,15 +63,13 @@ const char *vkr_op_ticket(uint32_t op) {
     case OP_DISPATCH: case OP_DISPATCH_IND: case OP_BARRIER: case OP_SET_TEX_POOL: case OP_SET_SAMP_POOL:
     case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RENDER_ENABLE: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
     case OP_PUSH_CONST: case OP_WAIT_SYNC: case OP_SAMPLE_MASK: case OP_DEPTH_BOUNDS: case OP_CONSERVATIVE:
-    case OP_SHADING_RATE_IMAGE: case OP_SHADING_RATE_MODE: case OP_SCRATCH: case OP_HINT:
+    case OP_SHADING_RATE_IMAGE: case OP_SHADING_RATE_PALETTE: case OP_SHADING_RATE_MODE: case OP_SCRATCH: case OP_HINT:
     case OP_COPY_B2B: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_STRIDE: case OP_COPY_T2B: case OP_COPY_T2T:
     case OP_CLEAR_TEX: case OP_CLEAR_BUF: case OP_COPY_IMAGE_STRIDE:
-        return VKR_REPLAYED;
     case OP_SIGNAL_EVENT: case OP_REPORT_COUNTER: case OP_RESET_COUNTER: case OP_RENDER_COND: case OP_WAIT_EVENT:
-        return "reports, events and conditional rendering (ticket 68)";
+        return VKR_REPLAYED;
     case OP_DRAW_MESH: case OP_DRAW_MESH_IND: case OP_GEOMETRY_MODE:
         return "task and mesh draws (ticket 73)";
-    case OP_SHADING_RATE_PALETTE: return "shading rate palettes (no ticket yet)";
     case OP_BIND_ACCEL: return "acceleration structures (no ticket: the replay has no ray tracing)";
     case OP_JUMP: case OP_CALL: return "a called recording (the front end inlines every one)";
     default: return "unknown";
@@ -198,6 +197,7 @@ const VkrWrite *vkr_writes(uint64_t value, uint32_t *n) {
 void vkr_reset(void) {
     memset(&S, 0, sizeof S);
     vkr_xfer_reset();
+    vkr_report_reset();
     ledger_track_reset(&S.track);
     S.render = 1, S.line_width = 1.0f, S.sample_mask = ~0u;
     S.chmask.mask = 0xFFFFFFFFu;
@@ -347,6 +347,7 @@ static void full_barrier(void) {
 
 static void pass_end(void) {
     if (!F.in_pass) return;
+    vkr_report_pass_end();   // a samples-passed query begun in the pass ends in it
     vkrec_EndRendering();
     F.in_pass = 0;
 }
@@ -948,6 +949,7 @@ static int draw_prepare(int prim, uint32_t base_instance, VkBool32 *restart_out)
     if (vb->raw || fb->raw) raw_words(&s, vb->raw ? vs : fs);
     vkrec_PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_GRAPHICS, F.ops->graphics_layout, 1, s.n, s.w);
     vkrec_PushConstants(F.ops->graphics_layout, vkp_push_range(VKP_GRAPHICS).stageFlags, 0, VKP_PUSH_BYTES, s.push);
+    vkr_report_draw();
     F.draws++, g_stats.draws++;
     return 1;
 }
@@ -1247,6 +1249,7 @@ static void record(const op_hdr *r) {
     case OP_BLEND_COLOR: memcpy(S.blend_color, ((const p_blend_color *)a)->rgba, sizeof S.blend_color); break;
     case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_flag *)a)->value != 0; break;
     case OP_RENDER_ENABLE: S.render = ((const p_flag *)a)->value != 0; break;
+    case OP_RENDER_COND: S.render = vkr_condition(a); break;
     case OP_RASTER_DISCARD: S.raster_discard = ((const p_flag *)a)->value != 0; break;
     case OP_PRIM_RESTART: {
         const p_prim_restart *p = a;
@@ -1278,13 +1281,14 @@ static void record(const op_hdr *r) {
     case OP_SHADING_RATE_MODE:
         if (((const p_flag *)a)->value) stop("shading rate mode %d is not replayed yet", ((const p_flag *)a)->value);
         break;
+    case OP_SHADING_RATE_PALETTE: break;   // read only through a shading rate image and mode, which stop above
     case OP_SCRATCH: break;   // the driver's local memory for spilled registers: the device's own on Vulkan
     case OP_HINT:   // scheduling and cache hints change nothing the GPU computes (nvn_obj.h), but the compute overlap
                     // mode, which acts as a full barrier (architecture: the semantics that must survive)
         if (((const p_hint *)a)->what == NVN_HINT_COMPUTE_OVERLAP) pass_end(), full_barrier();
         break;
     default:
-        if (!vkr_xfer_op(r)) stop_op(r->op);
+        if (!vkr_xfer_op(r) && !vkr_report_op(r)) stop_op(r->op);
     }
     ledger_track_op(&S.track, r);
 }
@@ -1323,10 +1327,12 @@ uint64_t vkr_submit(const uint64_t *handles, int n) {
     int k = (int)(frames++ % FRAMES_KEPT);
     W[k].value = value, W[k].n = 0;
     F.wslot = k;
+    vkr_report_frame_begin();
     full_barrier();   // the frame's work after every earlier submission's (D18)
     for (int i = 0; i < n; i++) walk(i, handles[i]);
     pass_end();
     if (ops->frame_end) ops->frame_end(value);
+    vkr_report_frame_end();   // after the frame's end: its events and reports follow the backing map's write-backs
     g_stats.frames++;
     return vkrec_end(NULL, 0);
 }

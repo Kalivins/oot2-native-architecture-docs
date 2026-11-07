@@ -2,8 +2,8 @@
 // Copyright (C) 2026 The oot2-native contributors
 //
 // What the replay (oot2/vk_replay.h) needs of the device: the pipeline builder, the descriptions of the stages it
-// binds, the backing map, the images render targets stand on and their attachment views, the bindless tables, and the
-// frame's scratch memory.
+// binds, the backing map, the images render targets stand on and their attachment views, the bindless tables, the
+// frame's scratch memory, and the occlusion query pools of the samples-passed counter.
 //
 // Scratch memory comes in chunks of host-visible, coherent memory, each with one buffer over it; a frame takes chunks
 // from a free list and hands them back from the completion thread once its value is done, so a chunk the device may
@@ -19,6 +19,7 @@
 #include "oot2/shader_cache.h"
 #include "oot2/shader_desc.h"
 #include "oot2/vk_bindless.h"
+#include "oot2/vk_capture.h"
 #include "oot2/vk_format.h"
 #include "oot2/vk_image.h"
 #include "oot2/vk_miss.h"
@@ -209,13 +210,61 @@ static void dev_frame_end(uint64_t value) {
     g_frame.held = NULL, g_frame.value = 0;
 }
 
+// ---------- occlusion queries: pools of VKR_QUERIES from a free list, each reset in the prologue of the frame that takes
+// it and back on the list once the completion thread read its results
+static VkQueryPool *g_qfree;
+static uint32_t g_nqfree, g_qcap, g_qmade;
+static PlatMutex g_qlock = PLAT_MUTEX_INIT;
+
+static VkQueryPool dev_queries(uint64_t value) {
+    (void)value;
+    VkQueryPool p = VK_NULL_HANDLE;
+    plat_mutex_lock(&g_qlock);
+    if (g_nqfree) p = g_qfree[--g_nqfree];
+    plat_mutex_unlock(&g_qlock);
+    if (!p) {
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_OCCLUSION,
+                                    .queryCount = VKR_QUERIES};
+        GPU_VK_OK(vkCreateQueryPool(gpu_vk.device, &qi, NULL, &p), "vkCreateQueryPool (samples passed)");
+        plat_mutex_lock(&g_qlock);
+        g_qmade++;
+        plat_mutex_unlock(&g_qlock);
+    }
+    vkCmdResetQueryPool(gpu_vk_prologue(), p, 0, VKR_QUERIES);
+    return p;
+}
+
+// The frame is done, so every query it ended is available: WAIT only guards against a driver that is late saying so.
+static void dev_query_results(VkQueryPool p, uint32_t n, uint64_t *out) {
+    if (n)
+        GPU_VK_OK(vkGetQueryPoolResults(gpu_vk.device, p, 0, n, sizeof *out * n, out, sizeof *out,
+                                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT),
+                  "vkGetQueryPoolResults (samples passed)");
+    plat_mutex_lock(&g_qlock);
+    if (g_nqfree == g_qcap) {
+        uint32_t cap = g_qcap ? 2 * g_qcap : 8;
+        VkQueryPool *f = realloc(g_qfree, sizeof *f * cap);
+        if (!f) rt_fatal("gfx: vulkan: out of memory for %u query pools", cap);
+        g_qfree = f, g_qcap = cap;
+    }
+    g_qfree[g_nqfree++] = p;
+    plat_mutex_unlock(&g_qlock);
+}
+
+// The condition's words: the front end's pools, as the null back end reads them (gfx.h, nvn_pool_find).
+static int dev_cpu_reads(uint64_t addr, uint64_t size) {
+    const pool_t *p = nvn_pool_find(addr, size);
+    return p && !(p->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS);
+}
+
 const VkReplayOps *vkr_device_ops(void) {
     static VkReplayOps ops = {.graphics = vkm_graphics, .compute = vkm_compute, .program_bound = vkm_program_bound,
                               .binds = dev_binds,
                               .resolve = backing_resolve, .gpu_wrote = backing_gpu_wrote, .target = dev_target,
                               .image = dev_image,
                               .acquire = dev_acquire, .image_slot = dev_image_slot, .scratch = dev_scratch,
-                              .raw = gpu_vk_raw_begin, .frame_begin = dev_frame_begin, .frame_end = dev_frame_end};
+                              .raw = gpu_vk_raw_begin, .frame_begin = dev_frame_begin, .frame_end = dev_frame_end,
+                              .queries = dev_queries, .query_results = dev_query_results, .cpu_reads = dev_cpu_reads};
     const VkpLayouts *l = vkp_layouts();   // read at every call: the pipeline builder may open after the first frame
     ops.graphics_layout = l->graphics, ops.compute_layout = l->compute;
     return &ops;
@@ -241,4 +290,11 @@ void vkr_device_close(void) {
             free(e);
         }
     plat_mutex_unlock(&g_bind_lock);
+    plat_mutex_lock(&g_qlock);   // every frame is done, so every pool is back
+    if (g_nqfree != g_qmade) rt_fatal("gfx: vulkan: %u of %u query pools are not back at the device's close", g_qmade - g_nqfree, g_qmade);
+    while (g_nqfree) vkDestroyQueryPool(gpu_vk.device, g_qfree[--g_nqfree], NULL);
+    free(g_qfree);
+    g_qfree = NULL, g_qcap = g_qmade = 0;
+    plat_mutex_unlock(&g_qlock);
+    vkc_close();   // the offscreen capture (oot2/vk_capture.h)
 }

@@ -224,20 +224,31 @@ static void *op_scratch(uint64_t value, uint32_t bytes, uint32_t align, VkBuffer
 }
 static void op_frame_begin(void) { lput(&g_ops, "op frame_begin\n"); }
 static void op_frame_end(uint64_t value) { lput(&g_ops, "op frame_end %llu\n", (ull)value); }
+// Query pools named by their frame; query i of any pool counted 10 * (i + 1) samples.
+static VkQueryPool op_queries(uint64_t value) {
+    lput(&g_ops, "op queries frame %llu\n", (ull)value);
+    return (VkQueryPool)(uintptr_t)(0x9900 + value);
+}
+static int op_cpu_reads(uint64_t addr, uint64_t size) { return addr - HOST < HOST_BYTES && addr - HOST + size <= HOST_BYTES; }
+static void op_query_results(VkQueryPool pool, uint32_t n, uint64_t *out) {
+    for (uint32_t i = 0; i < n; i++) out[i] = 10ull * (i + 1);
+    printf("query results pool 0x%llx n %u\n", (ull)(uintptr_t)pool, n);
+}
 
 static const VkReplayOps g_fake_ops = {
     .graphics = op_graphics, .compute = op_compute,
     .graphics_layout = (VkPipelineLayout)(uintptr_t)0x6100, .compute_layout = (VkPipelineLayout)(uintptr_t)0x6200,
     .binds = op_binds, .resolve = op_resolve, .gpu_wrote = op_gpu_wrote, .target = op_target, .image = op_image,
     .acquire = op_acquire,
-    .image_slot = op_image_slot, .scratch = op_scratch, .frame_begin = op_frame_begin, .frame_end = op_frame_end};
+    .image_slot = op_image_slot, .scratch = op_scratch, .frame_begin = op_frame_begin, .frame_end = op_frame_end,
+    .queries = op_queries, .query_results = op_query_results, .cpu_reads = op_cpu_reads};
 
 // ---------- the stand-in recorder calls: one line per call
 #define FAKE_CB ((VkCommandBuffer)(uintptr_t)0xC0FFEE00u)
 static void pr_f(double v) { lput(&g_pkt, " %g", v); }
 static void pr_p(const void *v) { lput(&g_pkt, " 0x%llx", (ull)(uintptr_t)v); }
 static void pr_i(long long v) { lput(&g_pkt, " %lld", v); }
-#define PRA(x) _Generic((x), float: pr_f, double: pr_f, VkPipeline: pr_p, VkBuffer: pr_p, default: pr_i)(x);
+#define PRA(x) _Generic((x), float: pr_f, double: pr_f, VkPipeline: pr_p, VkBuffer: pr_p, VkQueryPool: pr_p, default: pr_i)(x);
 #define NARG_(_1, _2, _3, _4, _5, _6, N, ...) N
 #define NARG(...) NARG_(__VA_ARGS__, 6, 5, 4, 3, 2, 1)
 #define CAT_(a, b) a##b
@@ -986,6 +997,83 @@ static void case_broken(void) {
     printf("submit returned\n");
 }
 
+// ---------- reports, events, waits and conditions: written by the completion thread in op-stream order
+static uint64_t rd64(uint32_t off) { uint64_t v; memcpy(&v, g_host + off, 8); return v; }
+static void wr64(uint32_t off, uint64_t v) { memcpy(g_host + off, &v, 8); }
+#define EV ((volatile uint32_t *)(void *)(g_host + 0x900))
+static void draw_k(Rec *r, int k) { PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .first = k, .count = 3}); }
+
+static void case_reports(void) {
+    open_fakes();
+    wr64(0xA00, 7), wr64(0xA10, 0);   // a timestamp report goes to 0xA00: not done, it counts as 0, not 7
+    wr64(0xB00, 5), wr64(0xB10, 5);   // done reports: memory decides
+    Rec *r = rec_begin(0);
+    graphics_state(r);
+    PUT(r, OP_RESET_COUNTER, (p_reset_counter){NVN_COUNTER_TYPE_SAMPLES_PASSED});
+    draw_k(r, 1);                                                          // query 0 begins with the pass
+    draw_k(r, 2);
+    PUT(r, OP_REPORT_COUNTER, (p_report_counter){NVN_COUNTER_TYPE_SAMPLES_PASSED, HOST + 0x800});   // query 0: 10
+    draw_k(r, 3);                                                          // query 1
+    PUT(r, OP_REPORT_COUNTER, (p_report_counter){NVN_COUNTER_TYPE_TIMESTAMP, HOST + 0x810});
+    PUT(r, OP_SIGNAL_EVENT, (p_signal_event){EV, NVN_EVENT_SIGNAL_MODE_WRITE, 5, 0, 0});
+    PUT(r, OP_SIGNAL_EVENT, (p_signal_event){EV, NVN_EVENT_SIGNAL_MODE_ADD, 3, 0, 0});
+    PUT(r, OP_WAIT_EVENT, (p_wait_event){EV, NVN_EVENT_WAIT_MODE_EQUAL, 8, 0x7100});
+    PUT(r, OP_WAIT_EVENT, (p_wait_event){EV, NVN_EVENT_WAIT_MODE_EQUAL, 100, 0x7200});
+    PUT(r, OP_REPORT_COUNTER, (p_report_counter){NVN_COUNTER_TYPE_SAMPLES_PASSED, VRAM + 0x300});    // dropped
+    PUT(r, OP_RENDER_COND, (p_render_cond){0, 0, HOST + 0x800});           // samples passed not done: renders
+    draw_k(r, 4);
+    PUT(r, OP_REPORT_COUNTER, (p_report_counter){NVN_COUNTER_TYPE_TIMESTAMP, HOST + 0xA00});
+    PUT(r, OP_RENDER_COND, (p_render_cond){1, 0, HOST + 0xA00});           // 0 != 0: skipped
+    draw_k(r, 5);
+    PUT(r, OP_RENDER_COND, (p_render_cond){0, 0, HOST + 0xB00});           // 5 == 5: renders
+    draw_k(r, 6);
+    PUT(r, OP_RENDER_COND, (p_render_cond){1, 0, HOST + 0xB00});           // skipped
+    draw_k(r, 7);
+    PUT(r, OP_RENDER_ENABLE, (p_flag){1});
+    uint64_t h = rec_end(r);
+    uint64_t v = vkr_submit(&h, 1);
+    CHECK(gpu_sync_wait(v, 10000000000ull));
+    r = rec_begin(1);
+    draw_k(r, 8);                                                          // query 0 of the second pool
+    PUT(r, OP_REPORT_COUNTER, (p_report_counter){NVN_COUNTER_TYPE_SAMPLES_PASSED, HOST + 0x820});
+    PUT(r, OP_RESET_COUNTER, (p_reset_counter){NVN_COUNTER_TYPE_SAMPLES_PASSED});
+    PUT(r, OP_REPORT_COUNTER, (p_report_counter){NVN_COUNTER_TYPE_SAMPLES_PASSED, HOST + 0x830});
+    h = rec_end(r);
+    CHECK(gpu_sync_wait(vkr_submit(&h, 1), 10000000000ull));
+    printf("event %u\n", *EV);
+    printf("samples %llu %llu %llu\n", (ull)rd64(0x800), (ull)rd64(0x820), (ull)rd64(0x830));
+    printf("timestamp counter %llu, ticks in order %d, nonzero %d\n", (ull)rd64(0x810),
+           rd64(0x818) >= rd64(0x808) && rd64(0x828) >= rd64(0x818), rd64(0x808) != 0);
+    VkrReportStats rs;
+    vkr_report_stats(&rs);
+    printf("reports %llu dropped %llu resets %llu events %llu queries %llu waits %llu unsatisfied %llu conditions %llu "
+           "false %llu\n", (ull)rs.reports, (ull)rs.dropped, (ull)rs.resets, (ull)rs.events, (ull)rs.queries, (ull)rs.waits,
+           (ull)rs.waits_unsatisfied, (ull)rs.conditions, (ull)rs.conditions_false);
+    VkrStats st;
+    vkr_stats(&st);
+    printf("draws %llu\n", (ull)st.draws);
+    close_fakes();
+    printf("ok reports\n");
+}
+
+// 600 passes while counting: the frame takes a second query pool after 512 queries, and the sum covers both.
+static void case_many_queries(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    graphics_state(r);
+    PUT(r, OP_RESET_COUNTER, (p_reset_counter){NVN_COUNTER_TYPE_SAMPLES_PASSED});
+    for (int i = 0; i < 600; i++) {
+        draw_k(r, i);
+        PUT(r, OP_BARRIER, (p_barrier){0, 0});   // ends the pass: the next draw begins another query
+    }
+    PUT(r, OP_REPORT_COUNTER, (p_report_counter){NVN_COUNTER_TYPE_SAMPLES_PASSED, HOST + 0x800});
+    uint64_t h = rec_end(r);
+    CHECK(gpu_sync_wait(vkr_submit(&h, 1), 10000000000ull));
+    printf("samples %llu\n", (ull)rd64(0x800));
+    close_fakes();
+    printf("ok many_queries\n");
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc < 2) {
@@ -1000,6 +1088,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(m, "nodrop")) vkr_no_drop = 1;
         else if (!strcmp(m, "nodeclare")) vkr_no_declare = 1;
         else if (!strcmp(m, "nofeatures")) vkr_no_features = 1;
+        else if (!strcmp(m, "nopending")) vkr_no_pending = 1;
+        else if (!strcmp(m, "reverse")) vkr_reverse_results = 1;
         else {
             fprintf(stderr, "unknown mutant %s\n", m);
             return 2;
@@ -1022,6 +1112,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "draw_indirect")) case_draw_indirect();
     else if (!strcmp(cs, "stop") && argc >= 3) case_stop((uint32_t)strtoul(argv[2], NULL, 10));
     else if (!strcmp(cs, "broken")) case_broken();
+    else if (!strcmp(cs, "reports")) case_reports();
+    else if (!strcmp(cs, "many_queries")) case_many_queries();
     else {
         fprintf(stderr, "unknown case %s\n", cs);
         return 2;
