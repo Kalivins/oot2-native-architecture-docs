@@ -240,6 +240,34 @@ def make_ndsr(records: list[tuple[bytes, bytes, int, int]]) -> bytes:
     return bytes(out)
 
 
+def make_ndsr_stream(items: list[tuple]) -> tuple[bytes, list[int]]:
+    """An NDSR pack whose table from +0x14 mixes 16-byte records with 8-byte entries (an address and a tag), as the
+    game's does, so that a record can sit 8 bytes off the 16-byte grid. Items: ("rec", control, code, control type,
+    code type) or ("tag", address, tag). Returns the pack and the table offset of every item."""
+    table = 0x14
+    sizes = [16 if item[0] == "rec" else 8 for item in items]
+    out = bytearray(table + sum(sizes) + 32)             # the zeros at the end close the table
+    out[0:4] = b"NDSR"
+    struct.pack_into("<II", out, 4, 0x10100, 0x20302)
+    at, offsets = table, []
+    for item, size in zip(items, sizes):
+        offsets.append(at)
+        if item[0] == "tag":
+            struct.pack_into("<II", out, at, item[1], item[2])
+        else:
+            _, ctl, code, t_ctl, t_code = item
+            out = pad_to(out, 16)
+            ctl_at = len(out)
+            out.extend(ctl)
+            out = pad_to(out, 16)
+            code_at = len(out)
+            out.extend(code)
+            struct.pack_into("<IIII", out, at, ctl_at, (len(ctl) << 4) | t_ctl, code_at,
+                             ((len(code) // 16) << 8) | t_code)
+        at += size
+    return bytes(out), offsets
+
+
 def make_ndve() -> tuple[bytes, dict[str, tuple[bytes, bytes]]]:
     """An NDVE file with one raw program and one program named by a record table."""
     out = bytearray(0x600)
@@ -460,6 +488,74 @@ class NdsrNdveTest(unittest.TestCase):
         found, problems = scan_blob(blob[:-0x40], "/p.pck")
         self.assertEqual(len(found), 1)
         self.assertEqual(len(problems), 1)
+
+    def stream(self, *, tag_between: bool = True):
+        """vs, then (an 8-byte entry, cs) twice: the cs records sit 8 bytes off the grid."""
+        vs, cs1, cs2 = make_vs(own=0), make_cs(9, own=0), make_cs(10, own=0)
+        entry = ("tag", 0x9000, 0x31)
+        items = [("rec", *vs, 0, 1)] + ([entry] if tag_between else []) + [("rec", *cs1, 6, 7)] \
+            + ([entry] if tag_between else []) + [("rec", *cs2, 6, 7)]
+        return (vs, cs1, cs2), *make_ndsr_stream(items)
+
+    def test_ndsr_records_between_8_byte_entries_are_read(self):
+        (vs, cs1, cs2), blob, offsets = self.stream()
+        self.assertEqual((offsets[2] - 0x14) % 16, 8)             # the first cs record is off the grid
+        found, problems = scan_blob(blob, "/p.pck")
+        self.assertEqual(problems, [])
+        self.assertEqual(sorted((p.stage, bytes(p.code)) for p in found),
+                         sorted([("vs", vs[1]), ("cs", cs1[1]), ("cs", cs2[1])]))
+        self.assertEqual([p.container for p in found], ["NDSR"] * 3)
+        self.assertEqual(len({p.label for p in found}), 3)
+        for p in found:
+            self.assertEqual(p.label, f"/p.pck#NDSR@{p.ctl_at:#x}")
+            self.assertEqual(blob[p.ctl_at:p.ctl_at + len(p.ctl)], p.ctl)
+
+    def test_a_pack_with_every_record_on_the_grid_is_read_as_before(self):
+        (vs, cs1, cs2), blob, offsets = self.stream(tag_between=False)
+        self.assertTrue(all((o - 0x14) % 16 == 0 for o in offsets))
+        found, problems = scan_blob(blob, "/p.pck")
+        self.assertEqual((problems, [p.stage for p in found]), ([], ["vs", "cs", "cs"]))
+
+    def test_a_record_is_read_once_when_two_windows_name_it(self):
+        (vs, cs1, cs2), blob, offsets = self.stream()
+        again = bytearray(blob)
+        again[offsets[4]:offsets[4] + 16] = again[offsets[2]:offsets[2] + 16]       # the last record repeats the first cs
+        found, _ = scan_blob(bytes(again), "/p.pck")
+        self.assertEqual(sorted(p.stage for p in found), ["cs", "vs"])
+
+    def test_an_off_grid_window_must_have_the_whole_shape_of_a_record(self):
+        (vs, cs1, cs2), blob, offsets = self.stream()
+        first_cs = offsets[2]                                # a record at 8 bytes off the grid
+        damage = {"control type": (first_cs + 4, (0xE0 << 4) | 5),
+                  "code type": (first_cs + 12, ((0x100 // 16) << 8) | 2),
+                  "code length": (first_cs + 12, ((0x80 // 16) << 8) | 7),
+                  "control length": (first_cs + 4, (0x40 << 4) | 6)}
+        for name, (at, value) in damage.items():
+            with self.subTest(damage=name):
+                broken = bytearray(blob)
+                struct.pack_into("<I", broken, at, value)
+                found, problems = scan_blob(bytes(broken), "/p.pck")
+                self.assertEqual(sorted(bytes(p.code) for p in found), sorted([vs[1], cs2[1]]))
+                self.assertEqual(problems, [])
+
+    def test_an_off_grid_record_with_its_code_outside_the_pack_is_a_problem(self):
+        (vs, cs1, cs2), blob, offsets = self.stream()
+        broken = bytearray(blob)
+        struct.pack_into("<I", broken, offsets[2] + 8, len(blob))                   # its code starts at the end
+        found, problems = scan_blob(bytes(broken), "/p.pck")
+        self.assertEqual(sorted(bytes(p.code) for p in found), sorted([vs[1], cs2[1]]))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("code area", problems[0].reason)
+
+    def test_an_off_grid_program_becomes_a_job_keyed_like_any_other(self):
+        (vs, cs1, cs2), blob, _ = self.stream()
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "o"
+            summary = run_scan({"Lib/p.pck": blob}, out)
+            jobs = read_jobs(out)
+        self.assertEqual((summary["jobs"], summary["error_count"], summary["jobs_by_stage"]), (3, 0, {"cs": 2, "vs": 1}))
+        cs_keys = {j["key"].split(".")[0] for j in jobs if j["stage"] == "cs"}
+        self.assertEqual(cs_keys, {key16(*cs1), key16(*cs2)})
 
     def test_ndve_raw_and_table_programs(self):
         blob, expected = make_ndve()
@@ -860,6 +956,78 @@ class ScanImageTest(unittest.TestCase):
         self.assertEqual(walk["jobs_by_container"], scan["jobs_by_container"])
         self.assertEqual(walk["error_count"], 0)
         self.assertEqual(walk["jobs_by_group"], {"lib": 4, "movie": 2})
+
+
+class CensusTest(unittest.TestCase):
+    """Programs found in a container without a job are listed with a reason, and counted."""
+
+    def census(self, files: dict[str, bytes]) -> tuple[dict, list[dict[str, str]]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "o"
+            summary = run_scan(files, out)
+            lines = (out / "census.tsv").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0].split("\t"), ["file", "label", "container", "reason"])
+        return summary, [dict(zip(lines[0].split("\t"), line.split("\t"))) for line in lines[1:]]
+
+    def test_a_clean_scan_has_an_empty_census(self):
+        summary, rows = self.census({
+            "Effect/a.bfsha": in_container(make_bnsh([{0: make_vs(), 4: make_ps()}, {5: make_cs()}])),
+            "Lib/p.pck": make_ndsr([(*make_vs(2, own=0), 0, 1), (*make_cs(3, own=0), 6, 7)]),
+            "Lib/b.bahs": make_bahs(BahsTest.RECORDS),
+            "Movie/m.dat": make_ndve()[0]})
+        self.assertEqual(rows, [])
+        self.assertEqual(summary["census"], {"without_job": 0, "by_container": {}, "by_reason": {}})
+
+    def test_a_control_section_no_record_names_is_listed(self):
+        blob, _ = make_ndsr_stream([("rec", *make_vs(own=0), 0, 1)])
+        lost = make_cs(7, own=0)
+        blob = bytes(pad_to(blob, 16)) + lost[0]                  # a control section after the data, named by nothing
+        summary, rows = self.census({"Lib/p.pck": blob})
+        self.assertEqual(summary["jobs"], 1)
+        self.assertEqual([(r["file"], r["container"], r["reason"]) for r in rows],
+                         [("Lib/p.pck", "NDSR", "no record names it")])
+        self.assertRegex(rows[0]["label"], r"^/Lib/p\.pck#CTL@0x[0-9a-f]+$")
+        self.assertEqual(summary["census"], {"without_job": 1, "by_container": {"NDSR": 1},
+                                             "by_reason": {"no record names it": 1}})
+
+    def test_a_record_that_did_not_parse_gives_its_reason(self):
+        blob = bytearray(make_ndsr([(*make_vs(own=0), 0, 1), (*make_ps(own=0), 3, 4)]))
+        struct.pack_into("<I", blob, 0x14 + 16 + 8, len(blob))                      # the pixel stage's code is out of range
+        summary, rows = self.census({"Lib/p.pck": bytes(blob)})
+        self.assertEqual(summary["jobs"], 1)
+        self.assertEqual([r["container"] for r in rows], ["NDSR"])
+        self.assertIn("code area", rows[0]["reason"])
+        self.assertEqual(list(summary["census"]["by_reason"].values()), [1])
+
+    def test_a_program_whose_job_cannot_be_built_is_listed(self):
+        ctl, code = make_vs()
+        bad = bytearray(ctl)
+        struct.pack_into("<I", bad, 0x38, 0x1000)                                  # more instructions than code
+        summary, rows = self.census({"Effect/a.bfsha": in_container(make_bnsh([{0: (bytes(bad), code)}, {0: make_vs(2)}]))})
+        self.assertEqual(summary["jobs"], 1)
+        self.assertEqual([(r["container"], r["reason"].startswith("job: ")) for r in rows], [("BNSH", True)])
+
+    def test_a_bnsh_stage_that_did_not_parse_is_listed_once_with_its_reason(self):
+        blob = bytearray(in_container(make_bnsh([{0: make_vs(), 4: make_ps()}])))
+        program = struct.unpack_from("<Q", blob, 0x1000 + 0xC0 + 0x10)[0]
+        record = struct.unpack_from("<Q", blob, 0x1000 + program + 8)[0]
+        struct.pack_into("<I", blob, 0x1000 + record + 8 + 0x14, 0x10)             # the slot's control length is cut short
+        summary, rows = self.census({"Effect/a.bfsha": bytes(blob)})
+        self.assertEqual(summary["jobs"], 1)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("slot 0", rows[0]["reason"])
+
+    def test_a_container_that_did_not_parse_lists_the_sections_it_holds(self):
+        blob = bytearray(make_bahs(BahsTest.RECORDS))
+        struct.pack_into("<I", blob, 4, 12)                                         # a version the reader does not know
+        summary, rows = self.census({"Lib/b.bahs": bytes(blob)})
+        self.assertEqual(summary["jobs"], 0)
+        self.assertGreater(len(rows), 0)
+        self.assertEqual({(r["container"], r["reason"]) for r in rows}, {("BAHS", "the container did not parse")})
+
+    def test_counts_group_reasons_that_differ_only_in_their_numbers(self):
+        self.assertEqual(split.census_class("slot 3: ContainerError: code area at 0x1f40 is 128 bytes"),
+                         "slot N: ContainerError: code area at N is N bytes")
 
 
 class ImageTest(unittest.TestCase):

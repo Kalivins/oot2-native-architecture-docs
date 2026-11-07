@@ -15,6 +15,9 @@ of them belongs in the repository:
   programs.bin    each distinct code slice once, 16-byte aligned
   jobs.jsonl      one job object per line, contract fields only
   programs.tsv    one row per job, with where it was first seen
+  census.tsv      the programs found in a container that have no job: a control section no record names, one
+                  whose record did not parse, or a program whose job could not be built, each with its reason
+                  (summary.json census holds the counts by container and by reason)
   pairing.tsv     one row per BNSH variation: the keys of its vertex, pixel, task and mesh stages, and
                   whether it sits in a superseded Product.100 file (summary.json pairing.outside_product100
                   holds the counts to set against research 13, which walked the 110 files only)
@@ -405,6 +408,16 @@ class Program:
     ctl: bytes
     code: Any                        # a view of the code area
     variation: str = ""              # the label shared by the stages of one BNSH variation ("" elsewhere)
+    ctl_at: int = -1                 # where the control section sits in its container (-1: not known)
+
+
+@dataclass
+class CensusRow:
+    """A program found in a container that has no job, and why."""
+    file: str
+    label: str
+    container: str
+    reason: str
 
 
 class Scanner:
@@ -418,30 +431,52 @@ class Scanner:
         self.file = ""
         # (variation label, stage) of every BNSH stage record that did not parse, for the pairing file
         self.failed_stages: list[tuple[str, str]] = []
+        # Programs found without a job, with the reason (see census_leaf); the collector adds the ones whose job failed.
+        self.census: list[CensusRow] = []
+        self._claimed: set[int] = set()              # control offsets of the leaf being read that gave a program
+        self._failed: dict[int, str] = {}            # ... and the ones whose record did not parse, with the reason
 
-    def problem(self, label: str, reason: str) -> None:
+    def problem(self, label: str, reason: str, ctl_at: int | None = None) -> None:
         self.problems.append(Problem(self.file, label, reason))
+        if ctl_at is not None:
+            self._failed.setdefault(ctl_at, reason)
 
     def scan(self, buf, label: str, depth: int = 0) -> Iterator[Program]:
         """Dispatch on the magic: SARC recurses, BAHS, NDSR and NDVE have readers, anything
         else is searched for BNSH tables."""
         magic = bytes(buf[:4])
-        try:
-            if magic == b"SARC":
+        if magic == b"SARC":
+            try:
                 if depth >= MAX_DEPTH:
                     raise ContainerError("SARC nesting is too deep")
                 for name, member in parse_sarc(buf):
                     yield from self.scan(member, f"{label}/{name}", depth + 1)
-            elif magic == b"BAHS":
-                yield from self._bahs(buf, label)
-            elif magic == b"NDSR":
-                yield from self._ndsr(buf, label)
-            elif magic == b"NDVE":
-                yield from self._ndve(buf, label)
-            else:
-                yield from self._bnsh_all(buf, label)
+            except _PARSE_ERRORS as exc:
+                self.problem(label, f"{type(exc).__name__}: {exc}")
+            return
+        reader, container = {b"BAHS": (self._bahs, "BAHS"), b"NDSR": (self._ndsr, "NDSR"),
+                             b"NDVE": (self._ndve, "NDVE")}.get(magic, (self._bnsh_all, "BNSH"))
+        self._claimed, self._failed = set(), {}
+        broken = ""
+        try:
+            for prog in reader(buf, label):
+                if prog.ctl_at >= 0:
+                    self._claimed.add(prog.ctl_at)
+                yield prog
         except _PARSE_ERRORS as exc:
             self.problem(label, f"{type(exc).__name__}: {exc}")
+            broken = "the container did not parse"
+        self.census_leaf(buf, label, container, broken)
+
+    def census_leaf(self, buf, label: str, container: str, broken: str) -> None:
+        """Lists the control sections of a container that no program was read from, each with its reason: the
+        container did not parse, the record that names it did not, or no record names it at all."""
+        for match in _CTL_SCAN.finditer(buf):
+            c = match.start()
+            if c + KEY_CTL_BYTES > len(buf) or not nvn2_ctl(buf[c:c + KEY_CTL_BYTES]) or c in self._claimed:
+                continue
+            reason = broken or self._failed.get(c) or "no record names it"
+            self.census.append(CensusRow(self.file, f"{label}#CTL@{c:#x}", container, reason))
 
     # -- BNSH ----
 
@@ -477,10 +512,18 @@ class Scanner:
                 try:
                     yield self._bnsh_stage(buf, base, record, slot, where)
                 except _PARSE_ERRORS as exc:
-                    self.problem(where, f"slot {slot}: {type(exc).__name__}: {exc}")
+                    self.problem(where, f"slot {slot}: {type(exc).__name__}: {exc}", self._stage_ctl_at(buf, base, record))
                     stage = self._failed_slot_stage(buf, base, record, slot)
                     if stage is not None:
                         self.failed_stages.append((where, stage))
+
+    @staticmethod
+    def _stage_ctl_at(buf, base: int, record: int) -> int | None:
+        """Where a stage record says its control section is, None when the record cannot be read."""
+        try:
+            return base + u64(buf, base + record + 8)
+        except _PARSE_ERRORS:
+            return None
 
     @staticmethod
     def _failed_slot_stage(buf, base: int, record: int, slot: int) -> str | None:
@@ -512,7 +555,7 @@ class Scanner:
             stage = CTL_STAGE.get(ctl[0x56] if len(ctl) > 0x56 else 0)
             if stage not in ("ts", "ms"):
                 raise ContainerError("slot is not a task or mesh stage")
-        return Program(where, stage, "BNSH", ctl, code, where)
+        return Program(where, stage, "BNSH", ctl, code, where, base + ctl_at)
 
     # -- BAHS ----
 
@@ -524,20 +567,21 @@ class Scanner:
             raise ContainerError("BAHS code region lies outside the file")
         entries = self._bahs_scan(buf, region_len, region) if self.bahs == "scan" \
             else self._bahs_walk(buf, region, label)
-        for addr, kind, ctl, code in entries:
+        for addr, kind, ctl, code, ctl_at in entries:
             where = f"{label}#BAHS@{addr:#x}"
             stage = stage_of(ctl, code)
             if self.bahs == "walk":
                 expected = KIND_STAGE.get(kind)
                 if expected is None or stage != expected:
-                    self.problem(where, f"record kind {kind} does not match stage {stage}")
+                    self.problem(where, f"record kind {kind} does not match stage {stage}", ctl_at)
                     continue
             elif stage is None:
+                self._failed.setdefault(ctl_at, "no stage")
                 continue                                   # the address scan drops what has no stage
-            yield Program(where, stage, "BAHS", ctl, code)
+            yield Program(where, stage, "BAHS", ctl, code, ctl_at=ctl_at)
 
     @staticmethod
-    def _bahs_scan(buf, region_len: int, region: int) -> Iterator[tuple[int, int | None, bytes, Any]]:
+    def _bahs_scan(buf, region_len: int, region: int) -> Iterator[tuple[int, int | None, bytes, Any, int]]:
         """nxnative's scan: every 4-byte-aligned window {code offset, 0, control size, relative
         control offset} whose control section is NVN2 and whose code fits the region."""
         words = array.array("I")
@@ -564,10 +608,10 @@ class Scanner:
             length = u32(ctl, 0x44)
             if off + length > region_len:
                 continue
-            yield addr, None, ctl, buf[region + off:region + off + length]
+            yield addr, None, ctl, buf[region + off:region + off + length], at
 
     @staticmethod
-    def _bahs_walk(buf, region: int, label: str) -> Iterator[tuple[int, int | None, bytes, Any]]:
+    def _bahs_walk(buf, region: int, label: str) -> Iterator[tuple[int, int | None, bytes, Any, int]]:
         """The structured walk of the binary array, which sits at u32[+0x14] + 0x150."""
         version = u32(buf, 4)
         if version != 11:
@@ -594,11 +638,17 @@ class Scanner:
             length = u32(ctl, 0x44)
             if off + length > region_len:
                 raise ContainerError(f"BAHS entry at {addr:#x} has code past the region")
-            yield addr, kind, ctl, buf[region + off:region + off + length]
+            yield addr, kind, ctl, buf[region + off:region + off + length], addr + rel
 
     # -- NDSR ----
 
     def _ndsr(self, buf, label: str) -> Iterator[Program]:
+        """The records are 16 bytes {control, control word, code, code word} from +0x10 or +0x14, and the table ends at
+        the first empty one. Between them the table holds entries of 8 bytes (an address and a tag) and other kinds
+        of 16, so a run of records can sit 8 bytes off the 16-byte grid the first pass reads. The second pass reads
+        the windows off the grid at every 4-byte step and takes one as a record only when the whole shape holds:
+        a control section behind the first word, the types the others carry, and a code word whose length is the
+        control section's own."""
         def points_at_control(c: int) -> bool:
             return c + KEY_CTL_BYTES <= len(buf) and nvn2_ctl(buf[c:c + KEY_CTL_BYTES])
 
@@ -607,7 +657,8 @@ class Scanner:
             window = window[:len(window) // 16 * 16]
             return sum(1 for c, _cl, _k, _kl in struct.iter_unpack("<4I", window) if points_at_control(c))
 
-        at = max((0x10, 0x14), key=table_score)
+        start = at = max((0x10, 0x14), key=table_score)
+        read: set[tuple[int, int]] = set()
         while at + 16 <= len(buf):
             c, ctl_word, k, _code_word = struct.unpack_from("<4I", buf, at)
             if not c and not ctl_word:
@@ -615,18 +666,39 @@ class Scanner:
             at += 16
             if not points_at_control(c):
                 continue                                   # a record of some other kind
-            where = f"{label}#NDSR@{c:#x}"
-            try:
-                ctl = bytes(cut(buf, c, max(ctl_word >> 4, KEY_CTL_BYTES), "control section"))
-                code = cut(buf, k, u32(ctl, 0x44), "code area")
-                stage = stage_of(ctl, code)
-            except _PARSE_ERRORS as exc:
-                self.problem(where, f"{type(exc).__name__}: {exc}")
+            read.add((c, k))
+            prog = self._ndsr_program(buf, label, c, ctl_word, k)
+            if prog is not None:
+                yield prog
+        end = min(len(buf), at + 16)
+        for at in range(start + 4, end - 15, 4):
+            if (at - start) % 16 == 0:
+                continue                                   # the first pass read this window
+            c, ctl_word, k, code_word = struct.unpack_from("<4I", buf, at)
+            if (c, k) in read or not points_at_control(c):
                 continue
-            if stage is None:
-                self.problem(where, "no stage")
-                continue
-            yield Program(where, stage, "NDSR", ctl, code)
+            if ctl_word & 0xF not in (0, 3, 6) or ctl_word >> 4 < KEY_CTL_BYTES or code_word & 0xFF not in (1, 4, 7):
+                continue                                   # the types the records on the grid carry
+            if (code_word >> 8) * 16 != u32(buf, c + 0x44):
+                continue                                   # the code word gives the length the control section does
+            read.add((c, k))
+            prog = self._ndsr_program(buf, label, c, ctl_word, k)
+            if prog is not None:
+                yield prog
+
+    def _ndsr_program(self, buf, label: str, c: int, ctl_word: int, k: int) -> Program | None:
+        where = f"{label}#NDSR@{c:#x}"
+        try:
+            ctl = bytes(cut(buf, c, max(ctl_word >> 4, KEY_CTL_BYTES), "control section"))
+            code = cut(buf, k, u32(ctl, 0x44), "code area")
+            stage = stage_of(ctl, code)
+        except _PARSE_ERRORS as exc:
+            self.problem(where, f"{type(exc).__name__}: {exc}", c)
+            return None
+        if stage is None:
+            self.problem(where, "no stage", c)
+            return None
+        return Program(where, stage, "NDSR", ctl, code, ctl_at=c)
 
     # -- NDVE ----
 
@@ -646,7 +718,7 @@ class Scanner:
                 ctl, code = bytes(buf[c:c + (cl >> 4)]), buf[k:k + n]
                 stage = stage_of(ctl, code)
                 if stage:
-                    yield Program(f"{label}#NDVE#NDSR@{c:#x}", stage, "NDVE", ctl, code)
+                    yield Program(f"{label}#NDVE#NDSR@{c:#x}", stage, "NDVE", ctl, code, ctl_at=c)
         # Programs stored raw: a control section whose length is at +0x30, code right after it.
         for match in _CTL_SCAN.finditer(buf):
             c = match.start()
@@ -658,7 +730,7 @@ class Scanner:
             ctl, code = bytes(buf[c:c + rel]), buf[c + rel:c + rel + n]
             stage = stage_of(ctl, code)
             if stage:
-                yield Program(f"{label}#NDVE@{c:#x}", stage, "NDVE", ctl, code)
+                yield Program(f"{label}#NDVE@{c:#x}", stage, "NDVE", ctl, code, ctl_at=c)
 
 
 def _find(buf, needle: bytes, start: int, end: int) -> int:
@@ -845,6 +917,8 @@ class Collector:
     variations: dict[str, dict[str, str]] = field(default_factory=dict)
     # labels of the variations that sit in a superseded Product.100 file (research 13 walked the 110 files only)
     variations_100: set[str] = field(default_factory=set)
+    # programs that were read but gave no job (the scanner adds the ones it found no program for)
+    census: list[CensusRow] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -874,6 +948,7 @@ class Collector:
             spec = build_job(prog.stage, prog.ctl, prog.code)
         except (JobError, *_PARSE_ERRORS) as exc:
             self.problems.append(Problem(path, prog.label, f"job: {exc}"))
+            self.census.append(CensusRow(path, prog.label, prog.container, f"job: {exc}"))
             self.note_variation(prog.variation, prog.stage, "?", path)
             return
         key16 = ctl_key(prog.ctl, prog.code)
@@ -1012,6 +1087,25 @@ def peak_working_set() -> int:
     return peak if sys.platform == "darwin" else peak * 1024
 
 
+CENSUS_COLUMNS = ("file", "label", "container", "reason")
+_NUMBER = re.compile(r"0x[0-9a-fA-F]+|\d+")
+
+
+def census_class(reason: str) -> str:
+    """The reason with its numbers (offsets, lengths, versions) replaced by N, to count like with like."""
+    return _NUMBER.sub("N", reason)
+
+
+def write_census_tsv(path: Path, rows: list[CensusRow]) -> None:
+    def clean(text: str) -> str:
+        return text.replace("\t", " ").replace("\n", " ")
+
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\t".join(CENSUS_COLUMNS) + "\n")
+        for row in rows:
+            fh.write("\t".join(clean(x) for x in (row.file, row.label, row.container, row.reason)) + "\n")
+
+
 def count_by(items: Sequence[str]) -> dict[str, int]:
     out: dict[str, int] = {}
     for item in items:
@@ -1059,6 +1153,8 @@ def scan_image(image: Image, out_dir: Path, bahs: str = "walk",
     finally:
         collector.close()
     write_programs_tsv(out_dir / "programs.tsv", collector.jobs)
+    census = scanner.census + collector.census
+    write_census_tsv(out_dir / "census.tsv", census)
     pairing = write_pairing_tsv(out_dir / "pairing.tsv", collector.variations, collector.variations_100)
 
     jobs = list(collector.jobs.values())
@@ -1084,6 +1180,9 @@ def scan_image(image: Image, out_dir: Path, bahs: str = "walk",
         "key16_outside_product100": len(outside_100),
         "key16_outside_product100_by_stage": count_by(list(outside_100.values())),
         "programs_bin_bytes": collector.bin_size,
+        "census": {"without_job": len(census),
+                   "by_container": count_by([row.container for row in census]),
+                   "by_reason": count_by([census_class(row.reason) for row in census])},
         "error_count": len(problems),
         "errors": [{"file": p.file, "label": p.label, "reason": p.reason} for p in problems[:1000]],
         "run": {"seconds": round(time.perf_counter() - started, 1), "peak_working_set_bytes": peak_working_set()},
@@ -1186,6 +1285,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name}: {summary[name]}")
     for name in ("jobs_by_stage", "jobs_by_container", "jobs_by_group", "key16_outside_product100_by_stage"):
         print(f"{name}: {json.dumps(summary[name])}")
+    print(f"programs without a job: {summary['census']['without_job']}")
+    for name in ("by_container", "by_reason"):
+        print(f"  {name}: {json.dumps(summary['census'][name])}")
     print(f"run: {json.dumps(summary['run'])}")
     return 1 if summary["error_count"] else 0
 
