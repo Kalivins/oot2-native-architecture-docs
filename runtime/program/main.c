@@ -57,8 +57,10 @@
 #include "oot2/gpu.h"
 #include "oot2/kernel.h"
 #include "oot2/ledger.h"
+#include "oot2/pagegen.h"
 #include "oot2/program.h"
 #include "oot2/settings.h"
+#include "oot2/texheap.h"
 #include "oot2/vk_required.h"
 #include "plat.h"
 
@@ -214,6 +216,13 @@ static int print_vulkan_items(void) {
     return fflush(stdout) ? 1 : 0;
 }
 
+// The texture heap instruments read the write watch through the page generations (oot2/texheap.h).
+static uint64_t pagegen_scanned_pages(void) {
+    PagegenStats s;
+    pagegen_stats(&s);
+    return s.scan_pages;
+}
+
 int main(int argc, char **argv) {
     const char *game = NULL, *config = NULL;
     static RtSettingArg sets[MAX_SETS];
@@ -259,6 +268,8 @@ int main(int argc, char **argv) {
     rt_log("oot2: game folder %s; %d modules, %d other files to check", g_game, rt_program.module_count,
            rt_program.file_count);
     ledger_set_folder(g_game);
+    texheap_set_folder(g_game);
+    texheap_set_watch(&(TexheapWatch){pagegen_scan, pagegen_runs, pagegen_scanned_pages});
     ledger_flush_on_stop();
     gpu_set_report_folder(g_game);
 

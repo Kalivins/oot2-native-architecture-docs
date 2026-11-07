@@ -164,6 +164,7 @@ static void walk(uint64_t fence, int index, uint64_t handle) {
         const op_hdr *r = (const op_hdr *)(const void *)(p + at);
         replay(fence, r);
         ledger_track_op(&g_track, r);
+        if (texheap_on()) texheap_op(r);
         if (g_log) g_log(fence, index, r, g_log_ctx);
         at += h.size;
         if (h.op == OP_END) return;
@@ -338,6 +339,7 @@ static void complete(const results *k) {
         }
     }
     recheck_pending();
+    if (texheap_on()) texheap_complete(k->fence);
     __atomic_store_n(&g_done, k->fence, __ATOMIC_RELEASE);
     plat_cond_broadcast(&g_done_cond);
 }
@@ -360,6 +362,7 @@ static uint64_t null_submit(const uint64_t *handles, int n) {
     plat_mutex_lock(&g_lock);
     uint64_t fence = ++g_submitted;
     g_now.fence = fence, g_now.used = 0, g_now.next = NULL;
+    if (texheap_on()) texheap_submit(fence);
     for (int i = 0; i < n; i++) walk(fence, i, handles[i]);
     if (g_hold || g_held) {
         results *k = malloc(sizeof *k);

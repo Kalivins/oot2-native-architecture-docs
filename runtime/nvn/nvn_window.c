@@ -360,5 +360,6 @@ NVN_API(nvnQueuePresentTexture) {
     if (b->present_pace) b->present_pace(seq, due_tick, due);
     b->present((const tex_t *)w->tex[i], crop);
     capture_present(seq);   // before the census, whose frame limit may end the run here
+    if (texheap_on()) texheap_present(seq);
     nvn_census_present(seq);
 }

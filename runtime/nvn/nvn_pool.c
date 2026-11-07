@@ -253,6 +253,7 @@ const pool_t *nvn_pool_find(uint64_t addr, uint64_t len) {
 // The end of a pool: out of the index, out of the back end, its window range and mapping state given back.
 static void pool_end(pool_t *o) {
     stats_del(o);
+    if (texheap_on()) texheap_pool_end(o);
     if (gpu_reaches(o)) index_del(o);
     gfx_backend()->pool_fini(o);
     unplace(o);
@@ -286,6 +287,7 @@ NVN_API(nvnMemoryPoolInitialize) {
     // holds (a copy of a pool object by value is not, and must not give back the original's range).
     if (o->magic == NVN_POOL_MAGIC && (gpu_reaches(o) ? index_del(o) : 0)) {
         stats_del(o);
+        if (texheap_on()) texheap_pool_end(o);
         gfx_backend()->pool_fini(o);
         unplace(o);
     }
@@ -299,6 +301,7 @@ NVN_API(nvnMemoryPoolInitialize) {
     }
     if (ok && gpu_reaches(o)) index_add(o);
     if (ok) stats_add(o);
+    if (ok && texheap_on()) texheap_pool_init(o);
     if (!ok) o->magic = 0;
     ret_x(c, ok);
 }
@@ -330,14 +333,20 @@ static uint64_t cpu_range(const pool_t *p, int64_t off, uint64_t *size) {
 // so copies the back end holds of it are stale
 NVN_API(nvnMemoryPoolFlushMappedRange) {
     uint64_t size = arg_x(c, 2), a = cpu_range(arg_p(c, 0), (int64_t)arg_x(c, 1), &size);
-    if (a) gfx_backend()->guest_written(a, size);
+    if (a) {
+        if (texheap_on()) texheap_range(TEXHEAP_FLUSH, a, size);
+        gfx_backend()->guest_written(a, size);
+    }
 }
 
 // void nvnMemoryPoolInvalidateMappedRange(const NVNmemoryPool *p, ptrdiff_t offset, size_t size): the CPU is about to
 // read what the GPU wrote there, so the back end writes its copies back first
 NVN_API(nvnMemoryPoolInvalidateMappedRange) {
     uint64_t size = arg_x(c, 2), a = cpu_range(arg_p(c, 0), (int64_t)arg_x(c, 1), &size);
-    if (a) gfx_backend()->guest_read(a, size);
+    if (a) {
+        if (texheap_on()) texheap_range(TEXHEAP_INVALIDATE, a, size);
+        gfx_backend()->guest_read(a, size);
+    }
 }
 
 // NVNbufferAddress nvnMemoryPoolGetBufferAddress(const NVNmemoryPool *p), NVNmemoryPoolFlags ...GetFlags, size_t

@@ -82,7 +82,7 @@ static void o_written(void *u, uint64_t pg) {
 }
 
 static Owner own;
-static RtPageOwner owner(void) { return (RtPageOwner){"pool", &own, o_busy, o_written}; }
+static RtPageOwner owner(void) { return (RtPageOwner){"pool", &own, o_busy, o_written, NULL}; }
 
 // ---- the synthetic pool
 static RtMemConfig test_config(void) {

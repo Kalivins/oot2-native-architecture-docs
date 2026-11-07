@@ -130,6 +130,12 @@ typedef struct RtPageOwner {
     void *user;
     int (*busy)(void *user, uint64_t addr, uint64_t size);       // may be NULL; nonzero: the owner needs this range now
     void (*written)(void *user, uint64_t page_addr);             // may be NULL; a write recommitted the page
+    // May be NULL. Called once for each access this file counts on a page of the range, after the lock is dropped, on the
+    // accessing thread (possibly in an exception or signal handler): an access to an armed page (read or write, which
+    // restores it), a read of a released page (just before the named fault), a write to a released page (beside written).
+    // guest is 1 when guest code made it, with guest_fn the lifted function's address; host reads and writes (the runtime,
+    // the back end, host I/O) have guest 0. It must not call rt_pages_* or touch guest memory.
+    void (*touched)(void *user, uint64_t page_addr, int write, int guest, uint64_t guest_fn);
 } RtPageOwner;
 typedef struct RtPageStats {
     int mode;

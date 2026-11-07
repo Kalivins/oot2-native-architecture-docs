@@ -178,7 +178,9 @@ NVN_API(nvnTextureBuilderGetViewOffset) {
 
 // ---- textures
 static void release(tex_t *o) {
-    if (o->magic == NVN_TEX_MAGIC && o->serial) gfx_backend()->texture_release(o);
+    if (o->magic != NVN_TEX_MAGIC || !o->serial) return;
+    if (texheap_on()) texheap_texture_end(o);
+    gfx_backend()->texture_release(o);
 }
 
 // NVNboolean nvnTextureInitialize(NVNtexture *t, const NVNtextureBuilder *b): false for storage outside an initialised
@@ -214,6 +216,7 @@ NVN_API(nvnTextureInitialize) {
         gfx_backend()->guest_written((uintptr_t)o->mem, L.size);
     }
     o->serial = new_serial();
+    if (texheap_on()) texheap_texture_init(o, s->pkg_data != NULL);
     ret_x(c, 1);
 }
 // void nvnTextureFinalize(NVNtexture *t)
@@ -363,6 +366,7 @@ static void read_texels(Cpu *c, int strided, const char *fn) {
     const NVNcopyRegion *r = arg_p(c, 2);
     uint64_t row = strided ? arg_x(c, 4) : 0, img = strided ? arg_x(c, 5) : 0;
     texel_strides(o, r, &row, &img, fn);
+    if (texheap_on()) texheap_read_texels();
     gfx_backend()->read_texels(o, arg_p(c, 1), r, arg_p(c, 3), row, img);
 }
 // void nvnTextureWriteTexels[Strided](const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const

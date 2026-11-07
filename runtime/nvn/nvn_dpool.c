@@ -77,6 +77,7 @@ NVN_API(nvnTexturePoolRegisterTexture) {
     if (!t || t->magic != NVN_TEX_MAGIC)
         rt_fatal("nvn: nvnTexturePoolRegisterTexture of a texture that is not initialised (%p)", (const void *)t);
     ledger_desc_register(&pool, (int32_t)arg_x(c, 1), t, arg_p(c, 3));
+    if (texheap_on()) texheap_desc(&pool, (int32_t)arg_x(c, 1), t);
     gfx_backend()->texture_register(&pool, (int32_t)arg_x(c, 1), t, arg_p(c, 3));
 }
 // void nvnSamplerPoolRegisterSampler(const NVNsamplerPool *sp, int id, const NVNsampler *s)

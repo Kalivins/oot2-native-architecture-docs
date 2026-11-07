@@ -333,6 +333,7 @@ static PageAccess page_access(uint64_t a, int write, int host_io, uint64_t host_
     uint64_t fn = 0;
     const int guest = !host_io && dispatch_host_pc_guest((uintptr_t)host_pc, &fn);
     void (*written)(void *, uint64_t) = NULL;
+    void (*touched)(void *, uint64_t, int, int, uint64_t) = NULL;
     void *user = NULL;
     PageAccess res = PA_HANDLED;
     plat_lock_shared(&lock);
@@ -356,6 +357,8 @@ static PageAccess page_access(uint64_t a, int write, int host_io, uint64_t host_
             __atomic_fetch_sub(&p->st.armed, 1, __ATOMIC_RELAXED);
             __atomic_fetch_add(count, 1, __ATOMIC_RELAXED);
             state_normal(p, (pg - p->base) / PAGE);
+            touched = p->owner.touched;
+            user = p->owner.user;
         }
     } else if (!write) {   // PG_RELEASED
         __atomic_fetch_add(count, 1, __ATOMIC_RELAXED);
@@ -363,6 +366,8 @@ static PageAccess page_access(uint64_t a, int write, int host_io, uint64_t host_
         hit->guest = guest;
         hit->fn = fn;
         res = PA_READ_RELEASED;
+        touched = p->owner.touched;
+        user = p->owner.user;
     } else {
         uint8_t e = PG_RELEASED;
         if (__atomic_compare_exchange_n(s, &e, PG_BUSY, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
@@ -372,10 +377,12 @@ static PageAccess page_access(uint64_t a, int write, int host_io, uint64_t host_
             __atomic_fetch_add(count, 1, __ATOMIC_RELAXED);
             state_normal(p, (pg - p->base) / PAGE);
             written = p->owner.written;
+            touched = p->owner.touched;
             user = p->owner.user;
         }
     }
     plat_unlock_shared(&lock);
+    if (touched) touched(user, pg, write, guest, fn);
     if (written) written(user, pg);
     return res;
 }

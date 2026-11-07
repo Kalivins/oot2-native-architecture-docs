@@ -94,7 +94,15 @@ typedef enum RtSettingSource {
     X(census, DEBUG, BOOL, RESTART, 0, 0, 1, NULL,                                                                     \
       "census mode: an NVN2 entry point without a body answers 0 and is listed instead of stopping; never a default run") \
     X(census_frames, DEBUG, INT, RESTART, 0, 0, 1000000000, NULL,                                                      \
-      "census mode only: end the run at this present, after the census and the ledger are written; 0 is no limit")
+      "census mode only: end the run at this present, after the census and the ledger are written; 0 is no limit")    \
+    X(texheap, DEBUG, BOOL, RESTART, 0, 0, 1, NULL,                                                                    \
+      "spike S7's instruments: texture storage pages by state, CPU writes per frame, and the owner side of lever L1 "   \
+      "(texheap-*.tsv in the game folder); with page_release the selected pages are armed or released")                \
+    X(texheap_every, DEBUG, INT, RESTART, 300, 1, 100000, NULL,                                                        \
+      "texheap only: presents between two samples of the texture heap")                                                \
+    X(texheap_trigger, DEBUG, ENUM, RESTART, 0, 0, 0, "bind|register",                                                 \
+      "texheap only: when a texture's CPU-written pages are selected: bind, after a completed submission that binds it; "\
+      "register, once its descriptor is registered, as a back end that uploads at registration would")
 
 typedef enum RtSettingId {
 #define RT_SETTING_ID(key, group, type, apply, def, min, max, names, what) RT_SET_##key,

@@ -53,10 +53,17 @@ NVN_API(nvnBufferInitialize) {
         return;
     }
     *o = (buf_t){BUF_MAGIC, s->pool, s->off, s->size};
+    if (texheap_on() && !gfx_gpu_only((uintptr_t)p->mem))
+        texheap_range(TEXHEAP_OBJECT, (uintptr_t)p->mem + (uint64_t)s->off, s->size);
     ret_x(c, 1);
 }
 // void nvnBufferFinalize(NVNbuffer *b)
-NVN_API(nvnBufferFinalize) { *(buf_t *)arg_p(c, 0) = (buf_t){0}; }
+NVN_API(nvnBufferFinalize) {
+    buf_t *o = arg_p(c, 0);
+    if (texheap_on() && o->magic == BUF_MAGIC && o->pool && !gfx_gpu_only((uintptr_t)o->pool->mem))
+        texheap_range(TEXHEAP_OBJECT_END, (uintptr_t)o->pool->mem + (uint64_t)o->off, o->size);
+    *o = (buf_t){0};
+}
 // void nvnBufferSetDebugLabel(NVNbuffer *b, const char *label): for NVN's debugging tools only
 NVN_API(nvnBufferSetDebugLabel) { (void)c; }
 

@@ -295,6 +295,7 @@ NVN_API(nvnEventInitialize) {
         rt_unimplemented(c, "nvn", "EventInitialize: the memory pool %p is one the CPU cannot see, where the front end "
                          "has no word to signal or read", (const void *)p);
     *(ev_t *)arg_p(c, 0) = (ev_t){EVENT_MAGIC, (volatile uint32_t *)(p->mem + b->off)};
+    if (texheap_on()) texheap_range(TEXHEAP_OBJECT, (uintptr_t)(p->mem + b->off), 4);
     ret_x(c, 1);
 }
 // void nvnEventFinalize(NVNevent *e)

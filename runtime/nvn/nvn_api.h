@@ -18,6 +18,7 @@
 #include "oot2/gfx.h"
 #include "oot2/nvn_obj.h"
 #include "oot2/runtime.h"
+#include "oot2/texheap.h"
 
 // Each name of the list has an id, its line in nvn_procs.inc.
 enum {
