@@ -62,6 +62,7 @@
 #define MiB (1ull << 20)
 #define CPU_NO_ACCESS NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS
 #define PHYSICAL NVN_MEMORY_POOL_FLAGS_PHYSICAL
+#define GPU_NO_ACCESS NVN_MEMORY_POOL_FLAGS_GPU_NO_ACCESS
 #define VIRTUAL NVN_MEMORY_POOL_FLAGS_VIRTUAL
 #define WIN GFX_GPU_WINDOW_BASE
 typedef unsigned long long ull;
@@ -265,9 +266,9 @@ static void case_decisions(void) {
     pool_t pc = pool(g_heap + 1 * MiB, 8 * MiB, 0);                        // a CPU-visible pool
     pool_t tex = pool(g_heap + 9 * MiB, 4 * MiB, 0);                       // one only textures use: never bound
     pool_t w = pool(WIN, 1 * MiB, CPU_NO_ACCESS);                          // a CPU_NO_ACCESS pool
-    pool_t pw = pool(WIN + 1 * MiB, 2 * MiB, CPU_NO_ACCESS | PHYSICAL);    // a physical one in the window
+    pool_t pw = pool(WIN + 1 * MiB, 2 * MiB, CPU_NO_ACCESS | PHYSICAL | GPU_NO_ACCESS);   // a physical one in the window
     pool_t v = pool(WIN + 16 * MiB, 2 * MiB, CPU_NO_ACCESS | VIRTUAL);     // a virtual pool over it
-    pool_t pcv = pool(g_heap + 16 * MiB, 2 * MiB, PHYSICAL);               // a CPU-visible physical pool (the title's)
+    pool_t pcv = pool(g_heap + 16 * MiB, 2 * MiB, PHYSICAL | GPU_NO_ACCESS);   // a CPU-visible physical pool (the title's)
     pool_t v2 = pool(WIN + 32 * MiB, 2 * MiB, CPU_NO_ACCESS | VIRTUAL);    // a virtual pool over that
     touch(g_heap + 1 * MiB, 8 * MiB);   // the CPU-visible pool's pages and the texture pool's, one run of commits
     touch(g_heap + 9 * MiB, 4 * MiB);

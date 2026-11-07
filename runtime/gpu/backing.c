@@ -500,7 +500,9 @@ static Rec *rec_find(uint64_t addr, uint64_t size) {
 
 int backing_pool_init(const pool_t *p) {
     if (!g_open) rt_fatal("gfx: vulkan: backing map: a pool before the map is open");
-    if (p->flags & GPU_NO_ACCESS) return 1;   // the GPU cannot reach it, as the front end's index leaves it out
+    // The GPU cannot reach it, as the front end's index leaves it out; a physical pool keeps its record all the same,
+    // since the GPU reaches it through the virtual pools mapped over it (the title's one physical pool is GPU_NO_ACCESS)
+    if ((p->flags & GPU_NO_ACCESS) && !(p->flags & PHYSICAL)) return 1;
     Rec *r = calloc(1, sizeof *r);
     if (!r) rt_fatal("gfx: vulkan: backing map: out of memory for a pool");
     r->lo = (uintptr_t)p->mem;
@@ -553,7 +555,7 @@ static uint64_t rec_end(Rec *r) {
 }
 
 void backing_pool_fini(const pool_t *p) {
-    if (p->flags & GPU_NO_ACCESS) return;
+    if ((p->flags & GPU_NO_ACCESS) && !(p->flags & PHYSICAL)) return;   // as backing_pool_init
     uint64_t lo = (uintptr_t)p->mem, hi = lo + p->size;
     plat_lock(&g_lock);
     Rec *r = rec_exact(lo, hi);
