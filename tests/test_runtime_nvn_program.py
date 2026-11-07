@@ -23,6 +23,7 @@ Run: python -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import hashlib
 import os
 import random
 import re
@@ -213,8 +214,9 @@ class ProgramTest(unittest.TestCase):
         if hasattr(cls, "tmp"):
             cls.tmp.cleanup()
 
-    def run_case(self, level: str, case: str, *args: str) -> subprocess.CompletedProcess:
-        return subprocess.run([str(self.exes[level]), case, *args], capture_output=True, text=True, timeout=120)
+    def run_case(self, level: str, case: str, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run([str(self.exes[level]), case, *args], capture_output=True, text=True, timeout=120,
+                              env=env)
 
     def assert_passes(self, case: str, *args: str) -> list[subprocess.CompletedProcess]:
         runs = []
@@ -256,6 +258,48 @@ class ProgramTest(unittest.TestCase):
                 self.assertEqual(printed[(k, i)][0], by_control)
                 misled += by_header != by_control
         self.assertGreater(misled, 20)                       # headers that say vertex, tessellation or domain
+
+    # ---- the stage-key dump (OOT2_STAGE_KEYS)
+
+    def test_stage_key_dump_names_each_key_once_in_the_order_it_was_met(self) -> None:
+        first: dict[str, tuple[str, bytes, bytes]] = {}     # key -> (kind, ctl, code), in the order first set
+        for prog in self.programs:
+            for ctl, code in prog:
+                stage, key = expected(ctl, code)
+                first.setdefault(key, (stage, ctl, code))
+        for level in nvn.LEVELS:
+            with self.subTest(level=level), tempfile.TemporaryDirectory(prefix="oot2-keys-") as folder:
+                dump = Path(folder) / "keys.tsv"
+                done = self.run_case(level, "keys", str(self.program_file),
+                                     env={**os.environ, "OOT2_STAGE_KEYS": str(dump)})
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                lines = dump.read_text(encoding="ascii").split("\n")
+                self.assertEqual(lines[0], "#oot2-stage-keys 1")
+                self.assertEqual(lines[-1], "")
+                rows = [line.split("\t") for line in lines[1:-1]]
+                self.assertEqual([r[2] for r in rows], list(first))
+                for n, (row, (key, (stage, ctl, code))) in enumerate(zip(rows, first.items()), 1):
+                    self.assertEqual(len(row), 8, row)
+                    self.assertEqual(row[:2], [str(n), "0"])             # no present has happened in this harness
+                    self.assertEqual(row[3], stage)
+                    self.assertEqual(row[4], str(len(code)))
+                    self.assertEqual(row[5], str(struct.unpack_from("<I", ctl, 0x38)[0]))
+                    self.assertEqual(row[6], hashlib.sha256(code).hexdigest())
+                    self.assertEqual(row[7], ctl[:0xD0].hex())
+
+    def test_stage_key_dump_is_off_without_the_variable_and_never_stops_a_run(self) -> None:
+        environ = {k: v for k, v in os.environ.items() if k != "OOT2_STAGE_KEYS"}
+        with tempfile.TemporaryDirectory(prefix="oot2-keys-") as folder:
+            for level in nvn.LEVELS:
+                with self.subTest(level=level):
+                    done = self.run_case(level, "keys", str(self.program_file), env={**environ, "OOT2_STAGE_KEYS": ""})
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertNotIn("stage-key dump", done.stdout + done.stderr)
+                    nowhere = str(Path(folder) / "missing-folder" / "keys.tsv")
+                    done = self.run_case(level, "keys", str(self.program_file), env={**environ, "OOT2_STAGE_KEYS": nowhere})
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertIn("cannot write the stage-key dump", done.stdout + done.stderr)
+                    self.assertFalse(Path(nowhere).exists())
 
     def test_stages_prepare_has_no_job_for_stop(self) -> None:
         for case, code, text in FAILING:

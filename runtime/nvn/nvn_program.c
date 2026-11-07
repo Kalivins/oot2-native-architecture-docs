@@ -37,6 +37,16 @@
 // dmsh_meshstage.py and dmsh_build.py (MIT, licenses/nxnative-MIT.txt). Changed here: no NVN2-to-NVN1 lowering and no
 // control sections copied per program (a stage keeps its identity instead), the stage kind from the control section,
 // code the CPU cannot read is a named fatal, and the trace lines are gone.
+//
+// The stage-key dump (OOT2_STAGE_KEYS=PATH, off unless set): the first time a key is met, one line is appended to PATH
+// and flushed, so a run that is killed keeps what it had. The file is a measurement for the player's own machine (what
+// prepare's cache must hold for the stages a boot sets, ticket 76), never shipped; it names the game's programs and stays
+// in the player's folders. A "#oot2-stage-keys 1" line, then one tab-separated line a distinct key, in the order the
+// game first set it:
+//   seq  present  key  kind  code_size  inst_size  code_sha256  ctl_hex
+// seq counts from 1, present is nvn_present_count() at that moment, code_sha256 is the SHA-256 of the whole code area
+// (so a key the cache lacks can be matched to an archive copy of the same code), ctl_hex the control section's first
+// DUMP_CTL bytes, which the key and the job read only in part.
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +54,7 @@
 
 #include "nvn_api.h"
 #include "oot2/loader.h"
+#include "oot2/nvn_pace.h"
 #include "oot2/nvn_program.h"
 #include "plat.h"
 
@@ -59,6 +70,7 @@
 #define CTL_MESH 0x6C          // a task or mesh stage's fields
 #define SPH_BYTES 0x80         // the shader program header that vertex, pixel, task and mesh code starts with
 #define MAX_CODE (1u << 24)    // nxnative's bound on a code area
+#define DUMP_CTL 0xD0          // control bytes the stage-key dump keeps: the shortest section the console's files hold
 
 typedef unsigned long long ull;
 
@@ -216,7 +228,9 @@ static void grow(void) {
     g_table = t, g_cap = cap;
 }
 
-static const nvn_stage *intern(const nvn_stage *rec) {
+// The record of rec's key; *added is set when this call made it.
+static const nvn_stage *intern(const nvn_stage *rec, int *added) {
+    *added = 0;
     plat_lock(&g_lock);
     if (2 * (g_count + 1) > g_cap) grow();
     uint32_t i = key_slot(rec->key, g_cap - 1);
@@ -230,8 +244,57 @@ static const nvn_stage *intern(const nvn_stage *rec) {
     if (!s) rt_fatal("nvn: out of memory for a stage record");
     *s = *rec;
     g_table[i] = s, g_count++;
+    *added = 1;
     plat_unlock(&g_lock);
     return s;
+}
+
+// ---- the stage-key dump (see the top of the file)
+
+enum { DUMP_UNREAD, DUMP_OFF, DUMP_ON };
+static PlatMutex g_dump_lock = PLAT_MUTEX_INIT;
+static int g_dump_state;   // DUMP_*; read without the lock, written under it
+static FILE *g_dump;
+static uint64_t g_dump_seq;
+
+static void dump_open(void) {
+    const char *path = getenv("OOT2_STAGE_KEYS");
+    if (!path || !*path) {
+        __atomic_store_n(&g_dump_state, DUMP_OFF, __ATOMIC_RELEASE);
+        return;
+    }
+    g_dump = fopen(path, "wb");
+    if (!g_dump || fputs("#oot2-stage-keys 1\n", g_dump) < 0 || fflush(g_dump) != 0) {
+        rt_log("nvn: cannot write the stage-key dump %s", path);
+        if (g_dump) fclose(g_dump);
+        g_dump = NULL;
+        __atomic_store_n(&g_dump_state, DUMP_OFF, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&g_dump_state, DUMP_ON, __ATOMIC_RELEASE);
+}
+
+// Append the line of a stage made just now: s's key, kind and sizes, the SHA-256 of its code area, its control section.
+static void dump_stage(const nvn_stage *s, const uint8_t *ctl, const uint8_t *code) {
+    if (__atomic_load_n(&g_dump_state, __ATOMIC_ACQUIRE) == DUMP_OFF) return;
+    uint8_t sha[32];
+    rt_sha256(code, s->code_size, sha);
+    char line[256 + 2 * DUMP_CTL], *p = line;
+    plat_mutex_lock(&g_dump_lock);
+    if (g_dump_state == DUMP_UNREAD) dump_open();
+    if (g_dump_state == DUMP_ON) {
+        p += snprintf(p, 128, "%llu\t%llu\t%s\t%s\t%u\t%u\t", (ull)++g_dump_seq, (ull)nvn_present_count(), s->key,
+                      KIND_NAME[s->kind], s->code_size, s->inst_size);
+        hex(p, sha, 32), p += 64, *p++ = '\t';
+        hex(p, ctl, DUMP_CTL), p += 2 * DUMP_CTL, *p++ = '\n';
+        if (fwrite(line, 1, (size_t)(p - line), g_dump) != (size_t)(p - line) || fflush(g_dump) != 0) {
+            rt_log("nvn: the stage-key dump stopped: a write failed");
+            fclose(g_dump);
+            g_dump = NULL;
+            __atomic_store_n(&g_dump_state, DUMP_OFF, __ATOMIC_RELEASE);
+        }
+    }
+    plat_mutex_unlock(&g_dump_lock);
 }
 
 int nvn_stage_records(void) {
@@ -290,7 +353,10 @@ static const nvn_stage *stage_identity(Cpu *c, const char *fn, int i, const NVNs
     hex(rec.key, d, 8);
     rec.key[16] = '.';
     hex(rec.key + 17, v, 4);
-    return intern(&rec);
+    int added;
+    const nvn_stage *s = intern(&rec, &added);
+    if (added) dump_stage(s, ctl, code);
+    return s;
 }
 
 // ---- programs
