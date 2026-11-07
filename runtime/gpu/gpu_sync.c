@@ -5,8 +5,10 @@
 // Nothing here is Vulkan: the device's progress comes from a GpuTimelineSource, so the same code runs over the device's
 // timeline semaphore (vk_submit.c) and over a test's counter, in continuous integration, which has no GPU.
 //
-// A submission takes the submission lock for its whole length: the value it is handed, the effects it queues and the
+// A submission takes the submission gate for its whole length: the value it is handed, the effects it queues and the
 // queue submit that signals the value, so values reach the device and the list below in the order they are handed out.
+// The gate is a flag, not a lock owned by a thread: the recorder thread (runtime/gpu/vk_rec.c) ends a frame that the
+// submitting thread began, so gpu_sync_end may come from another thread than gpu_sync_begin.
 // The list holds every issued value not done yet, oldest first, each with its effects in the order they were added.
 // The completion thread waits on the source for the oldest value, and for each value the device reached, in order, runs
 // its effects and then publishes it: a value is never done before its effects and those of every earlier value ran.
@@ -42,10 +44,11 @@ typedef struct Sub {
     int n, cap;
 } Sub;
 
-static PlatMutex g_sub_lock = PLAT_MUTEX_INIT;   // one submission at a time, from gpu_sync_begin to gpu_sync_end
-static Sub *g_open;                               // that submission (its thread holds g_sub_lock)
+static Sub *g_open;                               // the open submission, written by whoever holds the gate
 
 static PlatMutex g_lock = PLAT_MUTEX_INIT;        // everything below, shared with the completion thread
+static PlatCond g_gate_free = PLAT_COND_INIT;     // the gate opened
+static int g_gate_busy;                           // one submission at a time, from gpu_sync_begin to gpu_sync_end
 static PlatCond g_work = PLAT_COND_INIT;          // a value issued, or stop
 static PlatCond g_changed = PLAT_COND_INIT;       // a value done, or the thread ended
 static uint64_t g_handed, g_issued, g_done;       // written under g_lock, and read without it too
@@ -91,6 +94,7 @@ void gpu_sync_start(const GpuTimelineSource *src, uint64_t after) {
     g_handed = g_issued = after;
     __atomic_store_n(&g_done, after, __ATOMIC_RELEASE);
     g_stop = g_ended = 0;
+    g_gate_busy = 0;
     g_running = 1;
     g_thread = plat_thread_start(completion, NULL, COMPLETION_STACK);
     if (!g_thread) rt_fatal("gpu: cannot start the completion thread");
@@ -113,9 +117,10 @@ void gpu_sync_stop(void) {
 }
 
 uint64_t gpu_sync_begin(void) {
-    plat_mutex_lock(&g_sub_lock);
     plat_mutex_lock(&g_lock);
     if (!g_running) rt_fatal("gpu: a submission while the completion thread is not running");
+    while (g_gate_busy) plat_cond_wait(&g_gate_free, &g_lock);
+    g_gate_busy = 1;
     Sub *s = g_free;
     if (s) g_free = s->next;
     uint64_t value = g_handed + 1;
@@ -151,8 +156,9 @@ void gpu_sync_end(void) {
     g_tail = &s->next;
     __atomic_store_n(&g_issued, s->value, __ATOMIC_RELEASE);
     plat_cond_broadcast(&g_work);
+    g_gate_busy = 0;
+    plat_cond_signal(&g_gate_free);
     plat_mutex_unlock(&g_lock);
-    plat_mutex_unlock(&g_sub_lock);
 }
 
 int gpu_sync_wait(uint64_t value, uint64_t timeout_ns) {

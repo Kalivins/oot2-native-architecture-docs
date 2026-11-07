@@ -36,6 +36,7 @@
 
 #include "oot2/gpu_vk.h"
 #include "oot2/runtime.h"
+#include "oot2/vk_rec.h"
 #include "plat.h"
 
 #define PATH_BYTES 4096
@@ -300,11 +301,33 @@ static void report_checkpoints(Text *t) {
     for (uint32_t i = 0; i < n; i++) c[i].sType = VK_STRUCTURE_TYPE_CHECKPOINT_DATA_2_NV;
     vkGetQueueCheckpointData2NV(gpu_vk.queue, &n, c);
     put(t, "checkpoints: the last %u the queue reached, one per pipeline stage\n", n);
+    // A per-draw marker (the recorder's breadcrumb, oot2/vk_rec.h) names a draw by its submission and number, and the
+    // recorder's table gives the stage identities it carried. Markers order by (value, draw number), which is marker >> 4.
+    uint64_t ahead = 0, behind = 0;
+    int draws = 0;
     for (uint32_t i = 0; i < n; i++) {
         uint64_t m = (uint64_t)(uintptr_t)c[i].pCheckpointMarker;
+        if (((m >> 1) & 7) == GPU_VK_DRAW) {
+            char text[512];
+            vkrec_marker_text(m, text, sizeof text);
+            put(t, "checkpoint %u: stage %#llx, %s\n", i, (unsigned long long)c[i].stage, text);
+            if (!draws || (m >> 4) > (ahead >> 4)) ahead = m;
+            if (!draws || (m >> 4) < (behind >> 4)) behind = m;
+            draws++;
+            continue;
+        }
         put(t, "checkpoint %u: stage %#llx, value %llu, %s submission, %s of its commands\n", i,
             (unsigned long long)c[i].stage, (unsigned long long)(m >> 4), kind_name((m >> 1) & 7),
             (m & 1) ? "end" : "start");
+    }
+    if (draws) {
+        char text[512];
+        vkrec_marker_text(ahead, text, sizeof text);
+        put(t, "last draw the queue reached: %s\n", text);
+        if (behind != ahead) {
+            vkrec_marker_text(behind, text, sizeof text);
+            put(t, "oldest draw a pipeline stage was still in: %s\n", text);
+        }
     }
     free(c);
 }

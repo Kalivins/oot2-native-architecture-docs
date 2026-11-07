@@ -379,6 +379,7 @@ static void create_device(uint64_t after) {
                                   .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
                                   .queueFamilyIndex = gpu_vk.family};
     GPU_VK_OK(vkCreateCommandPool(gpu_vk.device, &pi, NULL, &gpu_vk.pool), "vkCreateCommandPool");
+    GPU_VK_OK(vkCreateCommandPool(gpu_vk.device, &pi, NULL, &gpu_vk.pool_main), "vkCreateCommandPool (main)");
     const VkPhysicalDeviceProperties *p = &gpu_vk.facts.props;
     rt_log("gfx: vulkan: %s, vendor %#x device %#x, driver %#x, Vulkan %u.%u.%u: device made with the %d items' "
            "features and %u extensions, queue family %u (flags %#x), timeline from %llu; validation %s; fault report "
@@ -428,6 +429,7 @@ void gpu_vk_close(void) {
         gpu_vk_stop_timeline();
         GPU_VK_OK(vkDeviceWaitIdle(gpu_vk.device), "vkDeviceWaitIdle");
         vkDestroyCommandPool(gpu_vk.device, gpu_vk.pool, NULL);
+        vkDestroyCommandPool(gpu_vk.device, gpu_vk.pool_main, NULL);
         vkDestroySemaphore(gpu_vk.device, gpu_vk.timeline, NULL);
         vkDestroyDevice(gpu_vk.device, NULL);
         if (gpu_vk.messenger) vkDestroyDebugUtilsMessengerEXT(gpu_vk.instance, gpu_vk.messenger, NULL);

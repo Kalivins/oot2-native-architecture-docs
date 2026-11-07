@@ -62,10 +62,13 @@ void gpu_sync_start(const GpuTimelineSource *src, uint64_t after);
 void gpu_sync_stop(void);
 
 typedef void (*GpuEffect)(void *arg, uint64_t value);
-// A submission, made on one thread: gpu_sync_begin takes the submission lock and hands out the next value; each
-// gpu_sync_effect queues fn(arg, value) for the completion thread; gpu_sync_end, called once the GPU work that
-// signals the value has been submitted, issues the value and releases the lock. Values are issued in the order they
-// are handed out, whichever thread submits. A thread that holds a submission must not wait for its own value.
+// A submission: gpu_sync_begin takes the submission gate, waiting while another submission holds it, and hands out the
+// next value; each gpu_sync_effect queues fn(arg, value) for the completion thread; gpu_sync_end, called once the GPU
+// work that signals the value has been submitted, issues the value and opens the gate. Values are issued in the order
+// they are handed out, whichever thread submits. The gate is not a lock owned by a thread: the thread that ends a
+// submission may be another than the one that began it (the recorder ends the frames the submitting thread begins), as
+// long as the two hand over with a release and an acquire of their own, and every effect is queued before the end. A
+// thread that holds a submission must not wait for its own value, nor begin another submission.
 uint64_t gpu_sync_begin(void);
 void gpu_sync_effect(GpuEffect fn, void *arg);
 void gpu_sync_end(void);

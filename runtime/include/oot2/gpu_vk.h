@@ -72,7 +72,8 @@ typedef struct GpuVk {
     VkQueueFlags family_flags;
     VkQueue queue;
     VkSemaphore timeline;
-    VkCommandPool pool;         // command buffers of submissions, used under the submission lock only
+    VkCommandPool pool;         // the prologues and epilogues of submissions, used by the holder of the submission only
+    VkCommandPool pool_main;    // their main command buffers, recorded by the recorder thread (oot2/vk_rec.h)
     GpuVkSettings settings;
     int fault, checkpoints;     // VK_EXT_device_fault (with its vendor binary when fault == 2), the checkpoints
 } GpuVk;
@@ -111,11 +112,22 @@ VkCommandBuffer gpu_vk_cmd(void);
 // records (the backing map's copies into mirrors) runs after every earlier submission and before this one's own work,
 // whenever during the submission it was recorded. Begun at the first call; none is submitted when never asked for.
 VkCommandBuffer gpu_vk_prologue(void);
+// The submission's epilogue: a third command buffer, submitted after gpu_vk_cmd's, which begins with a full barrier over
+// the work of the main command buffer, so what it records (the backing map's readbacks of mirrors) runs after the
+// submission's own work. It is recorded by the thread that holds the submission, which is the replaying thread when the
+// main command buffer is the recorder's (oot2/vk_rec.h); recording a readback into the main command buffer there would
+// be recording from two threads. Begun at the first call; none is submitted when never asked for.
+VkCommandBuffer gpu_vk_epilogue(void);
 void gpu_vk_effect(GpuEffect fn, void *arg);
 uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits);
 
 // A checkpoint's marker: the value, the kind and 1 at the end of the submission's command buffer (0 at its start).
 #define GPU_VK_MARKER(value, kind, end) ((uint64_t)(value) << 4 | (uint64_t)(kind) << 1 | (uint64_t)(end))
+// The marker of a per-draw checkpoint (the recorder, oot2/vk_rec.h): kind GPU_VK_DRAW, the draw's number n in its
+// submission (1 to GPU_VK_DRAW_MAX, counting draws, mesh draws and dispatches) in bits 4 to 27 and the value above.
+enum { GPU_VK_DRAW = 4 };
+#define GPU_VK_DRAW_MAX 0xFFFFFFu
+#define GPU_VK_DRAW_MARKER(value, n) ((uint64_t)(value) << 28 | (uint64_t)(n) << 4 | (uint64_t)GPU_VK_DRAW << 1)
 
 // The back-end table (vk_submit.c): submit, fence_wait, fence_done and finish on the timeline, the pools through the
 // backing map (oot2/backing.h, opened with the device); the operations later tickets bring stop by name.

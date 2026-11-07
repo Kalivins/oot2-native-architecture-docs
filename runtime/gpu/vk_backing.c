@@ -16,8 +16,9 @@
 // readbacks are read by the CPU), in chunks of STAGE_CHUNK, a larger copy getting a chunk of its own. A chunk serves one
 // submission at a time and is taken again once that submission's value is done; one larger than STAGE_CHUNK is freed
 // then. An upload is copied into staging at once and recorded in the submission's prologue (gpu_vk_prologue: after a
-// full barrier over earlier submissions' work, and before one over this submission's own); a readback is recorded at the
-// end of the submission's command buffer, between a full barrier and one that makes the copy visible to the host.
+// full barrier over earlier submissions' work, and before one over this submission's own); a readback is recorded in its
+// epilogue (gpu_vk_epilogue: after the main command buffer), between a full barrier and one that makes the copy visible
+// to the host.
 #include <stdlib.h>
 #include <string.h>
 
@@ -227,7 +228,7 @@ static void vk_upload(uint64_t value, const BackingCopy *c, int n) {
 }
 
 static void vk_readback(uint64_t value, BackingCopy *c, int n) {
-    VkCommandBuffer cb = gpu_vk_cmd();
+    VkCommandBuffer cb = gpu_vk_epilogue();   // not the main command buffer: the recorder thread records that one
     full_barrier(cb, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
     for (int i = 0; i < n; i++) {
         uint64_t at;

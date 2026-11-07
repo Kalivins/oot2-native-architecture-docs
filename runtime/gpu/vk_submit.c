@@ -50,10 +50,18 @@ typedef struct {
     VkCommandBuffer cb;
     uint64_t value;   // the submission that used it last; free once that value is done
 } Slot;
-static Slot *g_slots;
-static int g_nslots;
+// Two sets of slots, each from a pool of its own: command buffers of one pool are not recorded by two threads at once,
+// and a replayed submission is recorded by two (oot2/vk_rec.h): the recorder thread records the main command buffer, the
+// replaying thread the prologue and the epilogue. Whoever holds the submission uses one set at a time.
+typedef struct {
+    Slot *slots;
+    int n;
+} SlotSet;
+static SlotSet g_main;          // command buffers of gpu_vk.pool_main: gpu_vk_cmd's
+static SlotSet g_aux;           // of gpu_vk.pool: the prologue's and the epilogue's
 static VkCommandBuffer g_cur;   // the open submission's command buffer, once asked for
 static VkCommandBuffer g_pro;   // its prologue, once asked for
+static VkCommandBuffer g_epi;   // its epilogue, once asked for
 static uint64_t g_value;        // the open submission's value, 0 when none is open
 static int g_kind;
 
@@ -64,9 +72,9 @@ void gpu_vk_start_timeline(uint64_t after) {
 
 void gpu_vk_stop_timeline(void) {
     gpu_sync_stop();
-    free(g_slots);   // their command buffers go with the pool
-    g_slots = NULL;
-    g_nslots = 0;
+    free(g_main.slots);   // their command buffers go with the pools
+    free(g_aux.slots);
+    g_main = g_aux = (SlotSet){0};
 }
 
 static void checkpoint(int end) {
@@ -79,36 +87,36 @@ uint64_t gpu_vk_begin(int kind) {
     uint64_t value = gpu_sync_begin();
     g_value = value;
     g_kind = kind;
-    g_cur = g_pro = VK_NULL_HANDLE;
+    g_cur = g_pro = g_epi = VK_NULL_HANDLE;
     return value;
 }
 
-// A command buffer from a free slot, begun for the open submission.
-static VkCommandBuffer slot_begin(void) {
+// A command buffer of pool from a free slot of set, begun for the open submission.
+static VkCommandBuffer slot_begin(SlotSet *set, VkCommandPool pool) {
     uint64_t done = gpu_sync_done();
     int i = 0;
-    while (i < g_nslots && g_slots[i].value > done) i++;
-    if (i == g_nslots) {
-        Slot *s = realloc(g_slots, (size_t)(g_nslots + 1) * sizeof *s);
-        if (!s) rt_fatal("gfx: vulkan: out of memory for %d command buffers", g_nslots + 1);
-        g_slots = s;
+    while (i < set->n && set->slots[i].value > done) i++;
+    if (i == set->n) {
+        Slot *s = realloc(set->slots, (size_t)(set->n + 1) * sizeof *s);
+        if (!s) rt_fatal("gfx: vulkan: out of memory for %d command buffers", set->n + 1);
+        set->slots = s;
         VkCommandBufferAllocateInfo alloc = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-                                          .commandPool = gpu_vk.pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                          .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                                           .commandBufferCount = 1};
-        GPU_VK_OK(vkAllocateCommandBuffers(gpu_vk.device, &alloc, &g_slots[i].cb), "vkAllocateCommandBuffers");
-        g_nslots++;
+        GPU_VK_OK(vkAllocateCommandBuffers(gpu_vk.device, &alloc, &set->slots[i].cb), "vkAllocateCommandBuffers");
+        set->n++;
     }
-    g_slots[i].value = g_value;
+    set->slots[i].value = g_value;
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-    GPU_VK_OK(vkBeginCommandBuffer(g_slots[i].cb, &bi), "vkBeginCommandBuffer");
-    return g_slots[i].cb;
+    GPU_VK_OK(vkBeginCommandBuffer(set->slots[i].cb, &bi), "vkBeginCommandBuffer");
+    return set->slots[i].cb;
 }
 
 VkCommandBuffer gpu_vk_cmd(void) {
     if (!g_value) rt_fatal("gfx: vulkan: a command buffer outside a submission");
     if (g_cur) return g_cur;
-    g_cur = slot_begin();
+    g_cur = slot_begin(&g_main, gpu_vk.pool_main);
     checkpoint(0);
     return g_cur;
 }
@@ -127,9 +135,17 @@ static void full_barrier(VkCommandBuffer cb) {
 VkCommandBuffer gpu_vk_prologue(void) {
     if (!g_value) rt_fatal("gfx: vulkan: a prologue outside a submission");
     if (g_pro) return g_pro;
-    g_pro = slot_begin();
+    g_pro = slot_begin(&g_aux, gpu_vk.pool);
     full_barrier(g_pro);
     return g_pro;
+}
+
+VkCommandBuffer gpu_vk_epilogue(void) {
+    if (!g_value) rt_fatal("gfx: vulkan: an epilogue outside a submission");
+    if (g_epi) return g_epi;
+    g_epi = slot_begin(&g_aux, gpu_vk.pool);
+    full_barrier(g_epi);
+    return g_epi;
 }
 
 void gpu_vk_effect(GpuEffect fn, void *arg) {
@@ -140,7 +156,7 @@ void gpu_vk_effect(GpuEffect fn, void *arg) {
 uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits) {
     if (!g_value) rt_fatal("gfx: vulkan: the end of a submission that was not begun");
     uint64_t value = g_value;
-    VkCommandBufferSubmitInfo cbi[2];
+    VkCommandBufferSubmitInfo cbi[3];
     uint32_t ncb = 0;
     if (g_pro) {
         full_barrier(g_pro);
@@ -154,13 +170,18 @@ uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits) {
         cbi[ncb++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
                                                  .commandBuffer = g_cur};
     }
+    if (g_epi) {
+        GPU_VK_OK(vkEndCommandBuffer(g_epi), "vkEndCommandBuffer (the epilogue)");
+        cbi[ncb++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                                                 .commandBuffer = g_epi};
+    }
     VkSemaphoreSubmitInfo signal = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = gpu_vk.timeline,
                                     .value = value, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = nwaits,
                         .pWaitSemaphoreInfos = waits, .commandBufferInfoCount = ncb, .pCommandBufferInfos = cbi,
                         .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &signal};
     GPU_VK_OK(vkQueueSubmit2(gpu_vk.queue, 1, &si, VK_NULL_HANDLE), "vkQueueSubmit2");
-    g_cur = g_pro = VK_NULL_HANDLE;
+    g_cur = g_pro = g_epi = VK_NULL_HANDLE;
     g_value = 0;
     gpu_sync_end();
     return value;
