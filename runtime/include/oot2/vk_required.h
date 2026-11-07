@@ -25,6 +25,11 @@
 //
 // Items 20 to 27 came with the Vulkan back end's device: what the device itself, the uni layout, the mesh path and the
 // translated programs use (architecture D12, D16, D18; research 13, 19, 20 and 22).
+//
+// Items 28 to 31 came with the pipeline builder's capability check (ticket 60, oot2/vk_caps.h): the translated modules
+// declare 64-bit integers (the raw-access helper), storage images without a format, cube array images and non-uniform
+// indexing of storage image arrays, and the check over the whole corpus found no item that enables them. All four are
+// features every desktop GPU that has the items above offers.
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -93,7 +98,14 @@
       (void)0)                                                                                                        \
     X(stores_and_atomics, "stores and atomics in vertex and fragment stages",                                         \
       f->features.vertexPipelineStoresAndAtomics && f->features.fragmentStoresAndAtomics,                             \
-      (e->features.vertexPipelineStoresAndAtomics = e->features.fragmentStoresAndAtomics = VK_TRUE))
+      (e->features.vertexPipelineStoresAndAtomics = e->features.fragmentStoresAndAtomics = VK_TRUE))                  \
+    X(shader_int64, "64-bit integers in shaders", f->features.shaderInt64, (e->features.shaderInt64 = VK_TRUE))       \
+    X(storage_image_formats, "storage images read and written without a format",                                      \
+      f->features.shaderStorageImageReadWithoutFormat && f->features.shaderStorageImageWriteWithoutFormat,           \
+      (e->features.shaderStorageImageReadWithoutFormat = e->features.shaderStorageImageWriteWithoutFormat = VK_TRUE)) \
+    X(cube_array_images, "cube array images", f->features.imageCubeArray, (e->features.imageCubeArray = VK_TRUE))     \
+    X(storage_image_array_indexing, "non-uniform indexing of storage image arrays",                                   \
+      f->f12.shaderStorageImageArrayNonUniformIndexing, (e->f12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE))
 
 // The device extensions the items read, E(id, name), and the ones they depend on below Vulkan 1.4 (pipeline_library
 // for graphics_pipeline_library, maintenance5 for pipeline_binary). The device the back end creates enables every one
