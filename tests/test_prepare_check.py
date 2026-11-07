@@ -310,6 +310,8 @@ class ProbeTest(unittest.TestCase):
             self.assertIsInstance(d["extensions"], list)
             self.assertEqual(list(d["items"]), ids)
             self.assertTrue(all(isinstance(v, bool) for v in d["items"].values()))
+            # the pipelines step keys on the pipeline cache UUID: a driver update builds every pipeline again
+            self.assertRegex(d["pipeline_cache_uuid"], r"^[0-9a-f]{32}$")
         check.vulkan_report(vk, host["vulkan_items"], require=False)   # whatever this machine has, the report reads it
 
     def test_broken_compiler_is_a_plain_failure(self):

@@ -359,6 +359,19 @@ static void create_device(uint64_t after) {
     VkPhysicalDeviceFeatures2 features;
     oot2_vk_chain_features(&en, &features);
     features.features = en.features;
+    // OOT2_VK_DRIVER_CACHE=off keeps the driver's own pipeline cache from serving or storing anything, so that a build
+    // is cold whatever ran before (spike S3's method, research 20 F; prepare's pipeline step measures with it). The
+    // structure rides on the device chain, which VK_KHR_pipeline_binary (a required item) makes valid.
+    VkDevicePipelineBinaryInternalCacheControlKHR driver_cache = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_PIPELINE_BINARY_INTERNAL_CACHE_CONTROL_KHR, .disableInternalCache = VK_TRUE};
+    const char *dc = getenv("OOT2_VK_DRIVER_CACHE");
+    if (dc && *dc && strcmp(dc, "on") && strcmp(dc, "off"))
+        rt_fatal("gfx: vulkan: OOT2_VK_DRIVER_CACHE is \"%s\"; the values are on and off", dc);
+    if (dc && !strcmp(dc, "off")) {
+        driver_cache.pNext = features.pNext;
+        features.pNext = &driver_cache;
+        rt_log("gfx: vulkan: OOT2_VK_DRIVER_CACHE off: the driver's own pipeline cache is disabled");
+    }
     const char *names[OOT2_VK_EXT_COUNT];
     uint32_t nnames = 0;
     for (int e = 0; e < OOT2_VK_EXT_COUNT; e++)

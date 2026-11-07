@@ -394,6 +394,12 @@ static void probe_device(const Fns *fn, VkPhysicalDevice dev) {
     ku64("driver_version", p.driverVersion);
     ku64("vendor_id", p.vendorID);
     ku64("device_id", p.deviceID);
+    {   // the UUID a pipeline cache is valid for, with the vendor, device and driver (prepare's pipeline step keys on it)
+        char uuid[2 * VK_UUID_SIZE + 1];
+        for (unsigned i = 0; i < VK_UUID_SIZE; i++) sprintf(uuid + 2 * i, "%02x", p.pipelineCacheUUID[i]);
+        key("pipeline_cache_uuid");
+        json_string(uuid);
+    }
     ku64("type", (uint64_t)p.deviceType);
     if (fn->props2 && fn->features2 && fn->memory2) {
         probe_properties(fn, dev, &p, ext, ne);

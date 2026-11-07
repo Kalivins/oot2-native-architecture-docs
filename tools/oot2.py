@@ -29,6 +29,13 @@ step runs at once (default: the CPU count, capped by the free memory). The
 translated shaders go to DIR/shaders/shader-base.bin. The next step, ledger, reads DIR/ledger.jsonl (the game writes
 it when a run ends) and translates the shader answers it recorded as variants into DIR/shaders/shader-variants.bin.
 
+The pipelines step, after ledger, builds with the GPU the game will use every pipeline library and compute pipeline the
+shader cache holds into DIR/pipelines/pipeline.cache (tools/prepare/pipelines.py). --pipelines-jobs sets its builder
+processes (default: the CPU count, capped by the free memory), --pipelines-list limits it to the job keys in a file,
+and --pipelines-cold turns the driver's own cache off for a timing. --skip-pipelines leaves the step out (it takes
+hours on a first run, and a run that only needs the program does not need its output). A GPU without every device item
+of the renderer makes it skip with a warning, until the Vulkan back end is the default.
+
 --plain-modules gives modules the player already has in plain form (files named main, sdk, ...): they are checked
 against the dump's and used instead of decoding, so the ZBIC decoder is not fetched for them. --zbic-archive gives
 the decoder's source archive (hexkyz/zstd at the pinned commit, tools/prepare/zbic.py) instead of downloading it.
@@ -105,6 +112,14 @@ def main(argv: list[str] | None = None) -> int:
                                              "PATH)")
     p.add_argument("--translate-jobs", type=positive,
                    help="translator processes (default: the CPU count, capped by the free memory)")
+    p.add_argument("--pipelines-jobs", type=positive,
+                   help="pipeline builder processes (default: the CPU count, capped by the free memory)")
+    p.add_argument("--pipelines-list", type=Path,
+                   help="file of shader job keys, one per line, to build pipelines for instead of every program")
+    p.add_argument("--pipelines-cold", action="store_true",
+                   help="build with the driver's own pipeline cache disabled (a measurement, not for play)")
+    p.add_argument("--skip-pipelines", action="store_true",
+                   help="do not build the pipelines (a development run that needs the program and not the cache)")
     p.add_argument("--plain-modules", type=Path,
                    help="folder of plain modules you already have (main, sdk, ...), used instead of decoding")
     p.add_argument("--zbic-archive", type=Path,

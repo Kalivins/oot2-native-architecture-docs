@@ -21,7 +21,9 @@ In order, cheapest first, so a run that cannot succeed stops in seconds:
    give, through --version, the identity of its own file and the line protocol the pool speaks.
 5. Vulkan: the device items of runtime/include/oot2/vk_required.h (architecture section 1), as the probe judged them
    with that header's own tests, which the runtime's device creation uses too. Reported, not required, while the null
-   back end is oot2.exe's default (REQUIRE_VULKAN_ITEMS below).
+   back end is oot2.exe's default (REQUIRE_VULKAN_ITEMS below). The pipelines step needs such a device to build
+   with: while the items are only reported it skips, with a warning that names what the GPU lacks, and once they are
+   required the same finding fails it (tools/prepare/pipelines.py).
 6. The dump's SHA-256 and size. They identify the dump: the steps that read it take them into their keys, so another
    dump, or a damaged one, makes those steps run again. Hashing 25 GB takes minutes, so the hash is recorded with the
    file's size and modification time and computed again only when either changes, or with --verify.

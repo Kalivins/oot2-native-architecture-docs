@@ -122,6 +122,14 @@ VkpCacheState vkp_cache_state(void);
 // Write the cache to the path vkp_open was given, through a temporary file and a rename, so that an interrupted write
 // leaves the old file whole. 1, or 0 with the reason in why.
 int vkp_cache_save(char *why, size_t cap);
+// Write the cache's data to path (a temporary file and a rename), then replace the cache with an empty one, so that
+// each flush holds only what was built since the last: prepare's pipeline step keeps one such file per batch and merges
+// them at the end (a cache that grew by every flush would be written again and again). *bytes, when not NULL, is the
+// file's size. 1, or 0 with the reason in why. Nothing made from the cache may still be created (vkp_warm destroys
+// what it makes before it returns).
+int vkp_cache_flush(const char *path, size_t *bytes, char *why, size_t cap);
+// What the cache holds now, in bytes (the size of the data a flush or a save would write).
+uint64_t vkp_cache_size(void);
 
 // ---- pipelines
 typedef struct VkpFormats {     // the attachments a graphics pipeline draws into
@@ -137,6 +145,19 @@ typedef struct VkpFormats {     // the attachments a graphics pipeline draws int
 VkPipeline vkp_graphics(const VkpStage *vs, const VkpStage *ps, const VkpFormats *formats);
 // The compute pipeline of a compute stage.
 VkPipeline vkp_compute(const VkpStage *cs);
+// What prepare builds ahead of the first frame, one stage at a time (architecture section 6.1, step 1): the
+// pre-rasterization library of a vertex stage as translated, with no padding (the padded ones are known only from play,
+// and come from the ledger), the fragment library of a pixel stage, the compute pipeline of a compute stage. The same
+// create info as vkp_graphics and vkp_compute make, so the driver's cache serves the later get; the object is destroyed
+// before the call returns. A key the store lacks, a job that did not translate or a module the device cannot take is a
+// named fatal, as it is in the gets.
+enum { VKP_WARM_VERTEX, VKP_WARM_PIXEL, VKP_WARM_COMPUTE };
+typedef struct VkpWarm {
+    uint64_t ns;               // wall time in the driver
+    int hit;                   // the application cache served it (stage libraries and compute pipelines only)
+    uint32_t module_bytes;
+} VkpWarm;
+int vkp_warm(int what, const VkpStage *s, VkpWarm *out);
 // Tests only: while non-zero, a vertex module is linked as translated, with no padding (the counter-run of the padding
 // rule: the validation layer then reports VUID-RuntimeSpirv-OpEntryPoint-08743 for a pixel input nothing writes).
 extern int vkp_unpad;

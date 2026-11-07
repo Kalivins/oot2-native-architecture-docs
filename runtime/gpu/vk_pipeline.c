@@ -17,7 +17,18 @@
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#include <io.h>
 #include <windows.h>
+// 64-bit file offsets and a flush to the disk: a pipeline cache of a whole game passes 2 GiB, which a 32-bit `long`
+// (Windows' ftell) cannot size, and a cache file renamed into place must not be half written after a power cut.
+#define OFF_SEEK _fseeki64
+#define OFF_TELL _ftelli64
+#define SYNC_FILE(f) _commit(_fileno(f))
+#else
+#include <unistd.h>
+#define OFF_SEEK fseeko
+#define OFF_TELL ftello
+#define SYNC_FILE(f) fsync(fileno(f))
 #endif
 
 #include "oot2/gpu.h"
@@ -475,6 +486,52 @@ VkPipeline vkp_compute(const VkpStage *cs) {
     return obj_get(key, cs->key, NULL, build_compute, &x);
 }
 
+// ---------- warming (prepare's pipeline step, tools/pipebuild)
+
+// The objects a launch asks for, built through the cache with the very functions the get calls use and let go at once:
+// what the driver compiled stays in the cache, and the program holds no pipeline until it draws.
+int vkp_warm(int what, const VkpStage *s, VkpWarm *out) {
+    if (!P.open) rt_fatal("gfx: vulkan: vkp_warm before vkp_open");
+    memset(out, 0, sizeof *out);
+    VkpStats before, after;
+    vkp_stats(&before);
+    VkpModule m;
+    VkPipeline p;
+    int kind;
+    if (what == VKP_WARM_VERTEX) {
+        vkp_module(s, SHD_VS, &m);
+        VertexCtx x = {.stage = s, .module = &m};
+        p = build_vertex_library(&x);
+        kind = K_LIBRARY;
+    } else if (what == VKP_WARM_PIXEL) {
+        vkp_module(s, SHD_PS, &m);
+        FragmentCtx x = {.stage = s, .module = &m};
+        p = build_fragment_library(&x);
+        kind = K_LIBRARY;
+    } else if (what == VKP_WARM_COMPUTE) {
+        vkp_module(s, SHD_CS, &m);
+        ComputeCtx x = {.stage = s};
+        p = build_compute(&x);
+        kind = K_COMPUTE;
+    } else {
+        rt_fatal("gfx: vulkan: vkp_warm of kind %d", what);
+    }
+    vkDestroyPipeline(gpu_vk.device, p, NULL);
+    vkp_stats(&after);
+    out->module_bytes = m.bytes;
+    out->ns = after.build_ns[kind] - before.build_ns[kind];
+    out->hit = kind == K_COMPUTE ? after.compute_hits > before.compute_hits
+                                 : after.stage_library_hits > before.stage_library_hits;
+    return 1;
+}
+
+uint64_t vkp_cache_size(void) {
+    if (!P.open) return 0;
+    size_t size = 0;
+    GPU_VK_OK(vkGetPipelineCacheData(gpu_vk.device, P.cache, &size, NULL), "vkGetPipelineCacheData");
+    return size;
+}
+
 // ---------- release and stats
 
 void vkp_release(const char *key) {
@@ -520,9 +577,9 @@ static void *read_whole(const char *path, size_t *size) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     void *data = NULL;
-    if (fseek(f, 0, SEEK_END) == 0) {
-        long long n = ftell(f);
-        if (n > 0 && fseek(f, 0, SEEK_SET) == 0 && (data = malloc((size_t)n)) != NULL) {
+    if (OFF_SEEK(f, 0, SEEK_END) == 0) {
+        long long n = (long long)OFF_TELL(f);
+        if (n > 0 && OFF_SEEK(f, 0, SEEK_SET) == 0 && (data = malloc((size_t)n)) != NULL) {
             if (fread(data, 1, (size_t)n, f) == (size_t)n) *size = (size_t)n;
             else free(data), data = NULL;
         }
@@ -538,6 +595,13 @@ static void cache_open(const char *path) {
     if (path) {
         snprintf(P.cache_path, sizeof P.cache_path, "%s", path);
         data = read_whole(path, &size);
+        if (!data) {
+            FILE *there = fopen(path, "rb");
+            if (there) {   // a file that is there and cannot be read is not the same as no file: say so
+                fclose(there);
+                rt_log("gfx: vulkan: the pipeline cache %s could not be read (empty, or too large for memory): starting empty", path);
+            }
+        }
         if (data) {
             P.cache_state = vkp_cache_judge(data, size, &gpu_vk.facts.props);
             if (P.cache_state != VKP_CACHE_LOADED) {
@@ -554,24 +618,23 @@ static void cache_open(const char *path) {
     if (P.cache_state == VKP_CACHE_LOADED) rt_log("gfx: vulkan: the pipeline cache %s seeds %zu bytes", path, size);
 }
 
-int vkp_cache_save(char *why, size_t cap) {
-    if (!P.open || !P.cache_path[0]) {
-        if (why && cap) snprintf(why, cap, "no pipeline cache file was named");
-        return 0;
-    }
+// The cache's data written to path through a temporary file and a rename, so that an interrupted write leaves the old
+// file whole; *bytes (when not NULL) is its size.
+static int cache_write(VkPipelineCache cache, const char *path, size_t *bytes, char *why, size_t cap) {
     size_t size = 0;
-    GPU_VK_OK(vkGetPipelineCacheData(gpu_vk.device, P.cache, &size, NULL), "vkGetPipelineCacheData");
+    GPU_VK_OK(vkGetPipelineCacheData(gpu_vk.device, cache, &size, NULL), "vkGetPipelineCacheData");
     void *data = malloc(size ? size : 1);
     if (!data) {
         if (why && cap) snprintf(why, cap, "out of memory for %zu bytes of cache", size);
         return 0;
     }
-    VkResult r = vkGetPipelineCacheData(gpu_vk.device, P.cache, &size, data);
+    VkResult r = vkGetPipelineCacheData(gpu_vk.device, cache, &size, data);
     if (r != VK_SUCCESS && r != VK_INCOMPLETE) gpu_vk_failed(r, "vkGetPipelineCacheData");
     char tmp[sizeof P.cache_path + 8];
-    snprintf(tmp, sizeof tmp, "%s.tmp", P.cache_path);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *f = fopen(tmp, "wb");
     int ok = f && fwrite(data, 1, size, f) == size;
+    if (f && ok) ok = fflush(f) == 0 && SYNC_FILE(f) == 0;
     if (f && fclose(f) != 0) ok = 0;
     free(data);
     if (!ok) {
@@ -580,15 +643,43 @@ int vkp_cache_save(char *why, size_t cap) {
         return 0;
     }
 #ifdef _WIN32
-    ok = MoveFileExA(tmp, P.cache_path, MOVEFILE_REPLACE_EXISTING) != 0;
+    ok = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING) != 0;
 #else
-    ok = rename(tmp, P.cache_path) == 0;
+    ok = rename(tmp, path) == 0;
 #endif
     if (!ok) {
-        if (why && cap) snprintf(why, cap, "cannot move %s over %s", tmp, P.cache_path);
+        if (why && cap) snprintf(why, cap, "cannot move %s over %s", tmp, path);
         remove(tmp);
         return 0;
     }
+    if (bytes) *bytes = size;
+    return 1;
+}
+
+int vkp_cache_save(char *why, size_t cap) {
+    if (!P.open || !P.cache_path[0]) {
+        if (why && cap) snprintf(why, cap, "no pipeline cache file was named");
+        return 0;
+    }
+    return cache_write(P.cache, P.cache_path, NULL, why, cap);
+}
+
+int vkp_cache_flush(const char *path, size_t *bytes, char *why, size_t cap) {
+    if (!P.open) {
+        if (why && cap) snprintf(why, cap, "the pipeline builder is not open");
+        return 0;
+    }
+    if (strlen(path) + 8 > sizeof P.cache_path) {
+        if (why && cap) snprintf(why, cap, "the path %s is too long", path);
+        return 0;
+    }
+    if (!cache_write(P.cache, path, bytes, why, cap)) return 0;
+    // From here on the cache holds what is built after this call and nothing else: the next flush writes a delta.
+    VkPipelineCacheCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
+    VkPipelineCache fresh;
+    GPU_VK_OK(vkCreatePipelineCache(gpu_vk.device, &ci, NULL, &fresh), "vkCreatePipelineCache");
+    vkDestroyPipelineCache(gpu_vk.device, P.cache, NULL);
+    P.cache = fresh;
     return 1;
 }
 
