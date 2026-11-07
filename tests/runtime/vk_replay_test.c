@@ -850,16 +850,110 @@ static void case_indirect(void) {
     printf("ok indirect\n");
 }
 
-// A state that needs a core feature the device does not enable stops by name at the draw.
-static void case_clamp(void) {
+static p_bind_state state_of(int kind, const void *bytes, size_t n) {
+    p_bind_state st;
+    memset(&st, 0, sizeof st);
+    st.kind = kind;
+    CHECK(n <= sizeof st.bytes);
+    memcpy(st.bytes, bytes, n);
+    return st;
+}
+
+static void draw3(Rec *r, int prim) {
+    PUT(r, OP_DRAW, (p_draw){.prim = prim, .count = 3});
+}
+
+// The states that needed a core feature the device did not enable draw now, each as its own packets: line and point
+// fill, the depth bias clamp, depth clamp, the depth bounds test, a wide line, several viewports and scissors, a blend
+// state and write mask for each of two targets, and dual-source factors on one.
+static void case_features(void) {
     open_fakes();
     Rec *r = rec_begin(0);
     graphics_state(r);
+    poly_st poly = {.cull = 0, .front = 0, .mode = NVN_POLYGON_MODE_LINE, .offset_en = 2};
+    PUT(r, OP_BIND_STATE, state_of(4, &poly, sizeof poly));
+    PUT(r, OP_POLY_OFFSET, (p_poly_offset){.factor = 1.5f, .units = 2.0f, .clamp = 0.25f});
+    draw3(r, NVN_DRAW_PRIMITIVE_TRIANGLES);   // draw 1: line fill, bias 2, clamp 0.25, slope 1.5
+    poly.mode = NVN_POLYGON_MODE_POINT, poly.offset_en = 1;
+    PUT(r, OP_BIND_STATE, state_of(4, &poly, sizeof poly));
+    draw3(r, NVN_DRAW_PRIMITIVE_POINTS);      // draw 2: point fill
+    poly.mode = NVN_POLYGON_MODE_FILL, poly.offset_en = 0;
+    PUT(r, OP_BIND_STATE, state_of(4, &poly, sizeof poly));
     PUT(r, OP_DEPTH_CLAMP, (p_flag){1});
-    PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3});
+    PUT(r, OP_DEPTH_BOUNDS, (p_depth_bounds){.enable = 1, .min = 0.25f, .max = 0.75f});
+    draw3(r, NVN_DRAW_PRIMITIVE_TRIANGLES);   // draw 3: depth clamp, depth bounds 0.25 to 0.75
+    PUT(r, OP_DEPTH_CLAMP, (p_flag){0});
+    PUT(r, OP_DEPTH_BOUNDS, (p_depth_bounds){.enable = 0});
+    float width = 3.5f;
+    PUT(r, OP_BIND_STATE, state_of(8, &width, sizeof width));
+    draw3(r, NVN_DRAW_PRIMITIVE_LINES);       // draw 4: a line 3.5 wide
+    PUT(r, OP_VIEWPORTS, (p_viewports){.first = 0, .n = 3, .v = {{0, 0, 64, 32}, {0, 0, 32, 16}, {32, 16, 32, 16}}});
+    PUT(r, OP_SCISSOR, (p_scissor){.first = 0, .n = 2, .r = {{8, 4, 16, 8}, {0, 0, 10, 10}}});
+    draw3(r, NVN_DRAW_PRIMITIVE_TRIANGLES);   // draw 5: 3 viewports, the scissors (2 set) the whole area past them
+    // two targets: target 0 blends and writes red and green, target 1 does not blend and writes alpha only
+    p_set_rt rt = one_target(0);
+    rt.n = 2;
+    rt.color[1] = rt.color[0];
+    put(r, OP_SET_RT, &rt, sizeof rt);
+    blend_st b = {.target = 0, .src_rgb = NVN_BLEND_FUNC_SRC_ALPHA, .dst_rgb = NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA,
+                  .src_a = NVN_BLEND_FUNC_ONE, .dst_a = NVN_BLEND_FUNC_ZERO, .eq_rgb = NVN_BLEND_EQUATION_ADD,
+                  .eq_a = NVN_BLEND_EQUATION_ADD};
+    PUT(r, OP_BIND_STATE, state_of(0, &b, sizeof b));
+    color_st color = {.blend_en = 1};
+    PUT(r, OP_BIND_STATE, state_of(1, &color, sizeof color));
+    chmask_st mask = {.mask = 0x3 | 0x8 << 4};
+    PUT(r, OP_BIND_STATE, state_of(2, &mask, sizeof mask));
+    draw3(r, NVN_DRAW_PRIMITIVE_TRIANGLES);   // draw 6
+    // dual-source factors on a single target
+    PUT(r, OP_SET_RT, one_target(0));
+    b.src_rgb = NVN_BLEND_FUNC_SRC1_COLOR, b.dst_rgb = NVN_BLEND_FUNC_ONE_MINUS_SRC1_COLOR;
+    PUT(r, OP_BIND_STATE, state_of(0, &b, sizeof b));
+    mask.mask = 0xF;
+    PUT(r, OP_BIND_STATE, state_of(2, &mask, sizeof mask));
+    draw3(r, NVN_DRAW_PRIMITIVE_TRIANGLES);   // draw 7
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    close_fakes();
+    printf("ok features\n");
+}
+
+// Dual-source factors with two colour targets stop by name: Vulkan guarantees one.
+static void case_dual_two_targets(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    graphics_state(r);
+    p_set_rt rt = one_target(0);
+    rt.n = 2;
+    rt.color[1] = rt.color[0];
+    put(r, OP_SET_RT, &rt, sizeof rt);
+    blend_st b = {.target = 0, .src_rgb = NVN_BLEND_FUNC_SRC1_ALPHA, .dst_rgb = NVN_BLEND_FUNC_ONE_MINUS_SRC1_ALPHA,
+                  .src_a = NVN_BLEND_FUNC_ONE, .dst_a = NVN_BLEND_FUNC_ZERO, .eq_rgb = NVN_BLEND_EQUATION_ADD,
+                  .eq_a = NVN_BLEND_EQUATION_ADD};
+    PUT(r, OP_BIND_STATE, state_of(0, &b, sizeof b));
+    color_st color = {.blend_en = 1};
+    PUT(r, OP_BIND_STATE, state_of(1, &color, sizeof color));
+    draw3(r, NVN_DRAW_PRIMITIVE_TRIANGLES);
     uint64_t h = rec_end(r);
     vkr_submit(&h, 1);
     printf("submit returned\n");
+}
+
+// An indexed indirect draw whose record the CPU can read puts the record's base instance into c[0]; one it cannot read
+// (GPU memory) keeps 0 there.
+static void case_draw_indirect(void) {
+    open_fakes();
+    const uint32_t record[5] = {6, 2, 0, 3, 7};
+    memcpy(g_host + 0x240, record, sizeof record);
+    Rec *r = rec_begin(0);
+    graphics_state(r);
+    PUT(r, OP_DRAW_IDX_IND, (p_draw_idx_ind){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .itype = NVN_INDEX_TYPE_UNSIGNED_SHORT,
+                                             .ibuf = MIRROR + 0x5000, .ind = HOST + 0x240});
+    PUT(r, OP_DRAW_IDX_IND, (p_draw_idx_ind){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .itype = NVN_INDEX_TYPE_UNSIGNED_SHORT,
+                                             .ibuf = MIRROR + 0x5000, .ind = VRAM + 0x200});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    close_fakes();
+    printf("ok draw_indirect\n");
 }
 
 static void case_oplist(void) {
@@ -905,6 +999,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(m, "nosnapshot")) vkr_no_snapshot = 1;
         else if (!strcmp(m, "nodrop")) vkr_no_drop = 1;
         else if (!strcmp(m, "nodeclare")) vkr_no_declare = 1;
+        else if (!strcmp(m, "nofeatures")) vkr_no_features = 1;
         else {
             fprintf(stderr, "unknown mutant %s\n", m);
             return 2;
@@ -922,7 +1017,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "xstop") && argc >= 3) case_xstop(argv[2]);
     else if (!strcmp(cs, "indirect")) case_indirect();
     else if (!strcmp(cs, "oplist")) case_oplist();
-    else if (!strcmp(cs, "clamp")) case_clamp();
+    else if (!strcmp(cs, "features")) case_features();
+    else if (!strcmp(cs, "dual_two_targets")) case_dual_two_targets();
+    else if (!strcmp(cs, "draw_indirect")) case_draw_indirect();
     else if (!strcmp(cs, "stop") && argc >= 3) case_stop((uint32_t)strtoul(argv[2], NULL, 10));
     else if (!strcmp(cs, "broken")) case_broken();
     else {

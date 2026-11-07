@@ -39,7 +39,18 @@
 //                                   BindTexture at c[2] slot SLOT of the texture and sampler registered at ID (both
 //                                   pools, one entry each); TYPE 2d, 2darray, 3d or cube; D layers or depth; texels
 //                                   RGBA32F, layer (slice, face) major, row 0 first
-//   draw arrays PRIM FIRST COUNT, draw elements PRIM COUNT
+//   draw arrays PRIM FIRST COUNT, draw elements PRIM COUNT, draw indirect PRIM COUNT BASE_INSTANCE
+//                                   the last: DrawElementsIndirect over the index buffer, its record {COUNT, 1, 0, 0,
+//                                   BASE_INSTANCE} in a buffer of the CPU pool
+//   polygon line|point|fill OFFSETS, offset FACTOR UNITS CLAMP
+//                                   the polygon state (mode, offset enables: point 1, line 2, fill 4) and the offset
+//   depth_clamp, depth_bounds MIN MAX, line_width W
+//   viewports N                     N viewports and scissors: the first is the draw's, the others are quarters of the
+//                                   target (a program that writes no viewport index draws to the first)
+//   targets 2                       a second colour target (RGBA32F, the size of the first, cleared the same), written
+//                                   with --out1
+//   chmask T HEX                    target T's channel mask (r 1, g 2, b 4, a 8), the others 0xf
+//   blend_dual                      blend on target 0 with dual-source factors (SRC1_COLOR, ONE_MINUS_SRC1_COLOR)
 //
 // What this expects of the replay (oot2/vk_replay.h and runtime/gpu/vk_replay.c, as written): every record of the
 // recording is replayed; the driver banks c[0], c[1] (from the code area at the control section's +0x40 and +0x44), c[2]
@@ -143,12 +154,19 @@ typedef struct {
     Tex tex[MAX_TEX];
     int ntex;
     int indexed, prim, first, count;
+    int polygon, offsets;      // NVNpolygonMode, or -1 for no polygon state
+    float offset[3];
+    int has_offset, clamp, bounds;
+    float bmin, bmax, line_width;
+    int nvp, ntargets;
+    unsigned chmask[2];
+    int has_chmask, dual, indirect, base_instance;
 } Draw;
 
 typedef struct {
-    const char *draw, *out, *pack, *depth_out;
+    const char *draw, *out, *out1, *pack, *depth_out;
     int depth_mode, origin;   // NVNdepthMode, NVNwindowOriginMode
-    int imports, no_snapshot, no_flip, rewrite, cold;
+    int imports, no_snapshot, no_flip, rewrite, cold, no_features;
 } Opts;
 
 static void usage(const char *why) {
@@ -228,6 +246,7 @@ static void parse_draw(const char *path, Draw *d) {
     memset(d, 0, sizeof *d);
     d->prim = NVN_DRAW_PRIMITIVE_TRIANGLES;
     d->vp[2] = d->sc[2] = -1;
+    d->polygon = -1, d->nvp = 1, d->ntargets = 1, d->chmask[0] = d->chmask[1] = 0xF;
     char line[1200];
     while (fgets(line, sizeof line, f)) {
         char w[32], a[NAME], b[NAME], c2[NAME], e[NAME], g[NAME], h[NAME], file[NAME];
@@ -288,9 +307,36 @@ static void parse_draw(const char *path, Draw *d) {
             t->w = u[2], t->h = u[3], t->d = u[4];
             t->nearest = strcmp(g, "linear") != 0, t->repeat = !strcmp(h, "repeat");
             snprintf(t->file, NAME, "%s", file);
+        } else if (!strcmp(w, "polygon")) {
+            CHECK(sscanf(rest, "%127s %u", a, &u[0]) == 2);
+            d->polygon = !strcmp(a, "line") ? NVN_POLYGON_MODE_LINE : !strcmp(a, "point") ? NVN_POLYGON_MODE_POINT
+                                                                                           : NVN_POLYGON_MODE_FILL;
+            d->offsets = (int)u[0];
+        } else if (!strcmp(w, "offset")) {
+            CHECK(sscanf(rest, "%f %f %f", &d->offset[0], &d->offset[1], &d->offset[2]) == 3);
+            d->has_offset = 1;
+        } else if (!strcmp(w, "depth_clamp")) {
+            d->clamp = 1;
+        } else if (!strcmp(w, "depth_bounds")) {
+            CHECK(sscanf(rest, "%f %f", &d->bmin, &d->bmax) == 2);
+            d->bounds = 1;
+        } else if (!strcmp(w, "line_width")) {
+            CHECK(sscanf(rest, "%f", &d->line_width) == 1);
+        } else if (!strcmp(w, "viewports")) {
+            CHECK(sscanf(rest, "%d", &d->nvp) == 1 && d->nvp >= 1 && d->nvp <= 16);
+        } else if (!strcmp(w, "targets")) {
+            CHECK(sscanf(rest, "%d", &d->ntargets) == 1 && d->ntargets >= 1 && d->ntargets <= 2);
+        } else if (!strcmp(w, "chmask")) {
+            CHECK(sscanf(rest, "%u %x", &u[0], &u[1]) == 2 && u[0] < 2);
+            d->chmask[u[0]] = u[1], d->has_chmask = 1;
+        } else if (!strcmp(w, "blend_dual")) {
+            d->dual = 1;
         } else if (!strcmp(w, "draw")) {
             CHECK(sscanf(rest, "%127s", a) == 1);
-            if (!strcmp(a, "arrays")) {
+            if (!strcmp(a, "indirect")) {
+                CHECK(sscanf(rest, "%*s %d %d %d", &d->prim, &d->count, &d->base_instance) == 3);
+                d->indexed = 1, d->indirect = 1;
+            } else if (!strcmp(a, "arrays")) {
                 CHECK(sscanf(rest, "%*s %d %d %d", &d->prim, &d->first, &d->count) == 3);
             } else {
                 CHECK(!strcmp(a, "elements") && sscanf(rest, "%*s %d %d", &d->prim, &d->count) == 2);
@@ -380,6 +426,7 @@ static void open_backend(const Opts *o, const char *pack) {
     vkp_open(NULL);
     vkr_no_snapshot = o->no_snapshot;
     vkr_no_flip = o->no_flip;
+    vkr_no_features = o->no_features;
 }
 
 // The module's one stand-in function and its end marker, defined in this order so that the function lies below the marker
@@ -579,8 +626,9 @@ static void run_draw(const Opts *o) {
     g_cpu_used = COMMAND_BYTES;
 
     // the images: the colour target, the depth target, the draw's textures, in one pool the CPU cannot see
-    static GTex rt, depth, tex[MAX_TEX];
+    static GTex rt, rt1, depth, tex[MAX_TEX];
     rt = plan_texture(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA32F, d.w, d.h, 1);
+    if (d.ntargets > 1) rt1 = plan_texture(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA32F, d.w, d.h, 1);
     if (d.depth) depth = plan_texture(NVN_TEXTURE_TARGET_2D, NVN_FORMAT_DEPTH32F, d.w, d.h, 1);
     for (int i = 0; i < d.ntex; i++) {
         uint32_t layers = d.tex[i].target == NVN_TEXTURE_TARGET_CUBEMAP ? 6 : d.tex[i].d;
@@ -588,6 +636,7 @@ static void run_draw(const Opts *o) {
     }
     g_gpu_pool = make_pool(align_up(g_gpu_used, 0x10000), CPU_NO_ACCESS | GPU_CACHED, NULL);
     init_texture(&rt);
+    if (d.ntargets > 1) init_texture(&rt1);
     if (d.depth) init_texture(&depth);
     for (int i = 0; i < d.ntex; i++) init_texture(&tex[i]);
 
@@ -618,7 +667,7 @@ static void run_draw(const Opts *o) {
     // the programs, and their pipeline before the first submission (the pair's attachment formats are the targets')
     const nvn_stage *ids[2];
     uint64_t prog = make_program(&d, ids);
-    VkpFormats formats = {1, {VK_FORMAT_R32G32B32A32_SFLOAT}, d.depth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED,
+    VkpFormats formats = {(uint32_t)d.ntargets, {VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT}, d.depth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED,
                           VK_FORMAT_UNDEFINED};
     VkpStage vs = {.key = ids[0]->key, .shape = ids[0]}, ps = {.key = ids[1]->key, .shape = ids[1]};
     if (!o->cold) CHECK(vkp_graphics(&vs, &ps, &formats) != VK_NULL_HANDLE);
@@ -632,11 +681,16 @@ static void run_draw(const Opts *o) {
         vbuf[i] = make_buffer(data, n, 256, 0);
         free(data);
     }
+    Buf indirect = {0};
     if (d.indexed) {
         size_t n;
         void *data = read_file(d.ibuf, &n);
         ibuf = make_buffer(data, n, 256, 0);
         free(data);
+    }
+    if (d.indirect) {
+        const uint32_t record[5] = {(uint32_t)d.count, 1, 0, 0, (uint32_t)d.base_instance};
+        indirect = make_buffer(record, sizeof record, 256, 0);
     }
     for (int i = 0; i < d.nubo; i++) {
         size_t n;
@@ -683,22 +737,81 @@ static void run_draw(const Opts *o) {
     NVN(nvnCommandBufferAddCommandMemory, cb, g_cpu_pool, 0, COMMAND_BYTES);
     NVN(nvnCommandBufferAddControlMemory, cb, galloc(CONTROL_BYTES, 16), CONTROL_BYTES);
     NVN(nvnCommandBufferBeginRecording, cb);
-    uint64_t rts = galloc(8, 8), rgba = galloc(16, 16);
+    uint64_t rts = galloc(16, 8), rgba = galloc(16, 16);
     wr64(rts, rt.tex);
+    if (d.ntargets > 1) wr64(rts + 8, rt1.tex);
     memcpy((void *)(uintptr_t)rgba, d.clear, sizeof d.clear);
-    NVN(nvnCommandBufferSetRenderTargets, cb, 1, rts, 0, d.depth ? depth.tex : 0, 0);
+    NVN(nvnCommandBufferSetRenderTargets, cb, (uint64_t)d.ntargets, rts, 0, d.depth ? depth.tex : 0, 0);
     NVN(nvnCommandBufferSetViewport, cb, (uint64_t)(int64_t)d.vp[0], (uint64_t)(int64_t)d.vp[1], (uint64_t)(int64_t)d.vp[2],
         (uint64_t)(int64_t)d.vp[3]);
     NVN(nvnCommandBufferSetScissor, cb, (uint64_t)(int64_t)d.sc[0], (uint64_t)(int64_t)d.sc[1], (uint64_t)(int64_t)d.sc[2],
         (uint64_t)(int64_t)d.sc[3]);
+    if (d.nvp > 1) {   // the draw's viewport and scissor first, then quarters of the target, each in its own corner
+        uint64_t vps = galloc(16ull * (uint64_t)d.nvp, 16), scs = galloc(16ull * (uint64_t)d.nvp, 16);
+        for (int i = 0; i < d.nvp; i++) {
+            float *v = (float *)(uintptr_t)(vps + 16ull * (uint64_t)i);
+            int32_t *k = (int32_t *)(uintptr_t)(scs + 16ull * (uint64_t)i);
+            if (i == 0) {
+                v[0] = (float)d.vp[0], v[1] = (float)d.vp[1], v[2] = (float)d.vp[2], v[3] = (float)d.vp[3];
+                k[0] = d.sc[0], k[1] = d.sc[1], k[2] = d.sc[2], k[3] = d.sc[3];
+            } else {
+                v[0] = (float)((i & 1) * (int)d.w / 2), v[1] = (float)((i & 2) * (int)d.h / 4);
+                v[2] = (float)d.w / 2, v[3] = (float)d.h / 2;
+                k[0] = (int32_t)v[0], k[1] = (int32_t)v[1], k[2] = (int32_t)d.w / 2, k[3] = (int32_t)d.h / 2;
+            }
+        }
+        NVN(nvnCommandBufferSetViewports, cb, 0, (uint64_t)d.nvp, vps);
+        NVN(nvnCommandBufferSetScissors, cb, 0, (uint64_t)d.nvp, scs);
+    }
     if (d.depth) {
         fv(0, d.dnear), fv(1, d.dfar);
         NVN(nvnCommandBufferSetDepthRange, cb);
         NVN(nvnCommandBufferBindDepthStencilState, cb, ds_state);
     }
+    if (d.polygon >= 0) {
+        uint64_t ps = galloc(0x10, 16);
+        NVN(nvnPolygonStateSetDefaults, ps);
+        NVN(nvnPolygonStateSetPolygonMode, ps, (uint64_t)d.polygon);
+        NVN(nvnPolygonStateSetPolygonOffsetEnables, ps, (uint64_t)d.offsets);
+        NVN(nvnCommandBufferBindPolygonState, cb, ps);
+    }
+    if (d.has_offset) {
+        fv(0, d.offset[0]), fv(1, d.offset[1]), fv(2, d.offset[2]);
+        NVN(nvnCommandBufferSetPolygonOffsetClamp, cb);
+    }
+    if (d.clamp) NVN(nvnCommandBufferSetDepthClamp, cb, 1);
+    if (d.bounds) {
+        fv(0, d.bmin), fv(1, d.bmax);
+        NVN(nvnCommandBufferSetDepthBounds, cb, 1);
+    }
+    if (d.line_width > 0.0f) {
+        fv(0, d.line_width);
+        NVN(nvnCommandBufferSetLineWidth, cb);
+    }
+    if (d.has_chmask) {
+        uint64_t ms = galloc(0x10, 16);
+        NVN(nvnChannelMaskStateSetDefaults, ms);
+        for (int i = 0; i < d.ntargets; i++)
+            NVN(nvnChannelMaskStateSetChannelMask, ms, (uint64_t)i, d.chmask[i] & 1, (d.chmask[i] >> 1) & 1,
+                (d.chmask[i] >> 2) & 1, (d.chmask[i] >> 3) & 1);
+        NVN(nvnCommandBufferBindChannelMaskState, cb, ms);
+    }
+    if (d.dual) {
+        uint64_t bs = galloc(0x20, 16), cs = galloc(0x10, 16);
+        NVN(nvnBlendStateSetDefaults, bs);
+        NVN(nvnBlendStateSetBlendTarget, bs, 0);
+        NVN(nvnBlendStateSetBlendFunc, bs, NVN_BLEND_FUNC_SRC1_COLOR, NVN_BLEND_FUNC_ONE_MINUS_SRC1_COLOR,
+            NVN_BLEND_FUNC_ONE, NVN_BLEND_FUNC_ZERO);
+        NVN(nvnBlendStateSetBlendEquation, bs, NVN_BLEND_EQUATION_ADD, NVN_BLEND_EQUATION_ADD);
+        NVN(nvnColorStateSetDefaults, cs);
+        NVN(nvnColorStateSetBlendEnable, cs, 0, 1);
+        NVN(nvnCommandBufferBindBlendState, cb, bs);
+        NVN(nvnCommandBufferBindColorState, cb, cs);
+    }
     NVN(nvnCommandBufferSetTexturePool, cb, tp);
     NVN(nvnCommandBufferSetSamplerPool, cb, sp);
     NVN(nvnCommandBufferClearColor, cb, 0, rgba, 0xF);
+    if (d.ntargets > 1) NVN(nvnCommandBufferClearColor, cb, 1, rgba, 0xF);
     if (d.depth) {
         fv(0, d.dclear);
         NVN(nvnCommandBufferClearDepthStencil, cb, 1, 0, 0);
@@ -710,7 +823,8 @@ static void run_draw(const Opts *o) {
     for (int i = 0; i < d.nubo; i++) NVN(nvnCommandBufferBindUniformBuffer, cb, (uint64_t)d.ubo[i].stage, d.ubo[i].r, ubo[i].addr, ubo[i].size);
     for (int i = 0; i < d.nsbo; i++) NVN(nvnCommandBufferBindStorageBuffer, cb, (uint64_t)d.sbo[i].stage, d.sbo[i].r, sbo[i].addr, sbo[i].size);
     for (int i = 0; i < d.ntex; i++) NVN(nvnCommandBufferBindTexture, cb, (uint64_t)d.tex[i].stage, d.tex[i].slot, handle[i]);
-    if (d.indexed) NVN(nvnCommandBufferDrawElements, cb, (uint64_t)d.prim, (uint64_t)d.itype, (uint64_t)d.count, ibuf.addr);
+    if (d.indirect) NVN(nvnCommandBufferDrawElementsIndirect, cb, (uint64_t)d.prim, (uint64_t)d.itype, ibuf.addr, indirect.addr);
+    else if (d.indexed) NVN(nvnCommandBufferDrawElements, cb, (uint64_t)d.prim, (uint64_t)d.itype, (uint64_t)d.count, ibuf.addr);
     else NVN(nvnCommandBufferDrawArrays, cb, (uint64_t)d.prim, (uint64_t)d.first, (uint64_t)d.count);
     uint64_t handles = galloc(8, 8);
     wr64(handles, NVN(nvnCommandBufferEndRecording, cb));
@@ -732,6 +846,10 @@ static void run_draw(const Opts *o) {
     CHECK(waited == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || waited == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
 
     read_target(&rt, 16, o->out);
+    if (d.ntargets > 1) {
+        CHECK(o->out1);
+        read_target(&rt1, 16, o->out1);
+    }
     if (o->depth_out) {
         CHECK(d.depth);
         read_target(&depth, 4, o->depth_out);
@@ -766,6 +884,8 @@ int main(int argc, char **argv) {
     for (int i = 4; i < argc; i++) {
         if (!strcmp(argv[i], "--pack") && i + 1 < argc) o.pack = argv[++i];
         else if (!strcmp(argv[i], "--depth-out") && i + 1 < argc) o.depth_out = argv[++i];
+        else if (!strcmp(argv[i], "--out1") && i + 1 < argc) o.out1 = argv[++i];
+        else if (!strcmp(argv[i], "--no-features")) o.no_features = 1;
         else if (!strcmp(argv[i], "--depth-mode") && i + 1 < argc) {
             const char *m = argv[++i];
             if (!strcmp(m, "near_is_minus_w")) o.depth_mode = NVN_DEPTH_MODE_NEAR_IS_MINUS_W;

@@ -43,6 +43,14 @@ report nothing:
   not asserted here. With the flip removed the primitive lands in the lower half, and with the device's depth mode
   changed to NEAR_IS_ZERO its depth is no longer the expected one: each is a counter-run the test says so of.
 
+- The core features the device requires (oot2/vk_required.h): each state that the replay used to stop on, drawn under
+  core validation (0 errors, 0 warnings) with the effect it must have on S2's quad: line fill leaves an outline and point
+  fill a few pixels, depth clamp keeps a quad past the far plane that clipping drops, the depth bounds test drops or keeps
+  every fragment by the depth already stored, the depth bias clamp holds the bias at the clamp, a line is drawn the wider
+  the width asked, several viewports leave the image of the first, a channel mask applies to its own target, dual-source
+  factors and an indirect draw with a first instance draw. Counter-runs (--no-features: the replay leaves the state at what
+  a device without the feature could say) make the clamp, bias clamp, bounds and width checks fail.
+
 Run (on the desktop, from the repository root): python -m unittest discover -s tests -p test_runtime_vk_replay_draw.py -v
 """
 
@@ -394,7 +402,7 @@ def reference_image(case: Case, swap_uv: bool = False, swap_interpolation: bool 
     return _reference_cache[key]
 
 
-def write_draw(case: Case, folder: Path, *, indexed: bool, depth: tuple | None = None) -> Path:
+def write_draw(case: Case, folder: Path, *, indexed: bool, depth: tuple | None = None, extra: tuple[str, ...] = ()) -> Path:
     """The draw file of vk_replay_draw.c for a case, and the files it names, in folder."""
     folder.mkdir(parents=True, exist_ok=True)
     pair, res = case.pair, case.pair.res
@@ -445,6 +453,7 @@ def write_draw(case: Case, folder: Path, *, indexed: bool, depth: tuple | None =
             (folder / name).write_bytes(b"".join(struct.pack("<4f", *px) for px in tx.texels))
             lines.append(f"texture {st} {t['c2_slot']} {texture_id} {tx.kind} {tx.width} {tx.height} {tx.layers} "
                          f"{tx.filter} {tx.address} {name}")
+    lines += extra   # more state, and a draw directive that replaces the one above
     path = folder / "draw.txt"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -499,16 +508,18 @@ class Replay:
 
 
 def play(case: Case, name: str, *, validation: str = "on", indexed: bool = False, depth: tuple | None = None,
-         flags: tuple[str, ...] = ()) -> Replay:
+         flags: tuple[str, ...] = (), extra: tuple[str, ...] = ()) -> Replay:
     """Write the case's draw file and replay it on the device."""
     folder = Path(WORK) / "t63" / name
-    draw = write_draw(case, folder, indexed=indexed, depth=depth)
+    draw = write_draw(case, folder, indexed=indexed, depth=depth, extra=extra)
     run_name = "".join([f"replay-{validation}", *("-" + f.lstrip("-") for f in flags)])   # one file per run kind
     out = folder / f"{run_name}.f32"
     args = ["draw", str(draw), str(out), "--pack", str(PACK), *flags]
     depth_out = folder / f"{run_name}-depth.f32"
     if depth:
         args += ["--depth-out", str(depth_out)]
+    if any(line.startswith("targets 2") for line in extra):
+        args += ["--out1", str(folder / f"{run_name}-target1.f32")]
     return Replay(run(*args, validation=validation), out, case.width, case.height, depth_out if depth else None)
 
 
@@ -870,6 +881,153 @@ class ViewportTest(DeviceTestCase):
         self.assertGreaterEqual(rows[0], case.height // 2 - 1, "the unflipped primitive is not in the lower half")
         rep = compare(case, reference_image(case), got, "on", Path(WORK) / "t63" / case.name)
         self.assertGreater(rep["mismatches"], 0, summary(rep))
+
+
+def covered(pixels: list, clear: tuple) -> int:
+    """The pixels that are not the clear colour."""
+    return sum(tuple(px) != clear for px in pixels)
+
+
+class CoreFeatureTest(DeviceTestCase):
+    """The states that needed a core feature the device did not enable (oot2/vk_required.h) draw on S2's quad."""
+
+    near, far, cleared = 0.25, 0.75, 1.0
+
+    def draw_with(self, name: str, *extra: str, depth: tuple | None = None, flags: tuple[str, ...] = (),
+                  case: Case | None = None, indexed: bool = False) -> tuple[Case, Replay]:
+        case = case or self.case(self.s2, "base")
+        got = play(case, f"s2_core_{name}", validation="on", depth=depth, flags=flags, extra=extra, indexed=indexed)
+        self.assertTrue(got.ok, got.report())
+        self.assertEqual((got.errors, got.warnings), (0, 0), got.report())
+        self.assertEqual(got.stats.get("draws"), 1, got.report())
+        return case, got
+
+    def base_count(self) -> int:
+        case, got = self.draw_with("fill")
+        n = covered(got.image, case.clear)
+        self.assertGreater(n, 3000)
+        return n
+
+    def test_line_fill_leaves_an_outline_and_point_fill_a_few_pixels(self) -> None:
+        full = self.base_count()
+        case, line = self.draw_with("line", "polygon line 2")
+        _, point = self.draw_with("point", "polygon point 1")
+        lines, points = covered(line.image, case.clear), covered(point.image, case.clear)
+        print(f"\nfill {full} pixels, line fill {lines}, point fill {points}")
+        self.assertTrue(0 < lines < full // 3, lines)
+        self.assertTrue(0 < points < lines, points)
+
+    def past_far(self) -> Case:
+        """S2's quad with the vertex program's matrix moved so that every vertex's z / w lies past 1.05: the program writes
+        clip z from the fourth column's z (0.5), bank c[4] word 14, and clip w from y, so a z of 1.5 puts the quad past the
+        far plane at every vertex, inside the view volume in x and y."""
+        spec = copy.deepcopy(self.s2.spec)
+        words = spec["banks"]["vs"]["4"]["0x0"]["f32"]
+        for at in (14, 30):   # the matrix is in the bank twice
+            words[at] = 1.5
+        case = self.case(self.s2, "base", spec=spec, name="s2_core_past_far")
+        outs = ref.shade_vertices(case.draw())
+        clip = [tuple(word_float(o.get(0x70 + 4 * c, 0)) for c in range(4)) for o in outs]
+        if not all(w > 0 and z / w > 1.05 and abs(x / w) <= 0.9 and abs(y / w) <= 0.9 for x, y, z, w in clip):
+            raise InputError(f"the matrix edit does not put S2's quad past the far plane: {clip}")
+        return case
+
+    def test_depth_clamp_keeps_a_quad_past_the_far_plane_that_clipping_drops(self) -> None:
+        case = self.past_far()
+        depth = (self.near, self.far, self.cleared)
+        _, clipped = self.draw_with("past_far_clip", depth=depth, case=case)
+        _, clamped = self.draw_with("past_far_clamp", "depth_clamp", depth=depth, case=case)
+        _, off = self.draw_with("past_far_clamp_off", "depth_clamp", depth=depth, case=case, flags=("--no-features",))
+        n_clip, n_clamp, n_off = (covered(r.image, case.clear) for r in (clipped, clamped, off))
+        print(f"\npast the far plane: clipped {n_clip} pixels, clamped {n_clamp}, clamp left off {n_off}")
+        self.assertEqual(n_clip, 0)
+        self.assertGreater(n_clamp, 500)
+        covered_depth = {round(clamped.depth[k], 5) for k in range(case.width * case.height)
+                         if tuple(clamped.image[k]) != case.clear}
+        self.assertEqual(covered_depth, {self.far})   # every covered pixel at the far end of the depth range
+        self.assertEqual(n_off, 0)   # the counter-run: no clamp, the quad is clipped again
+
+    def test_the_depth_bounds_test_drops_or_keeps_a_fragment_by_the_stored_depth(self) -> None:
+        depth = (0.0, 1.0, 1.0)   # the target holds 1.0 when the quad is drawn
+        case, dropped = self.draw_with("bounds_out", "depth_bounds 0.0 0.5", depth=depth)
+        _, kept = self.draw_with("bounds_in", "depth_bounds 0.5 1.0", depth=depth)
+        _, off = self.draw_with("bounds_out_off", "depth_bounds 0.0 0.5", depth=depth, flags=("--no-features",))
+        n_drop, n_keep, n_off = (covered(r.image, case.clear) for r in (dropped, kept, off))
+        print(f"\ndepth bounds: stored depth outside {n_drop} pixels, inside {n_keep}, test left off {n_off}")
+        self.assertEqual(n_drop, 0)
+        self.assertGreater(n_keep, 3000)
+        self.assertGreater(n_off, 3000)   # the counter-run: without the test the same fragments are drawn
+
+    def test_the_depth_bias_clamp_holds_the_bias_at_the_clamp(self) -> None:
+        viewport = ViewportTest("test_the_primitive_lands_upright_with_its_depth_in_range")
+        viewport.s2 = self.s2
+        case, clip = viewport.upper_case()
+        depth = (self.near, self.far, self.cleared)
+        extra = ("polygon fill 4", "offset 0.0 1000000000.0 0.0625")
+        results = {}
+        for name, flags in (("bias", ()), ("bias_unclamped", ("--no-features",))):
+            got = play(case, f"s2_core_{name}", validation="on", depth=depth, flags=flags, extra=extra)
+            self.assertTrue(got.ok, got.report())
+            self.assertEqual((got.errors, got.warnings), (0, 0), got.report())
+            results[name] = got
+        w, h = case.width, case.height
+        exp = reference_image(case)
+        want = expected_depth(clip, [(0, 1, 2), (3, 4, 5)], exp.kind, w, h, self.near, self.far, NEAR_IS_MINUS_W, flip_y=True)
+        checked, worst = 0, 0.0
+        for k in range(w * h):
+            if want[k] is not None:
+                checked += 1
+                worst = max(worst, abs(results["bias"].depth[k] - (want[k] + 0.0625)))
+        print(f"\nbias clamp: {checked} pixels, worst error {worst:.3g} from depth + 0.0625")
+        self.assertGreater(checked, 500)
+        self.assertLessEqual(worst, 10 * DEPTH_ATOL)
+        # the counter-run: the clamp left at 0 means no clamp, and a bias of this size puts every fragment past the far end
+        self.assertEqual(covered(results["bias_unclamped"].image, case.clear), 0)
+
+    def test_a_wider_line_covers_more_pixels_and_the_counter_run_does_not(self) -> None:
+        case = self.case(self.s2, "base")
+        lines = ("draw arrays 1 0 6",)
+        _, thin = self.draw_with("line_1", *lines, "line_width 1.0")
+        _, wide = self.draw_with("line_5", *lines, "line_width 5.0")
+        _, wide_off = self.draw_with("line_5_off", *lines, "line_width 5.0", flags=("--no-features",))
+        n1, n5, n_off = (covered(r.image, case.clear) for r in (thin, wide, wide_off))
+        print(f"\nlines: width 1 covers {n1} pixels, width 5 {n5}, width 5 with the feature off {n_off}")
+        self.assertGreater(n1, 0)
+        self.assertGreater(n5, 2.5 * n1)
+        self.assertLess(n_off, 1.5 * n1)
+
+    def test_several_viewports_leave_the_image_of_the_first(self) -> None:
+        case = self.case(self.s2, "base")
+        exp = reference_image(case)
+        _, got = self.draw_with("viewports", "viewports 3")
+        rep = compare(case, exp, got, "on", Path(WORK) / "t63" / "s2_core_viewports")
+        print(f"\nthree viewports: {summary(rep)}")
+        self.assertEqual(rep["mismatches"], 0, summary(rep))
+        self.assertTrue(rep["pass"], summary(rep))
+
+    def test_a_channel_mask_applies_to_its_own_target(self) -> None:
+        case = self.case(self.s2, "base")
+        _, plain = self.draw_with("two_targets", "targets 2")
+        _, masked = self.draw_with("two_targets_masked", "targets 2", "chmask 0 8", "chmask 1 f")
+        self.assertGreater(covered(plain.image, case.clear), 3000)
+        rgb_clear = all(px[:3] == case.clear[:3] for px in masked.image)   # target 0 writes alpha alone
+        self.assertTrue(rgb_clear, "target 0's mask of alpha alone let colour through")
+        self.assertEqual(masked.stats.get("passes"), plain.stats.get("passes"))
+
+    def test_dual_source_factors_draw(self) -> None:
+        # S2's pixel program has no second output, so the blended colour is not asserted: the draw is the check, under
+        # validation that rejects dual-source factors on a device that did not enable the feature
+        self.draw_with("dual", "blend_dual")
+
+    def test_an_indirect_draw_with_a_first_instance_draws(self) -> None:
+        case = self.case(self.t23, "base")
+        exp = reference_image(case)
+        extra = (f"draw indirect {NVN_DRAW_TRIANGLES} {len(case.order)} 5",)
+        _, got = self.draw_with("indirect", *extra, case=case, indexed=True)
+        rep = compare(case, exp, got, "on", Path(WORK) / "t63" / "s2_core_indirect")
+        print(f"\nindirect, first instance 5: {summary(rep)}")
+        self.assertEqual(rep["mismatches"], 0, summary(rep))
+        self.assertTrue(rep["pass"], summary(rep))
 
 
 if __name__ == "__main__":

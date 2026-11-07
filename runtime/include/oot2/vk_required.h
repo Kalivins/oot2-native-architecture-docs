@@ -30,6 +30,12 @@
 // declare 64-bit integers (the raw-access helper), storage images without a format, cube array images and non-uniform
 // indexing of storage image arrays, and the check over the whole corpus found no item that enables them. All four are
 // features every desktop GPU that has the items above offers.
+//
+// Items 34 to 42 are the core features the replay's draw state needs (ticket 140): one viewport and scissor for each of
+// the 16 NVN has, line and point fill, depth clamp, the depth bias clamp, the depth bounds test, wide lines, a blend
+// state and write mask for each colour target, dual-source blend factors and indirect draws with a first instance.
+// Every desktop GPU that has the items above has them. robustBufferAccess is not among them and stays off: a raw
+// device address is not covered by it, and a read the game guards past a declared range is data, not zero.
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -112,7 +118,35 @@
        e->f12.samplerFilterMinmax = VK_TRUE))                                                                         \
     X(depth_clip_control, "depth clip control, set per draw (NVN's -1 to 1 depth)",                                  \
       f->depth_clip.depthClipControl && f->eds3.extendedDynamicState3DepthClipNegativeOneToOne,                       \
-      (e->depth_clip.depthClipControl = VK_TRUE))
+      (e->depth_clip.depthClipControl = VK_TRUE))                                                                      \
+    X(multi_viewport, "16 viewports and scissors",                                                                     \
+      f->features.multiViewport && f->props.limits.maxViewports >= 16,                                                 \
+      (e->features.multiViewport = VK_TRUE))                                                                           \
+    X(fill_mode_non_solid, "line and point polygon modes, set per draw",                                               \
+      f->features.fillModeNonSolid && f->eds3.extendedDynamicState3PolygonMode,                                        \
+      (e->features.fillModeNonSolid = VK_TRUE))                                                                        \
+    X(depth_clamp, "depth clamp, set per draw",                                                                        \
+      f->features.depthClamp && f->eds3.extendedDynamicState3DepthClampEnable,                                         \
+      (e->features.depthClamp = VK_TRUE))                                                                              \
+    X(depth_bias_clamp, "depth bias clamp",                                                                            \
+      f->features.depthBiasClamp,                                                                                      \
+      (e->features.depthBiasClamp = VK_TRUE))                                                                          \
+    X(depth_bounds, "the depth bounds test",                                                                           \
+      f->features.depthBounds,                                                                                         \
+      (e->features.depthBounds = VK_TRUE))                                                                             \
+    X(wide_lines, "wide lines",                                                                                        \
+      f->features.wideLines,                                                                                           \
+      (e->features.wideLines = VK_TRUE))                                                                               \
+    X(independent_blend, "blend state and write masks set per colour target",                                          \
+      f->features.independentBlend && f->eds3.extendedDynamicState3ColorBlendEnable &&                                 \
+          f->eds3.extendedDynamicState3ColorBlendEquation && f->eds3.extendedDynamicState3ColorWriteMask,              \
+      (e->features.independentBlend = VK_TRUE))                                                                        \
+    X(dual_source_blend, "dual-source blending",                                                                       \
+      f->features.dualSrcBlend,                                                                                        \
+      (e->features.dualSrcBlend = VK_TRUE))                                                                            \
+    X(draw_indirect_first_instance, "indirect draws with a first instance",                                            \
+      f->features.drawIndirectFirstInstance,                                                                           \
+      (e->features.drawIndirectFirstInstance = VK_TRUE))
 
 // The device extensions the items read, E(id, name), and the ones they depend on below Vulkan 1.4 (pipeline_library
 // for graphics_pipeline_library, maintenance5 for pipeline_binary). The device the back end creates enables every one

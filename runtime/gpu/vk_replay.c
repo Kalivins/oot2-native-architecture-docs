@@ -50,6 +50,7 @@ int vkr_no_snapshot;
 int vkr_no_flip;
 int vkr_no_drop;
 int vkr_no_declare;
+int vkr_no_features;
 
 // ---------- the op list
 const char *vkr_op_ticket(uint32_t op) {
@@ -433,9 +434,11 @@ static double rect_top(double y, double h) { return lower_left() ? (double)F.pas
 
 static void dyn_compute(Dyn *d) {
     memset(d, 0, sizeof *d);
-    // One viewport and scissor: the device does not enable multiViewport (oot2/vk_required.h), and viewport 0 is the one
-    // a program that writes no viewport index draws to.
-    uint32_t n = 1;
+    // As many viewports and scissors as the recording set (the two counts must be equal, so the longer one decides; one
+    // when it set neither), the rest the whole render area: the device enables multiViewport (oot2/vk_required.h), and
+    // viewport 0 is the one a program that writes no viewport index draws to.
+    uint32_t n = (uint32_t)(S.nvp > S.nsc ? S.nvp : S.nsc);
+    if (n < 1 || vkr_no_features) n = 1;
     d->nvp = n;
     for (uint32_t i = 0; i < n; i++) {
         double x = 0, y = 0, w = F.pass_w, h = F.pass_h;
@@ -478,13 +481,12 @@ static void dyn_compute(Dyn *d) {
     uint32_t want = mode == VK_POLYGON_MODE_POINT ? 1 : mode == VK_POLYGON_MODE_LINE ? 2 : 4;
     d->bias_en = S.has_poly && (S.poly.offset_en & want);
     d->bias[0] = S.bias[0], d->bias[1] = S.bias[1];
-    // The core features the device does not enable yet (oot2/vk_required.h): what needs one stops by name. Without
-    // them the clamp of the depth bias is 0 and the line width 1 (the line draws check theirs, dyn_emit).
-    if (mode != VK_POLYGON_MODE_FILL) stop("polygon mode %u: the fillModeNonSolid feature is not enabled", (unsigned)mode);
-    if (d->bias_en && S.bias[2] != 0.0f) stop("a depth bias clamp of %g: the depthBiasClamp feature is not enabled", S.bias[2]);
-    if (S.depth_clamp) stop("depth clamp: the depthClamp feature is not enabled");
-    if (S.bounds_en) stop("the depth bounds test: the depthBounds feature is not enabled");
-    d->line_width = 1.0f;
+    d->bias[2] = S.bias[2];
+    d->clamp = (VkBool32)S.depth_clamp;
+    // Line and point fill, the bias clamp, depth clamp, depth bounds and wide lines are core features the device
+    // enables (oot2/vk_required.h); the width is clamped by the driver to its range.
+    if (!(S.line_width > 0.0f) || S.line_width > 1.0e6f) stop("a line width of %g", S.line_width);
+    d->line_width = S.line_width;
     d->discard = (VkBool32)S.raster_discard;
     d->clip11 = nvn_depth_mode() == NVN_DEPTH_MODE_NEAR_IS_MINUS_W;
     // depth and stencil
@@ -505,6 +507,8 @@ static void dyn_compute(Dyn *d) {
     for (int f = 0; f < 2; f++) d->smask[f][0] = S.st_vmask[f], d->smask[f][1] = S.st_wmask[f], d->smask[f][2] = S.st_ref[f];
     d->bt = (VkBool32)S.bounds_en;
     d->bounds[0] = S.bounds[0], d->bounds[1] = S.bounds[1];
+    if (vkr_no_features)   // the counter-run: the state a device without these features could say
+        d->mode = VK_POLYGON_MODE_FILL, d->bias[2] = 0.0f, d->clamp = VK_FALSE, d->line_width = 1.0f, d->bt = VK_FALSE;
     // colour
     d->ntargets = F.ncolor;
     for (uint32_t i = 0; i < F.ncolor; i++) {
@@ -524,23 +528,22 @@ static void dyn_compute(Dyn *d) {
                      (unsigned)b->dst_rgb, (unsigned)b->src_a, (unsigned)b->dst_a, (unsigned)b->eq_rgb, (unsigned)b->eq_a);
         }
     }
+    // Per-target blend state and dual-source factors need independentBlend and dualSrcBlend (oot2/vk_required.h), both
+    // enabled. An equation blending does not use is the default, so that two draws that differ only there compare alike.
     for (uint32_t i = 0; i < F.ncolor; i++) {
         const VkColorBlendEquationEXT *e = &d->eq[i];
-        if (!d->blend_en[i]) {   // an equation blending does not use: the default, so that targets compare alike
+        if (!d->blend_en[i]) {
             d->eq[i] = (VkColorBlendEquationEXT){VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
                                                 VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD};
             continue;
         }
+        // Vulkan guarantees one colour target with a dual-source factor (maxFragmentDualSrcAttachments is at least 1).
         const VkBlendFactor f[4] = {e->srcColorBlendFactor, e->dstColorBlendFactor, e->srcAlphaBlendFactor,
                                     e->dstAlphaBlendFactor};
         for (int k = 0; k < 4; k++)
-            if (f[k] >= VK_BLEND_FACTOR_SRC1_COLOR && f[k] <= VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA)
-                stop("dual-source blending on target %u: the dualSrcBlend feature is not enabled", i);
+            if (f[k] >= VK_BLEND_FACTOR_SRC1_COLOR && f[k] <= VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA && F.ncolor > 1)
+                stop("dual-source blending on target %u of %u: Vulkan guarantees one colour target with it", i, F.ncolor);
     }
-    for (uint32_t i = 1; i < F.ncolor; i++)
-        if (d->blend_en[i] != d->blend_en[0] || d->wm[i] != d->wm[0] ||
-            memcmp(&d->eq[i], &d->eq[0], sizeof d->eq[0]))
-            stop("target %u blends or writes unlike target 0: the independentBlend feature is not enabled", i);
     memcpy(d->blend_color, S.blend_color, sizeof d->blend_color);
     if (S.color.logic_op && S.color.logic_op != NVN_LOGIC_OP_COPY)
         stop("logic operation %u is not replayed yet", (unsigned)S.color.logic_op);
@@ -551,9 +554,6 @@ static void dyn_emit(VkPrimitiveTopology topo, VkBool32 restart) {
     Dyn n;
     dyn_compute(&n);
     n.topo = topo, n.restart = restart;
-    int lines = topo == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || topo == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
-                topo == VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY || topo == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY;
-    if (lines && S.line_width != 1.0f) stop("lines %g wide: the wideLines feature is not enabled", S.line_width);
     Dyn *o = &F.dyn;
     if (DIFF(vp) || DIFF(nvp)) vkrec_SetViewportWithCount(n.nvp, n.vp);
     if (DIFF(sc) || DIFF(nvp)) vkrec_SetScissorWithCount(n.nvp, n.sc);
@@ -984,10 +984,20 @@ static void op_draw_idx(const p_draw_idx *d) {
 
 static void op_draw_idx_ind(const p_draw_idx_ind *d) {
     VkBool32 restart;
-    if (!draw_prepare(d->prim, 0, &restart)) return;
-    index_buffer(d->itype, d->ibuf, 0);
+    // The record is {count, instances, first index, base vertex, base instance}. Its base instance goes into c[0] too,
+    // read at submit from the CPU's view of the record (the pool's storage behind an import or a mirror, not written by
+    // this submission); a record the CPU cannot see, or that an earlier submission still in flight wrote, keeps 0 or the
+    // CPU's older word there, while the draw itself takes the GPU's first instance. A GPU copy into the bank, as an
+    // indirect dispatch does, would have to run outside the pass: left to the title run if a program reads it.
     BackingRef ref;
-    F.ops->resolve(d->ind, 20, F.value, &ref);   // {count, instances, first index, base vertex, base instance}
+    F.ops->resolve(d->ind, 20, F.value, &ref);
+    uint32_t base_instance = 0;
+    int readable = ref.kind == BACKING_IMPORT || ref.kind == BACKING_MIRROR;
+    for (uint32_t i = 0; readable && i < F.nwrote; i++)
+        if (overlaps((Rng){d->ind, d->ind + 20}, F.wrote[i])) readable = 0;
+    if (readable) memcpy(&base_instance, (const uint8_t *)(uintptr_t)d->ind + 16, 4);
+    if (!draw_prepare(d->prim, base_instance, &restart)) return;
+    index_buffer(d->itype, d->ibuf, 0);
     vkrec_DrawIndexedIndirect((VkBuffer)(uintptr_t)ref.buffer, ref.offset, 1, 20);
 }
 

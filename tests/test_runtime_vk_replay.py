@@ -9,7 +9,9 @@ layout, and ends at a render target change, a barrier and the frame's end; the d
 through a negative viewport height, measures scissors and clear rectangles from the bottom and mirrors the front face;
 the default depth mode sets depth clip control's -1 to 1 range; vertex input comes from the attribute, stream and buffer
 state, and an attribute with no buffer reads (0, 0, 0, 1) of its own scalar type from a spare binding; a state that needs a
-core feature the device does not enable stops by name; each stage's driver bank c[0] holds its storage table, the
+core feature (line and point fill, the depth bias clamp, depth clamp, the depth bounds test, wide lines, several viewports,
+a blend state and write mask for each target, dual-source factors) draws as its own packets and an indirect draw's base
+instance reaches c[0]; each stage's driver bank c[0] holds its storage table, the
 largest point size and the base instance, NVN2 compute's the group counts and its uniform and storage rows; c[2] holds the
 bound handles, bank 24 the pushed root tables, the support buffer the viewport; a uniform range in host memory is copied
 at submit (the copy holds the bytes of that moment, and the next submission takes a copy of its own) while a mirror binds
@@ -22,7 +24,8 @@ writes into memory the CPU can see declared once; every op of the list is replay
 
 Each check of the ticket's new behaviour has a counter-run, a test-only switch of the replay that breaks the mechanism
 (vkr_no_flip: the origin's flip; vkr_no_snapshot: the uniform copy at submit; vkr_no_drop: the drop rule;
-vkr_no_declare: the declaration of a transfer's write). The check must then fail.
+vkr_no_declare: the declaration of a transfer's write; vkr_no_features: the states of the core features).
+The check must then fail.
 
 Run: python -m unittest discover -s tests -v
 """
@@ -220,6 +223,47 @@ def check_transfers(out: str) -> None:
                        "op wrote M+0x4000 0x500 frame 1"], writes_
 
 
+def draw_groups(f: list[str]) -> list[list[str]]:
+    """The packets of each draw: the dynamic state set since the previous draw, then the draw itself."""
+    groups, cur = [], []
+    for p in f:
+        cur.append(p)
+        if p.startswith("Draw"):
+            groups.append(cur)
+            cur = []
+    return groups
+
+
+def check_line_fill_and_bias_clamp(g: list[str]) -> None:
+    assert "SetPolygonModeEXT 1" in g and "SetDepthBiasEnable 1" in g, g
+    assert "SetDepthBias 2 0.25 1.5" in g, [p for p in g if p.startswith("SetDepthBias")]   # constant, clamp, slope
+
+
+def check_depth_clamp_and_bounds(g: list[str]) -> None:
+    assert "SetDepthClampEnableEXT 1" in g, g
+    assert "SetDepthBoundsTestEnable 1" in g and "SetDepthBounds 0.25 0.75" in g, g
+
+
+def check_wide_line(g: list[str]) -> None:
+    assert "SetLineWidth 3.5" in g, g
+
+
+def check_viewports(g: list[str]) -> None:
+    # three viewports (each flipped), three scissors: the two set, then the whole area
+    assert ("SetViewportWithCount 3 [0 32 64 -32 0 1] [0 32 32 -16 0 1] [32 16 32 -16 0 1]" in g and
+            "SetScissorWithCount 3 [8 20 16 8] [0 22 10 10] [0 0 64 32]" in g), g
+
+
+def check_independent_blend(g: list[str]) -> None:
+    assert "SetColorBlendEnableEXT 0 2 1 0" in g, g
+    assert "SetColorBlendEquationEXT 0 2 [6 7 0 1 0 0] [1 0 0 1 0 0]" in g, g   # SRC_ALPHA, ONE_MINUS_SRC_ALPHA; default
+    assert "SetColorWriteMaskEXT 0 2 0x3 0x8" in g, g
+
+
+def check_dual_source(g: list[str]) -> None:
+    assert "SetColorBlendEquationEXT 0 1 [15 16 0 1 0 0]" in g, g   # SRC1_COLOR, ONE_MINUS_SRC1_COLOR
+
+
 _BUILT: dict[str, object] = {}
 
 
@@ -316,9 +360,39 @@ class GraphicsTest(ReplayBase):
             "EndRendering",
         ])
 
-    def test_a_state_that_needs_a_feature_the_device_lacks_stops_by_name(self) -> None:
-        self.assertEqual(self.stopping("clamp"), "FATAL: gfx: vulkan: replay of submission 1, after 0 draws and dispatches: "
-                                                 "depth clamp: the depthClamp feature is not enabled")
+    def test_states_that_needed_a_core_feature_draw(self) -> None:
+        out = self.passing("features")
+        groups = draw_groups(frame(out, 1))
+        self.assertEqual(len(groups), 7)
+        line_fill, point_fill, clamped, wide, viewports, two_targets, dual = groups
+        check_line_fill_and_bias_clamp(line_fill)
+        self.assertEqual([p for p in point_fill if p.startswith("SetPolygonModeEXT")], ["SetPolygonModeEXT 2"])
+        check_depth_clamp_and_bounds(clamped)
+        check_wide_line(wide)
+        check_viewports(viewports)
+        check_independent_blend(two_targets)
+        check_dual_source(dual)
+
+    def test_counter_run_without_the_feature_states(self) -> None:
+        out = self.passing("features", "--mutant", "nofeatures")
+        groups = draw_groups(frame(out, 1))
+        for check, group in ((check_line_fill_and_bias_clamp, groups[0]), (check_depth_clamp_and_bounds, groups[2]),
+                             (check_wide_line, groups[3]), (check_viewports, groups[4])):
+            with self.assertRaises(AssertionError):
+                check(group)
+
+    def test_dual_source_blending_with_two_targets_stops_by_name(self) -> None:
+        self.assertEqual(self.stopping("dual_two_targets"),
+                         "FATAL: gfx: vulkan: replay of submission 1, after 0 draws and dispatches: dual-source blending "
+                         "on target 0 of 2: Vulkan guarantees one colour target with it")
+
+    def test_an_indirect_draw_carries_its_base_instance_into_c0(self) -> None:
+        f = frame(self.passing("draw_indirect"), 1)
+        draws = [i for i, p in enumerate(f) if p.startswith("DrawIndexedIndirect")]
+        self.assertEqual(len(draws), 2)
+        readable, gpu = (writes(f[a:b], 1) for a, b in ((0, draws[0]), (draws[0], draws[1])))
+        self.assertEqual([word(x, 0x644) for x in readable], [7])   # the record's base instance, read at submit
+        self.assertEqual([word(x, 0x644) for x in gpu], [None])     # a record in GPU memory keeps 0
 
     def test_a_gpu_write_drops_the_uniform_copy_and_later_reads_are_live(self) -> None:
         # read first: draw 1 reads the copy (taken at submit), its pixel stage writes the range, draw 2 reads it live

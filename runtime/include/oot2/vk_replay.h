@@ -159,6 +159,9 @@ extern int vkr_no_flip;
 extern int vkr_no_drop;
 // Tests only: while non-zero, a GPU write is declared to no one: not to the backing map (the counter-run of the write-back).
 extern int vkr_no_declare;
+// Tests only: while non-zero, the dynamic state of the core features (line and point fill, depth bias clamp, depth
+// clamp, depth bounds, wide lines, more than one viewport) is left at the default a device without them would say.
+extern int vkr_no_features;
 
 // ---- what the last frames wrote: the storage and image ranges a draw or dispatch may write, and the ranges a copy, a
 // fill or an update wrote, for the frame `value`; *n how many. Kept for the frames in flight.
