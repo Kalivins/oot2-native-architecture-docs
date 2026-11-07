@@ -232,7 +232,7 @@ class StatusTest(TempCase):
 class CompactTest(unittest.TestCase):
     def test_check_lines_are_shortened_for_the_list(self):
         line = (r"build tools: C++ driver C:\Tools\llvm\bin\clang++.EXE, Ninja C:\windows\ninja.EXE, Vulkan headers "
-                r"1.4.357 and Volk in F:\VulkanSDK\Include, glslang F:\VulkanSDK\Bin\glslang.exe")
+                r"1.4.357 and Volk in C:\VulkanSDK\Include, glslang C:\VulkanSDK\Bin\glslang.exe")
         self.assertEqual(logic.compact(line), "build tools: C++ driver clang++.EXE, Ninja ninja.EXE, Vulkan headers "
                                               "1.4.357 and Volk in Include, glslang glslang.exe")
         self.assertEqual(logic.compact(r"disk of D:\Games\oot2: 10.0 GiB free", r"D:\Games\oot2"),
