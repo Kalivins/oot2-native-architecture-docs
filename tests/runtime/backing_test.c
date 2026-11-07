@@ -27,6 +27,10 @@
 //   blocks      VRAM blocks are made by the block thread ahead of use; an extent larger than a block has its own
 //   flat        4,660 pools made, bound and finalized, three times: nothing of the map or the stand-ins grows
 //   bench       the resolver's cost per lookup over 4,500 pools, each already backed
+//   raw_invariant  D15's invariant at a raw-access submission's begin: every committed page of every pool mapped and
+//               no other; a chunk committed later and a pool made later mapped at the next one; the runs the table
+//               is built from, a virtual pool's pages through its physical pool's backings
+//   raw_finiwait a raw-access submission holds back the release of every backing and pool_fini, without a resolve
 //   span_pools, span_virtual, import_fails, mirror   stop by name (the driver checks the line)
 #include <stdio.h>
 #include <stdlib.h>
@@ -627,6 +631,134 @@ static void case_mirror(void) {
     printf("returned\n");
 }
 
+// ---------- the raw path (backing.h, The raw path)
+// The run of runs[0..n) that holds a (the last one: the table's builder writes them in order), or NULL.
+static const BackingRun *run_at(const BackingRun *runs, int n, uint64_t a) {
+    const BackingRun *hit = NULL;
+    for (int i = 0; i < n; i++)
+        if (runs[i].lo <= a && a < runs[i].hi) hit = &runs[i];
+    return hit;
+}
+
+// The device address a raw access of a reaches through the runs, or 0 when no run maps it.
+static uint64_t run_address(const BackingRun *runs, int n, uint64_t a) {
+    const BackingRun *r = run_at(runs, n, a);
+    return r ? r->address + (a - r->lo) : 0;
+}
+
+// D15's invariant: every committed page of every pool is mapped at a raw-access submission's begin, and no page that is
+// not committed; a chunk committed later, and a pool made later, are mapped at the next one; the runs say what each
+// page maps to, a virtual pool's pages through the physical pool's backings.
+static void case_raw_invariant(void) {
+    setup(256 * MiB);
+    uint64_t boundary = (g_heap + 64 * MiB + BACKING_IMPORT_WINDOW - 1) & ~(BACKING_IMPORT_WINDOW - 1);
+    pool_t pc = pool(g_heap + 1 * MiB, 8 * MiB, 0);
+    pool_t w = pool(WIN, 1 * MiB, CPU_NO_ACCESS);   // never bound
+    pool_t pw = pool(WIN + 1 * MiB, 2 * MiB, CPU_NO_ACCESS | PHYSICAL);
+    pool_t v = pool(WIN + 16 * MiB, 2 * MiB, CPU_NO_ACCESS | VIRTUAL);
+    pool_t pcv = pool(g_heap + 16 * MiB, 2 * MiB, PHYSICAL);
+    pool_t v2 = pool(WIN + 32 * MiB, 2 * MiB, CPU_NO_ACCESS | VIRTUAL);
+    pool_t x = pool(boundary - 1 * MiB, 2 * MiB, 0);   // across an import window
+    touch(g_heap + 1 * MiB, 1 * MiB);   // two runs of commits in pc, with a gap between them
+    touch(g_heap + 4 * MiB, 1 * MiB);
+    touch(g_heap + 16 * MiB, 2 * MiB);
+    touch(boundary - 1 * MiB, 2 * MiB);
+    map(&v, &pw, 64 * KiB, 0, 1 * MiB);
+    map(&v2, &pcv, 128 * KiB, 0, 1 * MiB);
+    resolve(g_heap + 1 * MiB + 0x100, 0x100, 0);   // one run already imported by a bind
+    uint64_t version0 = backing_version();
+
+    backing_raw_begin(submission());
+    BackingStats s = stats();
+    CHECK(s.raw_begins == 1 && s.raw_passes == 1 && s.raw_fill_extents == 2 && D.violations == 0);
+    CHECK(s.raw_fill_imports == 4);   // pc's second run, pcv, x's two windows; the bound run was imported already
+    for (uint64_t a = g_heap + 1 * MiB; a < g_heap + 9 * MiB; a += BACKING_HOST_PAGE) {
+        int committed = a < g_heap + 2 * MiB || (a >= g_heap + 4 * MiB && a < g_heap + 5 * MiB);
+        CHECK(committed ? page_kind(a) == BACKING_IMPORT : page_kind(a) == BACKING_NONE);
+    }
+    CHECK(page_kind(WIN) == BACKING_EXTENT && page_kind(WIN + 1 * MiB) == BACKING_EXTENT);
+    CHECK(page_kind(boundary - 1 * MiB) == BACKING_IMPORT && page_kind(boundary + 1 * MiB - 1) == BACKING_IMPORT);
+    CHECK(backing_version() > version0);
+
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    CHECK(version == backing_version());
+    uint64_t probes[] = {g_heap + 1 * MiB + 0x1000, g_heap + 4 * MiB + 0x3000, WIN + 0x5000, WIN + 1 * MiB + 0x7000,
+                         g_heap + 16 * MiB + 0x9000, boundary - 0x1000, boundary + 0x1000};
+    for (int i = 0; i < 7; i++) {
+        BackingPage pg;
+        backing_page(probes[i], &pg);
+        const BackingRun *r = run_at(runs, n, probes[i]);
+        CHECK(pg.kind != BACKING_NONE && r && run_address(runs, n, probes[i]) == pg.address);
+        CHECK(r->guest + (probes[i] - r->lo) == probes[i]);
+    }
+    CHECK(!run_at(runs, n, g_heap + 3 * MiB) && !run_at(runs, n, WIN + 17 * MiB));   // the gap; past v's mapping
+    // A virtual pool's page maps where its physical page does, and its bytes stand for the physical page's.
+    BackingPage pg;
+    backing_page(WIN + 1 * MiB + 64 * KiB + 0x2000, &pg);
+    CHECK(run_address(runs, n, WIN + 16 * MiB + 0x2000) == pg.address);
+    backing_page(g_heap + 16 * MiB + 128 * KiB + 0x3000, &pg);
+    CHECK(run_address(runs, n, WIN + 32 * MiB + 0x3000) == pg.address);
+    const BackingRun *vr = run_at(runs, n, WIN + 32 * MiB + 0x3000);
+    CHECK(vr->guest + (WIN + 32 * MiB + 0x3000 - vr->lo) == g_heap + 16 * MiB + 128 * KiB + 0x3000);
+    free(runs);
+
+    // Nothing moved: the next begin runs no pass, and the version stays.
+    uint64_t version1 = backing_version();
+    backing_raw_begin(submission());
+    CHECK(stats().raw_passes == 1 && backing_version() == version1);
+    // A chunk committed after its pool was mapped, apart from every run, and a pool made since: mapped at the next one.
+    touch(g_heap + 7 * MiB, 64 * KiB);
+    pool_t late = pool(g_heap + 24 * MiB, 1 * MiB, 0);
+    touch(g_heap + 24 * MiB, 1 * MiB);
+    CHECK(page_kind(g_heap + 7 * MiB) == BACKING_NONE && page_kind(g_heap + 24 * MiB) == BACKING_NONE);
+    backing_raw_begin(submission());
+    s = stats();
+    CHECK(s.raw_passes == 2 && s.raw_fill_imports == 6 && backing_version() > version1);
+    CHECK(page_kind(g_heap + 7 * MiB) == BACKING_IMPORT && page_kind(g_heap + 7 * MiB + 64 * KiB) == BACKING_NONE);
+    CHECK(page_kind(g_heap + 24 * MiB + 1 * MiB - 1) == BACKING_IMPORT && D.violations == 0);
+
+    counter_raise(gpu_sync_issued());
+    pool_t *all[] = {&late, &x, &v2, &pcv, &v, &pw, &w, &pc};
+    for (int i = 0; i < 8; i++) backing_pool_fini(all[i]);
+    s = stats();
+    CHECK(s.pools == 0 && s.extents == 0 && s.imports == 0 && s.deferred == 0 && D.live_imports == 0);
+    done("raw_invariant");
+}
+
+// A raw-access submission reaches every backing without a resolve: a backing that leaves the map waits for it, and so
+// does pool_fini of a pool it never resolved.
+static void case_raw_finiwait(void) {
+    setup(64 * MiB);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 4 * MiB, 0);
+    touch(p, 64 * KiB);
+    g_fini_pool = pool(WIN, 1 * MiB, CPU_NO_ACCESS);
+    uint64_t v = gpu_sync_begin();
+    backing_raw_begin(v);   // maps both pools, resolves neither
+    gpu_sync_end();
+    touch(p + 64 * KiB, 64 * KiB);
+    backing_sync();   // the import grows: the old one waits for v
+    BackingStats s = stats();
+    CHECK(s.imports_grown == 1 && s.deferred == 1 && D.frees_import == 0);
+    CHECK(plat_thread_start(finisher, NULL, 256 * KiB));
+    plat_sleep_ns(200 * 1000 * 1000);
+    plat_mutex_lock(&g_join_lock);
+    int early = g_fini_returned;
+    plat_mutex_unlock(&g_join_lock);
+    CHECK(!early);   // the raw-access submission is in flight
+    counter_raise(v);
+    plat_mutex_lock(&g_join_lock);
+    while (!g_fini_returned) plat_cond_wait(&g_join_cond, &g_join_lock);
+    plat_mutex_unlock(&g_join_lock);
+    backing_sync();
+    s = stats();
+    CHECK(s.fini_waits == 1 && s.deferred == 0 && D.frees_import == 1);
+    backing_pool_fini(&pp);
+    done("raw_finiwait");
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc != 2) {
@@ -639,6 +771,7 @@ int main(int argc, char **argv) {
         {"refused", case_refused},     {"blocks", case_blocks},           {"flat", case_flat},
         {"bench", case_bench},         {"span_pools", case_span_pools},   {"span_virtual", case_span_virtual},
         {"import_fails", case_import_fails}, {"mirror", case_mirror},
+        {"raw_invariant", case_raw_invariant}, {"raw_finiwait", case_raw_finiwait},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)
         if (!strcmp(argv[1], cases[i].name)) {

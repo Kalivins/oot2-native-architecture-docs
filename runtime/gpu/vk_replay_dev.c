@@ -23,6 +23,7 @@
 #include "oot2/vk_image.h"
 #include "oot2/vk_miss.h"
 #include "oot2/vk_pipeline.h"
+#include "oot2/vk_raw.h"
 #include "oot2/vk_rec.h"
 #include "oot2/vk_replay.h"
 #include "plat.h"
@@ -202,6 +203,7 @@ static void dev_frame_begin(void) {
 
 static void dev_frame_end(uint64_t value) {
     vkb_image_flush(gpu_vk_prologue());   // the images made for the frame, to the general layout before its work
+    gpu_vk_raw_end(value);                // raw stores into mirrors and the miss log, when the frame used the table
     backing_submit_end(value);
     if (g_frame.value == value && g_frame.held) vkrec_effect(chunks_back, g_frame.held);
     g_frame.held = NULL, g_frame.value = 0;
@@ -213,7 +215,7 @@ const VkReplayOps *vkr_device_ops(void) {
                               .resolve = backing_resolve, .gpu_wrote = backing_gpu_wrote, .target = dev_target,
                               .image = dev_image,
                               .acquire = dev_acquire, .image_slot = dev_image_slot, .scratch = dev_scratch,
-                              .frame_begin = dev_frame_begin, .frame_end = dev_frame_end};
+                              .raw = gpu_vk_raw_begin, .frame_begin = dev_frame_begin, .frame_end = dev_frame_end};
     const VkpLayouts *l = vkp_layouts();   // read at every call: the pipeline builder may open after the first frame
     ops.graphics_layout = l->graphics, ops.compute_layout = l->compute;
     return &ops;

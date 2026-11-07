@@ -3,7 +3,7 @@
 //
 // The backing map of the Vulkan back end (architecture D14): what memory the GPU sees behind every GPU address the game
 // can bind, decided per page, and the resolver that turns a bound range into a buffer and an offset for the descriptor
-// path (vertex, index, uniform, storage and indirect bindings, copies). The raw path (D15) will read the same decisions.
+// path (vertex, index, uniform, storage and indirect bindings, copies). The raw path (D15) reads the same decisions.
 // Nothing here has a Vulkan type: memory comes from a BackingOps table (runtime/gpu/vk_backing.c on a device, a test's
 // stand-ins without one), and its lifetime follows the timeline of oot2/gpu.h.
 //
@@ -77,6 +77,20 @@
 // them, so their GPU writes are in guest memory before the new backing takes its copy; one written by the submission
 // being recorded is a named fatal. A mirror over pages the guest decommitted is retired at the next sync, as an import is.
 // Lever L1 must not release pages a mirror covers (backing_page), as it must not release imported ones.
+//
+// The raw path (D15, runtime/gpu/vk_raw.c). A raw-access submission reaches memory through a page table rather than
+// through resolves, so the map answers it in three calls: backing_raw_begin keeps D15's invariant (every committed page
+// a pointer can reach is mapped before the submission: each pool the CPU cannot see gets its extent, and every run of
+// committed pages of a pool it can see that no backing covers gets an import, cut to the import windows; a pass runs
+// when the commit epoch moved or a pool was made since the last one, so a chunk committed after its pool was mapped is
+// mapped at the next raw-access submission), brings every mirror current (backing_sync_mirrors) and records the
+// submission as the newest raw-access one; backing_version and backing_raw_runs give the table's builder the map as runs.
+// A raw-access submission can reach every backing, so a backing that leaves the map waits for the newest one as well as
+// for its own resolves (research 57 F4: one value, not a stamp on every backing), and so does pool_fini. Raw stores into
+// a mirror are known only from the table's store bits, after the work: the raw path writes those pages back at the
+// submission's end, before its value is done, as the descriptor path's writes are. A copy into a mirror the CPU wrote
+// while a raw-access submission is in flight waits for it first, so its write-back does not meet a newer copy; and a bind
+// that would replace a mirror the page table of the submission being recorded maps is a named fatal.
 //
 // Locking: one reader-writer lock. A resolve that finds its backing holds it shared; one that makes a backing holds it
 // exclusively, and imports are made under it. The mirrors' coherence state (their generations, the GPU writes not yet
@@ -196,6 +210,22 @@ void backing_guest_written(uint64_t addr, uint64_t size);
 void backing_guest_read(uint64_t addr, uint64_t size);
 void backing_cpu_synced(uint64_t fence);
 
+// ---- the raw path (The raw path above)
+// Submission `value` holds a raw-access program: keep the invariant, bring the mirrors current and record it. On the
+// submission's thread, before the table is read.
+void backing_raw_begin(uint64_t value);
+// The map's version: it changes whenever a backing enters or leaves the map or a virtual pool's pages move.
+uint64_t backing_version(void);
+// A run of GPU addresses mapped to consecutive device memory: [lo, hi) at device address `address`, whose bytes stand for
+// guest memory from `guest` on (lo, except through a virtual pool: the physical pool's address), of one kind.
+typedef struct BackingRun {
+    uint64_t lo, hi, address, guest;
+    int kind;
+} BackingRun;
+// Every mapped run, a mirror's after an import's where a page is in both (the table's builder writes them in order); the
+// list is malloc'd into *out and its count returned, with the version it was read at.
+int backing_raw_runs(BackingRun **out, uint64_t *version);
+
 // ---- the decision of one page, for tests and for the raw path's page table: the kind, and when it has a backing, the
 // device address of addr and, for a page of a virtual pool, the physical GPU address it maps to (else addr).
 typedef struct BackingPage {
@@ -216,5 +246,8 @@ typedef struct BackingStats {
     uint64_t mirror_syncs, uploads, upload_bytes;                      // syncs, and the copies into mirrors they made
     uint64_t writebacks, writeback_bytes, writebacks_skipped;          // GPU writes written back; into unmapped memory
     uint64_t pending, reads_in_flight;                                 // GPU writes not written back yet; early reads
+    uint64_t raw_begins, raw_passes;                                   // raw-access submissions; passes of the invariant
+    uint64_t raw_fill_imports, raw_fill_bytes, raw_fill_extents;       // what those passes made
+    uint64_t raw_waits;                                                // mirror copies that waited for raw stores
 } BackingStats;
 void backing_stats(BackingStats *out);

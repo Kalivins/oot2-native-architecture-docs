@@ -128,6 +128,9 @@ typedef struct VkReplayOps {
     // `bytes` of host-visible memory the device reads, for the frame `value` (freed once it is done): the pointer, and
     // the buffer and offset that bind it. Offsets are aligned to `align`.
     void *(*scratch)(uint64_t value, uint32_t bytes, uint32_t align, VkBuffer *buffer, VkDeviceSize *offset);
+    // The page table for a raw-access stage of the frame `value` (gpu_vk_raw_begin): the push words 0 to 3. NULL: a
+    // raw-access stage stops by name.
+    void (*raw)(uint64_t value, uint32_t push[4]);
     // Around a frame: before its value is taken (the backing map's sync), and after its last packet, before the frame
     // is handed over (the images made for it brought to the general layout, the backing map's end of submission).
     // Either may be NULL.
@@ -180,5 +183,6 @@ typedef struct VkrStats {
     // lost is what none of those accounts for: draw_ops less draws, dispatches, render_off and skipped (in either
     // direction), 0 by contract; read it before judging a picture.
     uint64_t draw_ops, render_off, skipped, lost;
+    uint64_t raw_binds;                             // draws and dispatches with a raw-access stage (D15)
 } VkrStats;
 void vkr_stats(VkrStats *out);

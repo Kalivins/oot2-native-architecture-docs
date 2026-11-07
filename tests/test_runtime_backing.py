@@ -29,7 +29,8 @@ from test_runtime_gpu import EXIT_FATAL, LEVELS, ROOT, build_program, case_env, 
 
 TEST_SOURCE = ROOT / "tests" / "runtime" / "backing_test.c"
 
-PASSING = ("decisions", "uncommitted", "epoch", "deferred", "finiwait", "cross", "refused", "blocks", "flat")
+PASSING = ("decisions", "uncommitted", "epoch", "deferred", "finiwait", "cross", "refused", "blocks", "flat",
+           "raw_invariant", "raw_finiwait")
 
 # case: text the one FATAL line must hold
 FAILING = {

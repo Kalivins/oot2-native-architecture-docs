@@ -620,7 +620,6 @@ static const ShaderBinds *binds_of(const nvn_stage *s, int kind) {
     if (!b) stop("stage %s has no description the replay can read", s->key);
     if (b->kind != kind) stop("stage %s is a %s program where a %s was bound", s->key, shd_kind_name(b->kind),
                               shd_kind_name(kind));
-    if (b->raw) stop("stage %s reaches memory through raw addresses: the page table is ticket 70's", s->key);
     return b;
 }
 
@@ -631,6 +630,14 @@ typedef struct {
     uint32_t n;
     uint32_t push[VKP_PUSH_BYTES / 4];
 } Set1;
+
+// A raw-access stage reaches memory through D15's page table: its address and span in push words 0 to 3, which every
+// stage of the draw shares (oot2/raw_table.h). The first one in a frame keeps the map's invariant (oot2/vk_raw.h).
+static void raw_words(Set1 *s, const nvn_stage *stage) {
+    if (!F.ops->raw) stop("stage %s reaches memory through raw addresses, and these ops give no page table", stage->key);
+    F.ops->raw(F.value, s->push);
+    g_stats.raw_binds++;
+}
 
 static void put_buffer(Set1 *s, uint32_t binding, VkDescriptorType type, Bound b, VkDeviceSize range) {
     if (s->n == VKP_SET1_MAX) stop("more than %u descriptors at set 1", VKP_SET1_MAX);
@@ -938,6 +945,7 @@ static int draw_prepare(int prim, uint32_t base_instance, VkBool32 *restart_out)
     stage_resources(&s, ST_VS, vs, &P.ps[ST_VS], vb, c0);
     vkn_c0_graphics(c0, NVN_STAGE_PS, S.ssbo[ST_FS], base_instance);
     stage_resources(&s, ST_FS, fs, &P.ps[ST_FS], fb, c0);
+    if (vb->raw || fb->raw) raw_words(&s, vb->raw ? vs : fs);
     vkrec_PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_GRAPHICS, F.ops->graphics_layout, 1, s.n, s.w);
     vkrec_PushConstants(F.ops->graphics_layout, vkp_push_range(VKP_GRAPHICS).stageFlags, 0, VKP_PUSH_BYTES, s.push);
     F.draws++, g_stats.draws++;
@@ -1016,6 +1024,7 @@ static void dispatch(const uint32_t groups[3], uint64_t ind) {
     memset(&s, 0, sizeof s);
     support(&s);
     stage_resources(&s, ST_CS, cs, &P.ps[ST_CS], b, c0);
+    if (b->raw) raw_words(&s, cs);
     vkrec_PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_COMPUTE, F.ops->compute_layout, 1, s.n, s.w);
     vkrec_PushConstants(F.ops->compute_layout, vkp_push_range(VKP_COMPUTE).stageFlags, 0, VKP_PUSH_BYTES, s.push);
     F.draws++, g_stats.dispatches++;

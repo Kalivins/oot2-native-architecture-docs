@@ -131,6 +131,13 @@ static Pending *g_pend;
 static int g_npend, g_pend_cap;
 static BackingStats g_cst;   // the coherence counters (g_coh)
 
+// The raw path (backing.h, The raw path): the map's version, the newest raw-access submission, and what the last pass of
+// the invariant saw (g_lock).
+static uint64_t g_version = 1;   // atomic, changed under g_lock exclusive
+static uint64_t g_raw_last;      // atomic
+static uint64_t g_pools_version, g_fill_epoch, g_fill_pools;
+static int g_filled;
+
 // The block thread.
 static PlatMutex g_bt_lock = PLAT_MUTEX_INIT;
 static PlatCond g_bt_cond = PLAT_COND_INIT;
@@ -147,6 +154,18 @@ static void stamp(uint64_t *at, uint64_t value) {
 }
 
 static uint64_t used_by(const Backing *b) { return __atomic_load_n(&b->last_use, __ATOMIC_ACQUIRE); }
+
+// The newest submission that can reach b: its own last resolve, or a raw-access submission, which reaches every
+// backing its page table maps (research 57 F4: one global value rather than a stamp on every backing).
+static uint64_t raw_last(void) { return __atomic_load_n(&g_raw_last, __ATOMIC_ACQUIRE); }
+static uint64_t reach(const Backing *b) {
+    uint64_t u = used_by(b), r = raw_last();
+    return u > r ? u : r;
+}
+
+// A backing entered or left the map, or a virtual pool's run moved: the raw path's table is out of date. g_lock
+// exclusive.
+static void changed(void) { __atomic_fetch_add(&g_version, 1, __ATOMIC_RELEASE); }
 
 static void *grow(void *p, int *cap, int need, size_t size, const char *what) {
     if (need <= *cap) return p;
@@ -363,8 +382,9 @@ static Backing *mirror_new(uint64_t lo, uint64_t hi) {
 // ---------- the deferred-release queue
 static void defer(Backing *b) {
     if (!b) return;
+    changed();
     g_def = grow(g_def, &g_def_cap, g_ndef + 1, sizeof *g_def, "the deferred-release queue");
-    g_def[g_ndef++] = (Deferred){b, used_by(b)};
+    g_def[g_ndef++] = (Deferred){b, reach(b)};
     g_st.deferred = (uint64_t)g_ndef;
     if (g_st.deferred > g_st.deferred_peak) g_st.deferred_peak = g_st.deferred;
     if (b->kind == BACKING_EXTENT) {
@@ -500,6 +520,7 @@ int backing_pool_init(const pool_t *p) {
         g_virtual[g_nvirtual++] = r;
     }
     g_st.pools++;
+    g_pools_version++;   // the raw path's invariant takes the new pool in
     plat_unlock(&g_lock);
     return 1;
 }
@@ -509,16 +530,17 @@ int backing_pool_init(const pool_t *p) {
 static uint64_t rec_end(Rec *r) {
     pidx_remove(&g_index, r, NULL);
     uint64_t value = __atomic_load_n(&r->last_use, __ATOMIC_ACQUIRE);
-    if (r->ext && used_by(r->ext) > value) value = used_by(r->ext);
+    if (r->ext && reach(r->ext) > value) value = reach(r->ext);
     defer(r->ext);
     for (int i = 0; i < r->ncells; i++) {
         for (int j = 0; j < r->cells[i].nimp; j++) {
             Backing *b = r->cells[i].imp[j];
-            if (used_by(b) > value) value = used_by(b);
+            if (reach(b) > value) value = reach(b);
             defer(b);
         }
         free(r->cells[i].imp);
     }
+    changed();   // a virtual pool's pages leave the raw path's table too
     for (int i = 0; i < g_nvirtual; i++) {
         if (g_virtual[i] == r) g_virtual[i--] = g_virtual[--g_nvirtual];
         else if (g_virtual[i]->run == r) g_virtual[i]->run = NULL, g_virtual[i]->run_lost = 1;
@@ -578,6 +600,7 @@ int backing_pool_map_virtual(const pool_t *v, int n, const nvn_mapping_t *req) {
             r->run = NULL, r->run_delta = 0, r->run_lost = 0;
         }
     }
+    if (r) changed();
     plat_unlock(&g_lock);
     return ok;
 }
@@ -679,6 +702,7 @@ static void cell_put(Cell *c, uint64_t rs, uint64_t re, Backing *b) {
     c->imp[at] = b;
     c->nimp++;
     g_st.imports_grown += (uint64_t)replaced;
+    changed();
 }
 
 // ---------- mirrors: copies in (g_coh)
@@ -734,11 +758,29 @@ static void mirror_bring(Backing *m, uint64_t value) {
     free(runs.r);
 }
 
+static void no_run(void *ctx, uint64_t lo, uint64_t hi) { (void)ctx, (void)lo, (void)hi; }
+
+// Raw stores into a mirror reach guest memory only when their submission's value is done (the raw path's write-back,
+// backing.h), so a copy into m taken while a raw-access submission is in flight would put the CPU's older bytes over
+// them in the mirror, and the write-back would then put the GPU's page over the CPU's newer bytes in guest memory. When
+// the CPU wrote m since it was current, wait for that submission first. g_coh held, dropped while waiting.
+static void raw_stores_wait(Backing *m, uint64_t value) {
+    uint64_t r = raw_last();
+    if (m->fresh || !r || r >= value || r <= gpu_sync_done() || r > gpu_sync_issued()) return;
+    if (pagegen_scan(m->gpu_lo, m->gpu_hi) == UINT64_MAX) return;   // mirror_bring stops by name
+    if (!pagegen_runs(m->gpu_lo, m->gpu_hi, m->synced, no_run, NULL)) return;
+    g_cst.raw_waits++;
+    plat_mutex_unlock(&g_coh);
+    wait_value(r);
+    plat_mutex_lock(&g_coh);
+}
+
 // The first resolve of mirror m in submission value brings it current; the later ones of that submission find it so.
 // g_lock held (shared at least), on the submission's thread.
 static void mirror_use(Backing *m, uint64_t value) {
     if (!value || __atomic_load_n(&m->sync_value, __ATOMIC_ACQUIRE) == value) return;
     plat_mutex_lock(&g_coh);
+    if (m->sync_value != value) raw_stores_wait(m, value);
     if (m->sync_value != value) {
         mirror_bring(m, value);
         __atomic_store_n(&m->sync_value, value, __ATOMIC_RELEASE);
@@ -798,8 +840,15 @@ static void replace_wait(const Cell *c, uint64_t rs, uint64_t re, uint64_t value
     for (int i = 0; i < c->nimp; i++) {
         const Backing *o = c->imp[i];
         if (o->gpu_hi <= rs || o->gpu_lo >= re) continue;
-        uint64_t u = used_by(o);
+        // Raw-access submissions reach every backing their page table maps: their stores into a mirror are written
+        // back at their end, and those through an import land in the guest memory the new mirror copies.
+        uint64_t u = reach(o);
         if (value && __atomic_load_n(&o->written, __ATOMIC_ACQUIRE) == value) written_now(o->gpu_lo, o->gpu_hi, value, rs, re);
+        if (value && o->kind == BACKING_MIRROR && raw_last() == value)
+            rt_fatal("gfx: vulkan: backing map: the mirror [%#llx, %#llx), which the page table of raw-access "
+                     "submission %llu maps, would be replaced by a backing over [%#llx, %#llx) while that submission is "
+                     "recorded: its raw accesses and its binds would reach different copies", (ull)o->gpu_lo,
+                     (ull)o->gpu_hi, (ull)value, (ull)rs, (ull)re);
         if ((u < value || (!value && u <= issued)) && u > wait) wait = u;
     }
     if (wait <= gpu_sync_done()) return;
@@ -887,7 +936,7 @@ static void make(uint64_t addr, uint64_t size, uint64_t value) {
     BackingAsk ask = {addr, size, r->flags};
     int kind = backing_rule(&ask);
     if (kind == BACKING_EXTENT) {
-        if (!r->ext) r->ext = extent_new(r);
+        if (!r->ext) r->ext = extent_new(r), changed();
         return;
     }
     if (kind == BACKING_MIRROR && !has_mirrors())
@@ -900,6 +949,10 @@ static void make(uint64_t addr, uint64_t size, uint64_t value) {
     Cell *c = cell_get(r, addr / WINDOW, (addr + size - 1) / WINDOW, 1);
     uint64_t rs, re;
     committed_run(c->lo, c->hi, plo, phi, &rs, &re);
+    // The page table of the raw-access submission being recorded maps these pages to what backs them now: a mirror
+    // made here would give its binds another copy than its raw accesses. An import aliases the guest memory the table's
+    // own import reaches; a later submission's bind can still make the mirror.
+    if (kind == BACKING_MIRROR && value && raw_last() == value) kind = BACKING_IMPORT;
     replace_wait(c, rs, re, value, kind == BACKING_MIRROR);
     Backing *b = kind == BACKING_MIRROR ? mirror_admit(r, rs, re) : NULL;
     if (!b) {
@@ -1114,6 +1167,144 @@ void backing_sync(void) {
     bound();
 }
 
+// ---------- the raw path (backing.h, The raw path)
+// The backing that holds page a of r (not virtual), a mirror before an import when the page is in both (two cells), or
+// NULL; *next is the lowest start of a backing above a, UINT64_MAX for none. g_lock, shared at least.
+static const Backing *page_backing(const Rec *r, uint64_t a, uint64_t *next) {
+    uint64_t nx = UINT64_MAX;
+    const Backing *best = NULL;
+    if (r->cls == CLS_GPU) {
+        best = r->ext && a >= r->ext->gpu_lo && a < r->ext->gpu_hi ? r->ext : NULL;
+    } else {
+        for (int i = 0; i < r->ncells; i++)
+            for (int j = 0; j < r->cells[i].nimp; j++) {
+                const Backing *b = r->cells[i].imp[j];
+                if (b->gpu_lo <= a && a < b->gpu_hi) {
+                    if (!best || (b->kind == BACKING_MIRROR && best->kind != BACKING_MIRROR)) best = b;
+                } else if (b->gpu_lo > a && b->gpu_lo < nx) {
+                    nx = b->gpu_lo;
+                }
+            }
+    }
+    if (next) *next = nx;
+    return best;
+}
+
+// Every committed page of r backed: an import over each run of committed pages no backing covers, cut to the import
+// windows (one cell per window, as a bind inside one window makes). Imports, not mirrors: the invariant can reach the
+// whole heap, and a mirror per run would take VRAM up to the admission's limit, which the extents of pools made later
+// need (D14 gives them no fallback). g_lock exclusive.
+static void fill_pool(Rec *r) {
+    for (uint64_t a = r->lo; a < r->hi;) {
+        int c;
+        uint64_t n = rt_mem_commit_run(a, r->hi - a, &c);
+        if (n == UINT64_MAX || !n)
+            rt_fatal("gfx: vulkan: backing map: %#llx, in CPU-visible pool [%#llx, %#llx), is not guest memory", (ull)a,
+                     (ull)r->lo, (ull)r->hi);
+        uint64_t end = a + n;
+        while (c && a < end) {
+            uint64_t next;
+            const Backing *b = page_backing(r, a, &next);
+            if (b) {
+                a = b->gpu_hi < end ? b->gpu_hi : end;
+                continue;
+            }
+            uint64_t k = a / WINDOW, e = end;
+            if (next < e) e = next;
+            Cell *cell = cell_get(r, k, k, 1);
+            if (cell->hi < e) e = cell->hi;
+            cell_put(cell, a, e, import_new(a, e, a, "the page table's invariant (every committed page mapped)"));
+            g_st.raw_fill_imports++, g_st.raw_fill_bytes += e - a;
+            a = e;
+        }
+        a = end;
+    }
+}
+
+void backing_raw_begin(uint64_t value) {
+    if (!g_open || !value)
+        rt_fatal("gfx: vulkan: backing map: a raw-access submission (value %llu) %s", (ull)value,
+                 g_open ? "outside a submission" : "before the map is open");
+    uint64_t e = rt_mem_ready() ? rt_mem_commit_epoch() : 0;
+    plat_lock(&g_lock);
+    stamp(&g_raw_last, value);
+    g_st.raw_begins++;
+    if (!g_filled || e != g_fill_epoch || g_pools_version != g_fill_pools) {
+        g_filled = 1, g_fill_epoch = e, g_fill_pools = g_pools_version;   // read before the pass, as backing_sync does
+        g_st.raw_passes++;
+        for (int i = 0; i < g_index.n; i++) {
+            Rec *r = (Rec *)g_index.e[i].key;
+            if (r->cls == CLS_GPU && !r->ext) r->ext = extent_new(r), changed(), g_st.raw_fill_extents++;
+            else if (r->cls == CLS_CPU) fill_pool(r);
+        }
+    }
+    plat_unlock(&g_lock);
+    bound();
+    backing_sync_mirrors(value);
+}
+
+uint64_t backing_version(void) { return __atomic_load_n(&g_version, __ATOMIC_ACQUIRE); }
+
+typedef struct RunList { BackingRun *r; int n, cap; } RunList;
+
+static void run_add(RunList *l, uint64_t lo, uint64_t hi, uint64_t address, uint64_t guest, int kind) {
+    BackingRun *p = l->n ? &l->r[l->n - 1] : NULL;
+    if (p && p->hi == lo && p->kind == kind && p->address + (p->hi - p->lo) == address &&
+        p->guest + (p->hi - p->lo) == guest) {
+        p->hi = hi;
+        return;
+    }
+    l->r = grow(l->r, &l->cap, l->n + 1, sizeof *l->r, "the raw path's runs");
+    l->r[l->n++] = (BackingRun){lo, hi, address, guest, kind};
+}
+
+// [lo, hi) mapped to b's bytes of guest address guest on.
+static void run_of(RunList *l, const Backing *b, uint64_t lo, uint64_t hi, uint64_t guest) {
+    run_add(l, lo, hi, b->mem.address + b->offset + (guest - b->gpu_lo), guest, b->kind);
+}
+
+// The pages of virtual pool v mapped to a physical pool that has backings, page by page of the physical pool.
+static void virtual_runs(RunList *l, const Rec *v) {
+    const Rec *p = v->run;
+    if (!p) return;
+    for (uint64_t k = 0; k < v->pages; k++) {
+        if (!(v->bits[k / 64] >> (k % 64) & 1)) continue;
+        uint64_t va = v->lo + k * GFX_GPU_PAGE, pa = (uint64_t)((int64_t)va + v->run_delta);
+        for (uint64_t o = 0; o < GFX_GPU_PAGE; o += HPAGE) {
+            if (pa + o < p->lo || pa + o >= p->hi) continue;
+            const Backing *b = page_backing(p, pa + o, NULL);
+            if (b) run_of(l, b, va + o, va + o + HPAGE, pa + o);
+        }
+    }
+}
+
+int backing_raw_runs(BackingRun **out, uint64_t *version) {
+    RunList l = {0};
+    plat_lock_shared(&g_lock);
+    *version = backing_version();
+    for (int pass = 0; pass < 2; pass++)   // a mirror's pages after an import's, so a page in both maps to the mirror
+        for (int i = 0; i < g_index.n; i++) {
+            const Rec *r = (const Rec *)g_index.e[i].key;
+            if (r->cls == CLS_VIRTUAL) {
+                if (!pass && !r->run_lost) virtual_runs(&l, r);
+                continue;
+            }
+            if (r->cls == CLS_GPU) {
+                uint64_t hi = r->ext && r->ext->gpu_hi < r->hi ? r->ext->gpu_hi : r->hi;
+                if (!pass && r->ext) run_of(&l, r->ext, r->lo, hi, r->lo);
+                continue;
+            }
+            for (int j = 0; j < r->ncells; j++)
+                for (int m = 0; m < r->cells[j].nimp; m++) {
+                    const Backing *b = r->cells[j].imp[m];
+                    if ((b->kind == BACKING_MIRROR) == pass) run_of(&l, b, b->gpu_lo, b->gpu_hi, b->gpu_lo);
+                }
+        }
+    plat_unlock_shared(&g_lock);
+    *out = l.r;
+    return l.n;
+}
+
 // ---------- decisions and counters
 void backing_page(uint64_t addr, BackingPage *out) {
     *out = (BackingPage){BACKING_NONE, 0, addr};
@@ -1141,7 +1332,7 @@ void backing_stats(BackingStats *out) {
     out->mirror_syncs = g_cst.mirror_syncs, out->uploads = g_cst.uploads, out->upload_bytes = g_cst.upload_bytes;
     out->writebacks = g_cst.writebacks, out->writeback_bytes = g_cst.writeback_bytes;
     out->writebacks_skipped = g_cst.writebacks_skipped, out->reads_in_flight = g_cst.reads_in_flight;
-    out->pending = (uint64_t)g_npend;
+    out->pending = (uint64_t)g_npend, out->raw_waits = g_cst.raw_waits;
     plat_mutex_unlock(&g_coh);
     out->resolves = __atomic_load_n(&g_resolves, __ATOMIC_RELAXED);
     out->resolve_misses = __atomic_load_n(&g_misses, __ATOMIC_RELAXED);
@@ -1163,6 +1354,7 @@ void backing_open(const BackingOps *ops) {
     plat_mutex_unlock(&g_coh);
     g_resolves = g_misses = 0;
     g_seen_epoch = rt_mem_ready() ? rt_mem_commit_epoch() : 0;
+    g_raw_last = 0, g_filled = 0, g_pools_version = g_fill_pools = g_fill_epoch = 0;
     g_open = 1;
     g_bt_stop = 0, g_bt_want = 1, g_bt_running = 1;
     g_bt = plat_thread_start(bt_main, NULL, BLOCK_THREAD_STACK);
