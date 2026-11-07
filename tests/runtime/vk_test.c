@@ -15,7 +15,7 @@
 //   loss_submit      vkQueueSubmit2 answers VK_ERROR_DEVICE_LOST: the report is written to the folder, the run stops
 //   loss_completion  the completion thread's vkWaitSemaphores answers it: the same, from that thread
 //   refuse           OOT2_VK_DEVICE names no device: the start stops by name
-//   backing, backing_fini, backing_flat   the backing map's imports and extents (the backing map)
+//   backing, backing_fini, backing_flat   the backing map's imports and extents
 //   mirror_upload    a CPU write into a mirrored range is read by the GPU in the next submission, three times, and
 //                    only the written page is copied
 //   mirror_writeback a GPU write into a mirrored range reaches guest memory after its fence and cpu_synced, never

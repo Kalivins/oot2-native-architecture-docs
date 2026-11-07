@@ -26,7 +26,7 @@
 // Items 20 to 27 came with the Vulkan back end's device: what the device itself, the uni layout, the mesh path and the
 // translated programs use (architecture D12, D16, D18; the mesh shader, first draw, pipeline cost and translator defects studies).
 //
-// Items 28 to 31 came with the pipeline builder's capability check (the pipeline builder, oot2/vk_caps.h): the translated modules
+// Items 28 to 31 came with the pipeline builder's capability check (oot2/vk_caps.h): the translated modules
 // declare 64-bit integers (the raw-access helper), storage images without a format, cube array images and non-uniform
 // indexing of storage image arrays, and the check over the whole corpus found no item that enables them. All four are
 // features every desktop GPU that has the items above offers.
