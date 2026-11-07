@@ -594,6 +594,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             Queue<PhiNode> phis = new();
             HashSet<PhiNode> visited = [];
             List<uint> targetCbs = [];
+            bool untraced = false;
 
             Operand globalAddress = operation.GetSource(0);
 
@@ -644,16 +645,35 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                             targetCbs.Add(targetCb);
                         }
                     }
-                    else if (phiSource.AsgOp is PhiNode phi2 && visited.Add(phi2))
+                    else if (phiSource.AsgOp is PhiNode phi2)
                     {
-                        phis.Enqueue(phi2);
+                        if (visited.Add(phi2))
+                        {
+                            phis.Enqueue(phi2);
+                        }
+                    }
+                    else if (HoldsPointer(phiSource))
+                    {
+                        untraced = true;
                     }
                 }
             }
 
+            // oot2-native: a helper over the traced buffers alone gives a load zero at an address in none of them, so a phi that also merges an address traced to
+            // no buffer (a pointer the shader loaded through another buffer: OoT's foliage placement) would read zero on that path. Such an access takes the raw
+            // helper, as a select does; the traced buffers are mapped in the page table like any other memory
+            bool mixed = untraced && targetCbs.Count != 0;
+
+            if (mixed)
+            {
+                gpuAccessor.Log($"Global memory operation \"{operation.Inst}\" mixes an address traced to a storage buffer with one traced to none: it goes through the page table.");
+
+                targetCbs.Clear();
+            }
+
             targetCbs.Sort();
 
-            if (targetCbs.Count == 0)
+            if (targetCbs.Count == 0 && !mixed)
             {
                 gpuAccessor.Log($"Global memory operation \"{operation.Inst}\" traced to no storage buffer: it goes through the memory pool table.");
             }
@@ -777,6 +797,18 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
             functionId = gtsContext.AddFunction(operation, isMultiTarget: true, targetCbs, function);
 
             return true;
+        }
+
+        // oot2-native: whether a phi source can be an address. A constant or an undefined value holds none: a register that one path never wrote enters the phi
+        // as one, and its path is not a lookup. A copy the optimizer left is looked through
+        private static bool HoldsPointer(Operand source)
+        {
+            while (source.AsgOp is Operation { Inst: Instruction.Copy } copy)
+            {
+                source = copy.GetSource(0);
+            }
+
+            return source.Type != OperandType.Constant && source.Type != OperandType.Undefined;
         }
 
         // oot2-native: the raw helpers' names end with this; the SPIR-V generator marks them DontInline (SpirvGenerator.Generate). nxnative bound the pool
