@@ -17,6 +17,12 @@
 //   commit   a chunk of a pool committed after the pool was mapped: a miss before, its word read by the next submission
 //   edges    the lowest and the highest mapped page, the lowest in the guest heap and the highest at the top of the window
 //   reuse    a pool finalized and another made over the same range, CPU-visible and in the window: the new pool's words
+//   grow     one submission, two raw-access stages and two binds: a mirror made by a small bind and mapped by the first
+//            stage's table, then a bind that starts in the mirror's last pages and runs far past its end over pages the
+//            guest never touched (it used to stop by name), then a second stage whose pointers lie in those pages, and a
+//            bound copy of the same bytes out: both stages used one table (the same push words), rewritten at the end,
+//            the second stage's loads, stores and atomics all landed, the bound copy and guest memory hold the same
+//            bytes, and the mirror's kept pages were written back
 //   heap MIB what the invariant costs over a guest heap of MIB MiB committed in 256 MiB pools, with a 256 MiB pool in the
 //            window: resident bytes and VRAM before and after the first raw-access submission, the invariant's pass and
 //            the table's build timed, then a second submission with the map unchanged (measured, not judged; the full
@@ -523,6 +529,90 @@ static void case_reuse(const char *spv) {
     printf("ok reuse\n");
 }
 
+// ---------- grow
+// One stage of the program in the submission being recorded: the entries it reads, then its dispatch with the table's push
+// words. The entries' pool is bound once by the caller.
+static void stage(VkCommandBuffer cb, const Entry e[THREADS], const uint32_t push[4], const BackingRef *entries) {
+    barrier(cb, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    vkCmdUpdateBuffer(cb, (VkBuffer)(uintptr_t)entries->buffer, entries->offset, THREADS * sizeof(Entry), e);
+    barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT |
+                VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_pipe);
+    vkCmdPushConstants(cb, g_lay.compute, VK_SHADER_STAGE_COMPUTE_BIT, 0, 16, push);
+    vkCmdDispatch(cb, 1, 1, 1);
+}
+
+static void case_grow(const char *spv) {
+    open_all(spv);
+    Entry e[THREADS], first[THREADS];
+    pool_t t = table_pool(e);
+    const uint64_t p = g_heap + 16 * MiB;
+    g_mirror_lo = p, g_mirror_hi = p + 1 * MiB;
+    pool_t pp = make_pool(p, 16 * MiB, 0);
+    fill_words(p, 256 * KiB, 0x11110000u);   // what the CPU wrote: the run a mirror will cover
+    memcpy(first, e, sizeof first);
+    first[0] = (Entry){p + 0x2000 + PROBE, p + 0x3000, 0, 0, {0}};   // stage 1: a word of the mirror and a counter in it
+    // Stage 2: pages the guest never touched, which the bind commits, and one counter in them (inside the 64 KiB the bound
+    // copy reads back)
+    const uint64_t fresh = p + 0x80000, counter = fresh + 15 * PG + 0x800;
+    for (int i = 0; i < 16; i++) e[i] = (Entry){fresh + (uint64_t)i * PG + PROBE, counter, 0, 0, {0}};
+
+    backing_sync();   // as the replay's submit does first
+    uint64_t v = gpu_vk_begin(GPU_VK_INTERNAL);
+    VkCommandBuffer cb = gpu_vk_cmd();
+    BackingRef entries, small, big;
+    backing_resolve(TABLE, THREADS * sizeof(Entry), v, &entries);
+    backing_resolve(p, 0x1200, v, &small);   // a small bind: the mirror over the 256 KiB
+    CHECK(small.kind == BACKING_MIRROR);
+    uint32_t push1[4], push2[4];
+    gpu_vk_raw_begin(v, push1);   // the table of v maps the mirror
+    stage(cb, first, push1, &entries);
+    backing_resolve(p + 0x30320, 1 * MiB, v, &big);   // starts in the mirror's last pages, ends far past it
+    CHECK(big.kind == BACKING_IMPORT);
+    gpu_vk_raw_begin(v, push2);
+    CHECK(!memcmp(push1, push2, sizeof push1));   // the second stage takes the first one's table: the same address and span
+    stage(cb, e, push2, &entries);
+    barrier(cb, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferCopy c = {.srcOffset = big.offset + (fresh - (p + 0x30320)), .dstOffset = 0, .size = 64 * KiB};
+    vkCmdCopyBuffer(cb, (VkBuffer)(uintptr_t)big.buffer, g_buf, 1, &c);   // the same bytes through the bind's backing
+    barrier(cb, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+    gpu_vk_raw_end(v);
+    finish(v);
+    uint32_t bound[16], bound_counter = g_words[(counter - fresh) / 4];
+    for (int i = 0; i < 16; i++) bound[i] = g_words[(uint64_t)i * PG / 4 + (PROBE + 4) / 4];
+    read_back(TABLE, THREADS * sizeof(Entry));
+    memcpy(e, (const void *)g_words, 16 * sizeof(Entry));
+
+    uint32_t olds = 0;
+    for (int i = 0; i < 16; i++) {
+        CHECK(e[i].loaded == 0 && e[i].old < 16 && !(olds >> e[i].old & 1));   // 16 atomics, each saw another count
+        olds |= 1u << e[i].old;
+        CHECK(word_at(fresh + (uint64_t)i * PG + PROBE + 4) == (MARK | (uint32_t)i));   // the stores landed in guest memory
+        CHECK(bound[i] == (MARK | (uint32_t)i));   // and the bind's backing, read on the device, holds the same bytes
+    }
+    CHECK(word_at(counter) == 16 && bound_counter == 16);
+    CHECK(word_at(p + 0x2000 + PROBE + 4) == MARK && word_at(p + 0x3000) == 0x11110001u);   // stage 1, through the mirror
+    GpuVkRawStats s;
+    gpu_vk_raw_stats(&s);
+    BackingStats b;
+    backing_stats(&b);
+    CHECK(s.misses == 0 && s.submissions == 1 && s.builds == 1 && s.refreshes == 1);
+    CHECK(s.writebacks == 2 && s.writeback_bytes == 2 * PG);   // the mirror's kept pages that stage 1 stored into
+    CHECK(b.mirrors == 1 && b.mirror_bytes == 0x30000 && b.imports == 1 && b.import_bytes == 0x110000);
+    BackingPage pg;
+    backing_page(p + 0x2F000, &pg);
+    CHECK(pg.kind == BACKING_MIRROR);
+    backing_page(p + 0x30000, &pg);
+    CHECK(pg.kind == BACKING_IMPORT);
+    printf("one submission, two stages, two binds: the second stage's 16 loads, stores and atomics reached the pages the "
+           "bind committed past the mirror, the bound copy and guest memory hold the same bytes, the mirror kept %llu "
+           "KiB and its stored pages were written back\n", (ull)(b.mirror_bytes >> 10));
+    stats_line();
+    pool_t *all[] = {&pp, &t};
+    close_all(all, 2);
+    printf("ok grow\n");
+}
+
 // ---------- heap
 static void mem_line(const char *when) {
     RtMemStats m;
@@ -607,6 +697,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "commit")) case_commit(spv);
     else if (!strcmp(cs, "edges")) case_edges(spv);
     else if (!strcmp(cs, "reuse")) case_reuse(spv);
+    else if (!strcmp(cs, "grow")) case_grow(spv);
     else if (!strcmp(cs, "heap") && argc >= 4) case_heap(spv, strtoull(argv[3], NULL, 10));
     else {
         fprintf(stderr, "unknown case %s\n", cs);

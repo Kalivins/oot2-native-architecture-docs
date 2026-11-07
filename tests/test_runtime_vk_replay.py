@@ -449,6 +449,30 @@ class GraphicsTest(ReplayBase):
 
 
 class ComputeTest(ReplayBase):
+    def test_a_raw_access_dispatch_asks_for_the_page_table_before_its_binds_resolve(self) -> None:
+        # The frame's raw path begins before any bind of a raw-access draw or dispatch resolves, so that nothing the frame
+        # binds from then on becomes a mirror (oot2/backing.h, The raw path): the words reach the push constants, and the
+        # frame's second stage asks again and gets the same.
+        out = self.passing("raw_first")
+        frames: list[list[str]] = []   # the ops of each frame: frame 1 two dispatches, frame 2 a draw
+        for line in (line for line in out.splitlines() if line.startswith("op ")):
+            if line == "op frame_begin":
+                frames.append([])
+            else:
+                frames[-1].append(line)
+        self.assertEqual(len(frames), 2)
+        for n, ops in enumerate(frames, 1):
+            first_raw = next(i for i, line in enumerate(ops) if line.startswith("op raw "))
+            first_resolve = next(i for i, line in enumerate(ops) if line.startswith("op resolve "))
+            self.assertLess(first_raw, first_resolve, (n, ops))
+        self.assertEqual([line for line in frames[0] if line.startswith("op raw ")], ["op raw frame 1"] * 2)
+        self.assertEqual([line for line in frames[1] if line.startswith("op raw ")], ["op raw frame 2"])
+        for n in (1, 2):
+            pcs = [p for p in frame(out, n) if p.startswith("PushConstants ")]
+            self.assertEqual(len(pcs), 2 if n == 1 else 1, pcs)
+            for p in pcs:
+                self.assertIn(" 0=0x7ab1e000 4=0x7e 8=0x80 12=0x400", p)
+
     def test_dispatches_become_their_packets(self) -> None:
         out = self.passing("compute")
         f = frame(out, 1)

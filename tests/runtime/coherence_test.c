@@ -28,7 +28,14 @@
 //                holds the GPU's write
 //   watch        (Windows; a skip line elsewhere) the real write watch: every hook and sync between a CPU write and the
 //                next submission leaves the write to that submission, and a second consumer sees the same page
-//   unwritten, replace_written   stop by name
+//   raw_grow     a bind of a raw-access submission that starts in a mirror its page table maps and runs past its end:
+//                the mirror keeps the part outside the bind, an import covers the rest, the table's runs and the bind
+//                reach the same memory for every page
+//   raw_grow_head   a bind below a mirror that ends inside it takes its first pages: the rest keeps its own bytes
+//   raw_grow_whole, raw_grow_beside   a bind over a whole mirror takes it; one beside a mirror leaves it whole
+//   raw_grow_wait   the mirror gives its pages up only once the older raw-access submission in flight is done
+//   raw_sync_wait   a mirror the CPU wrote is brought current for a raw-access submission after the older one in flight
+//   unwritten, replace_written, raw_grow_taken   stop by name
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -510,7 +517,271 @@ static void case_watch(void) {
 #endif
 }
 
+// ---------- a bind in a raw-access submission (backing.h, The raw path)
+// The run of runs[0..n) that holds a (a later one wins), or NULL; the host address a raw access of guest address a reaches
+// through them, 0 when no run maps it.
+static const BackingRun *run_at(const BackingRun *runs, int n, uint64_t a) {
+    const BackingRun *hit = NULL;
+    for (int i = 0; i < n; i++)
+        if (runs[i].lo <= a && a < runs[i].hi) hit = &runs[i];
+    return hit;
+}
+
+static uint64_t raw_address(const BackingRun *runs, int n, uint64_t a) {
+    const BackingRun *r = run_at(runs, n, a);
+    return r ? r->address + (a - r->lo) : 0;
+}
+
+// The pool [p, p + 16 MiB) with 256 KiB the CPU wrote at its start, and a small bind of submission v that made the mirror
+// of that run; then v holds a raw-access program, whose page table maps the mirror.
+static uint64_t raw_scene(uint64_t *p, pool_t *pool_out, BackingRef *small) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    *p = g_heap + 4 * MiB;
+    *pool_out = pool(*p, 16 * MiB);
+    cpu_fill(*p, 256 * KiB, 0xAAAAAAAAu);
+    uint64_t v = sub_begin();
+    *small = resolve(*p, 0x1200, v);
+    CHECK(small->kind == BACKING_MIRROR && stats().mirrors == 1 && stats().mirror_bytes == 256 * KiB);
+    backing_raw_begin(v);
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    CHECK(n == 1 && runs[0].kind == BACKING_MIRROR && runs[0].lo == *p && runs[0].hi == *p + 256 * KiB);
+    free(runs);
+    return v;
+}
+
+// A mirror a raw-access submission's table maps, and a later bind of that submission that starts in the mirror's last pages
+// and runs far past its end, over pages the guest never touched. It used to stop by name (the table and the bind would
+// have had two copies of the pages the mirror held), and its raw accesses to what the bind committed missed the table.
+// Now the mirror keeps the part the bind does not take, the bind's import covers the rest, and the page table and the
+// bind reach the same memory for every page.
+static void case_raw_grow(void) {
+    uint64_t p;
+    pool_t pp;
+    BackingRef small;
+    uint64_t v = raw_scene(&p, &pp, &small);
+    BackingRef big = resolve(p + 0x30320, 1 * MiB, v);
+    BackingStats s = stats();
+    CHECK(big.kind == BACKING_IMPORT && s.imports == 1 && s.import_bytes == 0x110000);   // up to the chunk the bind committed
+    CHECK(s.mirrors == 1 && s.mirror_bytes == 0x30000 && s.replace_waits == 0);
+    uint64_t lo, hi;
+    CHECK(backing_pool_span(&lo, &hi) && lo == p && hi == p + 16 * MiB);
+
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    CHECK(n == 2 && version == backing_version());
+    static const uint64_t at[] = {0x0, 0x2F000, 0x30000, 0x3F000, 0x40000, 0x130000};
+    static const int want[] = {BACKING_MIRROR, BACKING_MIRROR, BACKING_IMPORT, BACKING_IMPORT, BACKING_IMPORT,
+                               BACKING_IMPORT};
+    for (int i = 0; i < 6; i++) {
+        BackingPage pg;
+        backing_page(p + at[i], &pg);
+        BackingRef r = resolve(p + at[i], 4, v);
+        CHECK(pg.kind == want[i] && r.kind == want[i]);
+        CHECK(raw_address(runs, n, p + at[i]) == r.address);   // a raw access and a bind reach the same memory
+    }
+    BackingPage pg;
+    backing_page(p + 0x140000, &pg);
+    CHECK(pg.kind == BACKING_NONE && !raw_address(runs, n, p + 0x140000));
+    free(runs);
+
+    sub_end(v);
+    gpu_run(v, NULL);
+    CHECK(words_are(bytes(&small), 0x100, 0xAAAAAAAAu));   // the mirror's part, brought current in the prologue
+    CHECK(words_are(bytes(&big), 0x100, 0xAAAAAAAAu));     // the import is the guest's memory: what the CPU wrote
+    CHECK(words_are((const void *)(uintptr_t)(p + 0x50000), 0x1000, 0));   // and the pages the bind committed
+    s = stats();
+    printf("raw_grow: the mirror keeps %llu KiB, the import takes %llu KiB, no page has two backings\n",
+           (ull)(s.mirror_bytes >> 10), (ull)(s.import_bytes >> 10));
+    backing_pool_fini(&pp);
+    done("raw_grow");
+}
+
+// A bind that covers a whole mirror the submission has not resolved takes it all: the mirror goes, to be freed once the
+// raw-access submission is done.
+static void case_raw_grow_whole(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 16 * MiB);
+    cpu_fill(p + 0x10000, 64 * KiB, 0xAAAAAAAAu);
+    uint64_t v0 = sub_begin();
+    resolve(p + 0x10000, 0x100, v0);   // the mirror of those 64 KiB, in a submission that is over
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    CHECK(stats().mirrors == 1);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    BackingRef big = resolve(p + 0xE000, 0x14000, v);   // [p + 0xE000, p + 0x22000) holds it; its chunks make 192 KiB
+    BackingStats s = stats();
+    CHECK(big.kind == BACKING_IMPORT && s.mirrors == 0 && s.mirror_bytes == 0 && s.imports == 1 && s.import_bytes == 0x30000);
+    CHECK(s.deferred == 1 && s.freed == 0);
+    sub_end(v);
+    gpu_run(v, NULL);
+    backing_sync();
+    s = stats();
+    CHECK(s.deferred == 0 && s.freed == 1 && s.mirrors == 0);
+    backing_pool_fini(&pp);
+    done("raw_grow_whole");
+}
+
+// A bind that starts below a mirror and ends inside it takes its first pages: the mirror keeps the rest, its device
+// addresses move with its start, every page it kept still reads its own bytes, and its part of the block goes back whole.
+static void case_raw_grow_head(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 16 * MiB);
+    for (uint64_t i = 0; i < 48; i++) cpu_fill(p + 0x10000 + i * PG, PG, 0xC0DE0000u + (uint32_t)i);   // a tag a page
+    uint64_t v0 = sub_begin();
+    resolve(p + 0x10000, 0x100, v0);   // the mirror over [p + 0x10000, p + 0x40000), in a submission that is over
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    CHECK(stats().mirrors == 1 && stats().mirror_bytes == 192 * KiB);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    BackingRef big = resolve(p + 0xE000, 0xA000, v);   // [p + 0xE000, p + 0x18000): the mirror's first 8 pages
+    BackingStats s = stats();
+    CHECK(big.kind == BACKING_IMPORT && s.mirrors == 1 && s.mirror_bytes == 0x28000 && s.imports == 1 &&
+          s.import_bytes == 0x18000);
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    CHECK(n == 2);
+    for (uint64_t i = 8; i < 48; i += 13) {
+        uint64_t a = p + 0x10000 + i * PG;
+        BackingRef r = resolve(a, 4, v);
+        CHECK(r.kind == BACKING_MIRROR && raw_address(runs, n, a) == r.address);
+        CHECK(*(const uint32_t *)bytes(&r) == 0xC0DE0000u + (uint32_t)i);
+    }
+    BackingPage pg;
+    backing_page(p + 0x17000, &pg);
+    CHECK(pg.kind == BACKING_IMPORT);
+    backing_page(p + 0x18000, &pg);
+    CHECK(pg.kind == BACKING_MIRROR);
+    free(runs);
+    sub_end(v);
+    gpu_run(v, NULL);
+    backing_pool_fini(&pp);   // the mirror's part goes back to its block at its own offset
+    done("raw_grow_head");
+}
+
+// A bind beside a mirror, not over it, leaves the mirror whole: the import covers the committed pages next to it, up to it.
+static void case_raw_grow_beside(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 16 * MiB);
+    cpu_fill(p + 0x10000, 64 * KiB, 0xAAAAAAAAu);
+    uint64_t v0 = sub_begin();
+    resolve(p + 0x10000, 0x100, v0);
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    cpu_fill(p + 0x20000, 64 * KiB, 0xBBBBBBBBu);   // a chunk after the mirror that nothing backs yet
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    // The pages after that chunk, which the bind commits: the import starts where the mirror ends and takes the chunk
+    // between. And pages well below the mirror, with a chunk between them and it that no bind needed: the import ends
+    // where the mirror starts.
+    BackingRef above = resolve(p + 0x30000, 0x2000, v);
+    BackingRef below = resolve(p + 0x2000, 0x2000, v);
+    BackingStats s = stats();
+    CHECK(above.kind == BACKING_IMPORT && below.kind == BACKING_IMPORT);
+    CHECK(s.mirrors == 1 && s.mirror_bytes == 64 * KiB && s.imports == 2 && s.import_bytes == 0x30000);
+    BackingPage pg;
+    backing_page(p + 0x10000, &pg);
+    CHECK(pg.kind == BACKING_MIRROR);
+    backing_page(p + 0x1F000, &pg);
+    CHECK(pg.kind == BACKING_MIRROR);
+    backing_page(p + 0x20000, &pg);
+    CHECK(pg.kind == BACKING_IMPORT);
+    backing_page(p + 0x3F000, &pg);
+    CHECK(pg.kind == BACKING_IMPORT);
+    backing_page(p + 0xF000, &pg);
+    CHECK(pg.kind == BACKING_IMPORT);
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    CHECK(n == 3);   // the import below, the import above, the mirror: no page twice
+    free(runs);
+    sub_end(v);
+    gpu_run(v, NULL);
+    backing_pool_fini(&pp);
+    done("raw_grow_beside");
+}
+
+// A mirror gives pages up only once the older raw-access submissions are done: their stores into it reach guest memory,
+// which the import reads, when they are.
+static uint64_t g_older;
+static void run_older_later(void *arg) {
+    (void)arg;
+    plat_sleep_ns(200 * 1000 * 1000);
+    gpu_run(g_older, NULL);
+}
+
+static void case_raw_grow_wait(void) {
+    uint64_t p;
+    pool_t pp;
+    BackingRef small;
+    uint64_t r = raw_scene(&p, &pp, &small);   // raw-access submission r, which may store into the mirror
+    sub_end(r);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    g_older = r;
+    CHECK(plat_thread_start(run_older_later, NULL, 256 * KiB));
+    uint64_t t0 = plat_now_ns();
+    BackingRef big = resolve(p + 0x30320, 1 * MiB, v);
+    double waited = (double)(plat_now_ns() - t0) / 1e6;
+    CHECK(big.kind == BACKING_IMPORT && waited >= 150.0 && gpu_sync_done() >= r && stats().replace_waits == 1);
+    sub_end(v);
+    gpu_run(v, NULL);
+    printf("raw_grow_wait: the import waited %.1f ms for the raw-access submission in flight\n", waited);
+    backing_pool_fini(&pp);
+    done("raw_grow_wait");
+}
+
+// A mirror brought current for a raw-access submission waits for the older one in flight when the CPU wrote the mirror
+// since: the older one's raw stores reach guest memory only when it is done, and the copy would put the CPU's older bytes
+// over them.
+static void case_raw_sync_wait(void) {
+    uint64_t p;
+    pool_t pp;
+    BackingRef small;
+    uint64_t r = raw_scene(&p, &pp, &small);   // raw-access submission r, whose table maps the mirror
+    sub_end(r);
+    cpu_fill(p + 0x1000, 4, 0xDDDDDDDDu);      // the CPU writes a page of the mirror while r is in flight
+    uint64_t v = sub_begin();
+    g_older = r;
+    CHECK(plat_thread_start(run_older_later, NULL, 256 * KiB));
+    uint64_t t0 = plat_now_ns();
+    backing_raw_begin(v);   // brings the mirror current, after r
+    double waited = (double)(plat_now_ns() - t0) / 1e6;
+    CHECK(waited >= 150.0 && gpu_sync_done() >= r && stats().raw_waits == 1);
+    sub_end(v);
+    gpu_run(v, NULL);
+    CHECK(*(const uint32_t *)(bytes(&small) + 0x1000) == 0xDDDDDDDDu);   // the copy carried the CPU's write
+    printf("raw_sync_wait: the mirror was brought current %.1f ms after the raw-access submission in flight was done\n",
+           waited);
+    backing_pool_fini(&pp);
+    done("raw_sync_wait");
+}
+
 // ---------- cases that stop by name
+// An earlier bind of the submission reached the pages a later one takes from the mirror: the table cannot give both the
+// same copy of them.
+static void case_raw_grow_taken(void) {
+    uint64_t p;
+    pool_t pp;
+    BackingRef small;
+    uint64_t v = raw_scene(&p, &pp, &small);
+    resolve(p + 0x31000, 0x100, v);
+    resolve(p + 0x30320, 1 * MiB, v);
+    printf("returned\n");
+}
+
 static void case_unwritten(void) {
     setup(64 * MiB, 0);
     backing_set_mirror_hook(want_all);
@@ -551,6 +822,11 @@ int main(int argc, char **argv) {
         {"generations", case_generations}, {"upload", case_upload},   {"admission", case_admission},
         {"writeback", case_writeback},     {"replace", case_replace}, {"watch", case_watch},
         {"unwritten", case_unwritten},     {"replace_written", case_replace_written},
+        {"raw_grow", case_raw_grow},       {"raw_grow_whole", case_raw_grow_whole},
+        {"raw_grow_head", case_raw_grow_head},
+        {"raw_grow_beside", case_raw_grow_beside}, {"raw_grow_wait", case_raw_grow_wait},
+        {"raw_sync_wait", case_raw_sync_wait},
+        {"raw_grow_taken", case_raw_grow_taken},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)
         if (!strcmp(argv[1], cases[i].name)) {

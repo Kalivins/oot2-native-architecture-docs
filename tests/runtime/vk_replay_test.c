@@ -91,8 +91,9 @@ static void lput(Log *l, const char *fmt, ...) {
 }
 
 // ---------- the stages and their bindings
-static nvn_stage g_vs, g_ps, g_cs;
-static ShaderBinds g_vs_binds, g_ps_binds, g_cs_binds;
+// g_vs_raw and g_cs_raw: stages that reach memory through the page table
+static nvn_stage g_vs, g_ps, g_cs, g_vs_raw, g_cs_raw;
+static ShaderBinds g_vs_binds, g_ps_binds, g_cs_binds, g_vs_raw_binds, g_cs_raw_binds;
 
 static void stage(nvn_stage *s, const char *key, int kind, uint32_t c1_at, uint32_t c1_end) {
     memset(s, 0, sizeof *s);
@@ -133,6 +134,14 @@ static void make_stages(void) {
     c->kind = SHD_CS, c->fits = 1, c->local_size[0] = 64, c->local_size[1] = c->local_size[2] = 1;
     cbuf(c, 0, 1), cbuf(c, 2, 2), cbuf(c, 24, 3);
     c->sb[c->nsb++] = (ShdSbuf){.set = 1, .ordinal = 0, .cb_slot = 0, .write = 0, .binding = 4, .address_byte_offset = 0x320};
+
+    stage(&g_cs_raw, "00000000000000c4.00000001", NVN_STAGE_CS, 0, 0);   // the same layout as g_cs, and the page table
+    g_cs_raw.ctl[0xA9] = 2, g_cs_raw.ctl[0xB1] = 3, g_cs_raw.ctl[0xB2] = 2;
+    g_cs_raw_binds = g_cs_binds;
+    g_cs_raw_binds.raw = 1;
+    stage(&g_vs_raw, "00000000000000a2.00000001", NVN_STAGE_VS, 0x100, 0x140);   // and g_vs, with the page table
+    g_vs_raw_binds = g_vs_binds;
+    g_vs_raw_binds.raw = 1;
 }
 
 // ---------- the stand-in ops
@@ -152,10 +161,13 @@ static VkPipeline op_compute(const VkpStage *cs) {
     return (VkPipeline)(uintptr_t)0x9C;
 }
 static const ShaderBinds *op_binds(const nvn_stage *s) {
-    return s == &g_vs ? &g_vs_binds : s == &g_ps ? &g_ps_binds : s == &g_cs ? &g_cs_binds : NULL;
+    return s == &g_vs ? &g_vs_binds : s == &g_ps ? &g_ps_binds : s == &g_cs ? &g_cs_binds
+           : s == &g_vs_raw ? &g_vs_raw_binds : s == &g_cs_raw ? &g_cs_raw_binds : NULL;
 }
+static int g_log_resolves;   // a case that checks the order of the resolves against the raw path's begin sets it
 static void op_resolve(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out) {
     (void)value;
+    if (g_log_resolves) lput(&g_ops, "op resolve 0x%llx+0x%llx\n", (ull)addr, (ull)size);
     memset(out, 0, sizeof *out);
     out->address = addr;
     if (addr - HOST < HOST_BYTES) {
@@ -222,6 +234,11 @@ static void *op_scratch(uint64_t value, uint32_t bytes, uint32_t align, VkBuffer
     *buffer = (VkBuffer)(uintptr_t)BUF_SCRATCH, *offset = at;
     return g_arena + at;
 }
+// The page table's words of a frame: the same four for every stage (the device's own begin does the work once).
+static void op_raw(uint64_t value, uint32_t push[4]) {
+    lput(&g_ops, "op raw frame %llu\n", (ull)value);
+    push[0] = 0x7AB1E000u, push[1] = 0x7Eu, push[2] = 0x80u, push[3] = 0x400u;
+}
 static void op_frame_begin(void) { lput(&g_ops, "op frame_begin\n"); }
 static void op_frame_end(uint64_t value) { lput(&g_ops, "op frame_end %llu\n", (ull)value); }
 // Query pools named by their frame; query i of any pool counted 10 * (i + 1) samples.
@@ -240,8 +257,8 @@ static const VkReplayOps g_fake_ops = {
     .graphics_layout = (VkPipelineLayout)(uintptr_t)0x6100, .compute_layout = (VkPipelineLayout)(uintptr_t)0x6200,
     .binds = op_binds, .resolve = op_resolve, .gpu_wrote = op_gpu_wrote, .target = op_target, .image = op_image,
     .acquire = op_acquire,
-    .image_slot = op_image_slot, .scratch = op_scratch, .frame_begin = op_frame_begin, .frame_end = op_frame_end,
-    .queries = op_queries, .query_results = op_query_results, .cpu_reads = op_cpu_reads};
+    .image_slot = op_image_slot, .scratch = op_scratch, .raw = op_raw, .frame_begin = op_frame_begin,
+    .frame_end = op_frame_end, .queries = op_queries, .query_results = op_query_results, .cpu_reads = op_cpu_reads};
 
 // ---------- the stand-in recorder calls: one line per call
 #define FAKE_CB ((VkCommandBuffer)(uintptr_t)0xC0FFEE00u)
@@ -613,6 +630,13 @@ static p_bind_program program(int compute) {
     return p;
 }
 
+// The same programs with the stage that reaches memory through the page table: the compute stage, or the vertex stage.
+static p_bind_program program_raw(int compute) {
+    p_bind_program p = program(compute);
+    p.id[0] = compute ? &g_cs_raw : &g_vs_raw;
+    return p;
+}
+
 // The graphics state of the draws: one target, a viewport and a scissor, a vertex stream, a uniform buffer of the
 // vertex stage in host memory (an import: copied at submit), one of the pixel stage in a mirror (bound live), a
 // storage buffer the pixel stage writes, a texture.
@@ -721,6 +745,30 @@ static void case_compute(void) {
     vkr_submit(&h, 1);
     close_fakes();
     printf("ok compute\n");
+}
+
+// A raw-access dispatch or draw asks for its page table's words before any of its binds resolves, so that nothing the
+// frame binds from then on becomes a mirror (oot2/backing.h, The raw path); the words reach its push constants, and every
+// raw-access stage of the frame asks again and gets the same. Frame 1 is two dispatches, frame 2 a draw.
+static void case_raw_first(void) {
+    open_fakes();
+    g_log_resolves = 1;
+    Rec *r = rec_begin(0);
+    PUT(r, OP_BIND_PROGRAM, program_raw(1));
+    PUT(r, OP_BIND_UBO, (p_bind_buf){.stage = 5, .index = 2, .addr = MIRROR + 0x7000, .size = 0x80});
+    PUT(r, OP_BIND_SSBO, (p_bind_buf){.stage = 5, .index = 1, .addr = VRAM + 0x300, .size = 0x20});
+    PUT(r, OP_DISPATCH, (p_dispatch){4, 2, 1, 0});
+    PUT(r, OP_DISPATCH, (p_dispatch){1, 1, 1, 0});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    r = rec_begin(1);
+    graphics_state(r);
+    PUT(r, OP_BIND_PROGRAM, program_raw(0));
+    PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .first = 0, .count = 3, .base_instance = 0, .instances = 1});
+    uint64_t h2 = rec_end(r);
+    vkr_submit(&h2, 1);
+    close_fakes();
+    printf("ok raw_first\n");
 }
 
 // A uniform range copied at submit and a GPU write over it in the same submission, in either order: the drop rule. The
@@ -1101,6 +1149,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "skip_render_off")) case_skip(1);
     else if (!strcmp(cs, "depth")) case_depth();
     else if (!strcmp(cs, "compute")) case_compute();
+    else if (!strcmp(cs, "raw_first")) case_raw_first();
     else if (!strcmp(cs, "conflict_read_first")) case_conflict(0);
     else if (!strcmp(cs, "conflict_write_first")) case_conflict(1);
     else if (!strcmp(cs, "transfers")) case_transfers();

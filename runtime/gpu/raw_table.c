@@ -54,6 +54,11 @@ static uint32_t block_of(const uint64_t *c, uint64_t n, uint64_t ch) {
 }
 
 int raw_layout(const BackingRun *runs, int n, RawLayout *l, char *why, size_t why_size) {
+    return raw_layout_span(runs, n, 0, 0, l, why, why_size);
+}
+
+int raw_layout_span(const BackingRun *runs, int n, uint32_t span_base, uint32_t span_count, RawLayout *l, char *why,
+                    size_t why_size) {
     memset(l, 0, sizeof *l);
     for (int i = 0; i < n; i++) {
         const BackingRun *r = &runs[i];
@@ -78,6 +83,15 @@ int raw_layout(const BackingRun *runs, int n, RawLayout *l, char *why, size_t wh
         return 0;
     }
     uint64_t base = nc ? c[0] : 0, count = nc ? c[nc - 1] - c[0] + 1 : 1;
+    if (span_count) {
+        if (nc && (c[0] < span_base || c[nc - 1] >= (uint64_t)span_base + span_count)) {
+            snprintf(why, why_size, "the chunks %#llx to %#llx of the runs reach outside the span %#llx+%#llx given",
+                     (ull)c[0], (ull)c[nc - 1], (ull)span_base, (ull)span_count);
+            free(c);
+            return 0;
+        }
+        base = span_base, count = span_count;
+    }
     free(c);
     if (base > UINT32_MAX || count > UINT32_MAX) {
         snprintf(why, why_size, "the span of chunks %#llx+%#llx does not fit the push words", (ull)base, (ull)count);

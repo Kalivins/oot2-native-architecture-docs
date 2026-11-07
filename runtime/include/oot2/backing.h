@@ -89,8 +89,15 @@
 // for its own resolves (the backing map study: one value, not a stamp on every backing), and so does pool_fini. Raw stores into
 // a mirror are known only from the table's store bits, after the work: the raw path writes those pages back at the
 // submission's end, before its value is done, as the descriptor path's writes are. A copy into a mirror the CPU wrote
-// while a raw-access submission is in flight waits for it first, so its write-back does not meet a newer copy; and a bind
-// that would replace a mirror the page table of the submission being recorded maps is a named fatal.
+// while a raw-access submission is in flight waits for it first, so its write-back does not meet a newer copy.
+// The table of a submission is read after the submission is recorded, and vk_raw.c rewrites it in place as the map moves
+// until then, so every raw access of the submission reaches the map as the submission leaves it. A mirror is a copy of its
+// pages, so a bind in such a submission never replaces one by a larger backing (two copies of the same bytes, one for what
+// was recorded before and one for what follows): it makes an import, never a mirror, and takes the pages it needs from the
+// mirrors it overlaps, which keep the part outside the bind (or go, when the bind covers all of them), waiting first for
+// the older raw-access submissions that may have stored into them; the import covers the committed run around the bind up
+// to the mirrors that remain. A mirror the submission already resolved where the bind takes pages, or wrote there on the
+// GPU, is a named fatal.
 //
 // Locking: one reader-writer lock. A resolve that finds its backing holds it shared; one that makes a backing holds it
 // exclusively, and imports are made under it. The mirrors' coherence state (their generations, the GPU writes not yet
@@ -216,6 +223,9 @@ void backing_cpu_synced(uint64_t fence);
 void backing_raw_begin(uint64_t value);
 // The map's version: it changes whenever a backing enters or leaves the map or a virtual pool's pages move.
 uint64_t backing_version(void);
+// The lowest address and the highest end of the pools in the map: 1, or 0 with none. A backing is inside a pool, so a table
+// whose span covers this range can take every backing the map makes later.
+int backing_pool_span(uint64_t *lo, uint64_t *hi);
 // A run of GPU addresses mapped to consecutive device memory: [lo, hi) at device address `address`, whose bytes stand for
 // guest memory from `guest` on (lo, except through a virtual pool: the physical pool's address), of one kind.
 typedef struct BackingRun {

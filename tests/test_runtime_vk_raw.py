@@ -13,8 +13,10 @@ tests/runtime/vk_raw_test.c says what each case checks: every backing kind (impo
 physical pool) read, written and counted by 32-bit atomics with the expected bytes after the fence, a raw store into a
 mirror reaching guest memory when its value is done, an unmapped address reading zero, dropping its write and named in
 the miss log, a chunk committed after its pool was mapped reachable by the next submission, the lowest and the highest
-mapped page resolving, and a range a finalized pool left and another pool took reached through the new pool. Each runs
-under the synchronization validation layer, which must report no error. The heap case measures what the invariant costs
+mapped page resolving, a range a finalized pool left and another pool took reached through the new pool, and a bind that
+grows past a mirror the table maps inside one submission of two raw-access stages (the table follows the map to the end
+of the recording, the stage recorded after the bind reaches the pages it committed, and the bound and the raw views of
+them are the same bytes). Each runs under the synchronization validation layer, which must report no error. The heap case measures what the invariant costs
 (resident bytes, VRAM, the invariant's pass and the table's build) over a heap of OOT2_RAW_HEAP_MIB MiB, 256 by default.
 
 Needs clang, the Vulkan SDK, the translator (py -3 tools/build_xlate.py) and a Vulkan device with every item the
@@ -46,7 +48,7 @@ TID_X = 33
 THREADS = 64
 TABLE = (1 << 39) + 0x4000_0000   # the pointer table: vk_raw_test.c, TABLE
 ENTRY = 32
-CASES = ("kinds", "miss", "commit", "reuse", "edges")
+CASES = ("kinds", "miss", "commit", "reuse", "edges", "grow")
 
 
 def mov_imm(rd: int, imm: int) -> bytes:

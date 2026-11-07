@@ -4,10 +4,11 @@
 // The page table's builder (runtime/gpu/raw_table.c) on its own, for tests/test_raw_table.py, which walks what it
 // writes with the translator's own raw-access helpers.
 //
-//   raw_table_test RUNS TABLE
+//   raw_table_test RUNS TABLE [SPAN_BASE SPAN_COUNT]
 //
 // RUNS is a text file, one run a line: lo hi address guest kind, the first four in hex, kind a BACKING_* number. The
-// program lays the runs out (raw_layout) and, when they fit, writes the table's words to TABLE (little-endian 32-bit
+// program lays the runs out (raw_layout, or raw_layout_span over the chunks SPAN_BASE to SPAN_BASE + SPAN_COUNT - 1 when
+// they are given, in decimal) and, when they fit, writes the table's words to TABLE (little-endian 32-bit
 // words) and prints
 //   layout <span_base> <span_count> <blocks> <words> <pages> <mirror_pages>
 //   mirror <slot> <address> <guest>        (one line per mirrored page, in the builder's order; hex)
@@ -32,8 +33,8 @@ void rt_fatal(const char *fmt, ...) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: raw_table_test RUNS TABLE\n");
+    if (argc != 3 && argc != 5) {
+        fprintf(stderr, "usage: raw_table_test RUNS TABLE [SPAN_BASE SPAN_COUNT]\n");
         return 2;
     }
     FILE *f = fopen(argv[1], "r");
@@ -54,7 +55,9 @@ int main(int argc, char **argv) {
 
     RawLayout l;
     char why[256];
-    if (!raw_layout(runs, n, &l, why, sizeof why)) {
+    uint32_t span_base = argc == 5 ? (uint32_t)strtoul(argv[3], NULL, 10) : 0;
+    uint32_t span_count = argc == 5 ? (uint32_t)strtoul(argv[4], NULL, 10) : 0;
+    if (!raw_layout_span(runs, n, span_base, span_count, &l, why, sizeof why)) {
         printf("refused %s\n", why);
         return 0;
     }

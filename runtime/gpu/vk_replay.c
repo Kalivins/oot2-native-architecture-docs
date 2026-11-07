@@ -633,7 +633,9 @@ typedef struct {
 } Set1;
 
 // A raw-access stage reaches memory through D15's page table: its address and span in push words 0 to 3, which every
-// stage of the draw shares (oot2/raw_table.h). The first one in a frame keeps the map's invariant (oot2/vk_raw.h).
+// stage of the draw shares (oot2/raw_table.h). The first one in a frame keeps the map's invariant (oot2/vk_raw.h), and
+// the draw or dispatch asks for the words before any of its binds resolves: from then on nothing the frame binds becomes
+// a mirror (oot2/backing.h, The raw path), and the table is rewritten at the frame's end to map what its binds made.
 static void raw_words(Set1 *s, const nvn_stage *stage) {
     if (!F.ops->raw) stop("stage %s reaches memory through raw addresses, and these ops give no page table", stage->key);
     F.ops->raw(F.value, s->push);
@@ -937,16 +939,16 @@ static int draw_prepare(int prim, uint32_t base_instance, VkBool32 *restart_out)
     stamp_targets();
     bind_set0(0);
     dyn_emit(topo, restart);
-    vertex_input(vb);
     Set1 s;
     memset(&s, 0, sizeof s);
+    if (vb->raw || fb->raw) raw_words(&s, vb->raw ? vs : fs);
+    vertex_input(vb);
     support(&s);
     uint8_t c0[VKN_BANK_BYTES];
     vkn_c0_graphics(c0, NVN_STAGE_VS, S.ssbo[ST_VS], base_instance);
     stage_resources(&s, ST_VS, vs, &P.ps[ST_VS], vb, c0);
     vkn_c0_graphics(c0, NVN_STAGE_PS, S.ssbo[ST_FS], base_instance);
     stage_resources(&s, ST_FS, fs, &P.ps[ST_FS], fb, c0);
-    if (vb->raw || fb->raw) raw_words(&s, vb->raw ? vs : fs);
     vkrec_PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_GRAPHICS, F.ops->graphics_layout, 1, s.n, s.w);
     vkrec_PushConstants(F.ops->graphics_layout, vkp_push_range(VKP_GRAPHICS).stageFlags, 0, VKP_PUSH_BYTES, s.push);
     vkr_report_draw();
@@ -1021,6 +1023,9 @@ static void dispatch(const uint32_t groups[3], uint64_t ind) {
     VkpStage cst = {cs->key, NULL, cs};
     bind_pipeline(1, F.ops->compute(&cst));
     bind_set0(1);
+    Set1 s;
+    memset(&s, 0, sizeof s);
+    if (b->raw) raw_words(&s, cs);
     uint8_t c0[VKN_BANK_BYTES];
     if (!vkn_c0_compute(c0, cs->ctl, cs->ctl_size, groups, (const uint32_t(*)[64])S.root[1], S.ubo[ST_CS], S.ssbo[ST_CS]))
         stop("stage %s: its control section's driver bank layout does not fit %u bytes", cs->key, VKN_BANK_BYTES);
@@ -1031,11 +1036,8 @@ static void dispatch(const uint32_t groups[3], uint64_t ind) {
         F.c0[ST_CS].valid = 0;   // a bank of its own: stage_resources finds these bytes and binds this copy
         patch = bank(&F.c0[ST_CS], c0, VKN_BANK_BYTES);
     }
-    Set1 s;
-    memset(&s, 0, sizeof s);
     support(&s);
     stage_resources(&s, ST_CS, cs, &P.ps[ST_CS], b, c0);
-    if (b->raw) raw_words(&s, cs);
     vkrec_PushDescriptorSetKHR(VK_PIPELINE_BIND_POINT_COMPUTE, F.ops->compute_layout, 1, s.n, s.w);
     vkrec_PushConstants(F.ops->compute_layout, vkp_push_range(VKP_COMPUTE).stageFlags, 0, VKP_PUSH_BYTES, s.push);
     F.draws++, g_stats.dispatches++;

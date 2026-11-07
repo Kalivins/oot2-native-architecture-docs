@@ -75,10 +75,15 @@ typedef struct Backing {
     uint64_t offset;
     Block *block;        // an extent's or a mirror's
     uint64_t part;       // the bytes it takes of its block
+    uint64_t part_at;    // where that part starts in the block (offset moves when a mirror is cut at its start)
     // A mirror's, under g_coh: every CPU write stamped up to synced is in it (none while fresh); sync_value is the
     // submission it was brought current for last (atomic, read without g_coh to skip a second sync).
     uint64_t synced, sync_value;
     int fresh;
+    // A mirror's: the hull of what submission res_value resolved in it, written by the thread recording that submission
+    // (one at a time) and read by it under the exclusive lock: the raw path's binds take pages from a mirror only where
+    // no earlier bind of their submission reached it (beside).
+    uint64_t res_value, res_lo, res_hi;
 } Backing;
 
 // A pool the CPU sees cut to the windows [k1, k2] one bind touched, and the imports binds made inside it.
@@ -135,6 +140,7 @@ static BackingStats g_cst;   // the coherence counters (g_coh)
 // the invariant saw (g_lock).
 static uint64_t g_version = 1;   // atomic, changed under g_lock exclusive
 static uint64_t g_raw_last;      // atomic
+static uint64_t g_raw_prev;      // atomic: the raw-access submission that began before the newest one (0: none)
 static uint64_t g_pools_version, g_fill_epoch, g_fill_pools;
 static int g_filled;
 
@@ -160,6 +166,18 @@ static uint64_t used_by(const Backing *b) { return __atomic_load_n(&b->last_use,
 static uint64_t raw_last(void) { return __atomic_load_n(&g_raw_last, __ATOMIC_ACQUIRE); }
 static uint64_t reach(const Backing *b) {
     uint64_t u = used_by(b), r = raw_last();
+    return u > r ? u : r;
+}
+
+// What an older submission can have written through the page table before the submission `value` (0: none, every issued
+// one counts): the newest raw-access submission that is not value's own. Their raw stores into a mirror reach guest memory
+// only when they are done, so a copy of those bytes waits for them.
+static uint64_t raw_before(uint64_t value) {
+    uint64_t r = raw_last();
+    return value && r >= value ? __atomic_load_n(&g_raw_prev, __ATOMIC_ACQUIRE) : r;
+}
+static uint64_t reach_before(const Backing *b, uint64_t value) {
+    uint64_t u = used_by(b), r = raw_before(value);
     return u > r ? u : r;
 }
 
@@ -357,7 +375,7 @@ static Backing *extent_new(Rec *r) {
     Backing *b = calloc(1, sizeof *b);
     if (!b) rt_fatal("gfx: vulkan: backing map: out of memory for an extent");
     *b = (Backing){.kind = BACKING_EXTENT, .gpu_lo = r->lo, .gpu_hi = r->lo + size, .mem = blk->mem, .offset = at,
-                   .block = blk, .part = size};
+                   .block = blk, .part = size, .part_at = at};
     g_st.extents++, g_st.extent_bytes += size;
     return b;
 }
@@ -372,7 +390,7 @@ static Backing *mirror_new(uint64_t lo, uint64_t hi) {
     Backing *b = calloc(1, sizeof *b);
     if (!b) rt_fatal("gfx: vulkan: backing map: out of memory for a mirror");
     *b = (Backing){.kind = BACKING_MIRROR, .gpu_lo = lo, .gpu_hi = hi, .mem = blk->mem, .offset = at, .block = blk,
-                   .part = size, .fresh = 1};
+                   .part = size, .part_at = at, .fresh = 1};
     g_mirrors = grow(g_mirrors, &g_mirrors_cap, g_nmirrors + 1, sizeof *g_mirrors, "the mirror list");
     g_mirrors[g_nmirrors++] = b;
     g_st.mirrors++, g_st.mirror_bytes += hi - lo, g_st.mirrors_made++;
@@ -423,7 +441,7 @@ static void retire(Freeing *f, int all) {
         Backing *b = d.b;
         if (b->kind != BACKING_IMPORT) {
             Block *blk = b->block;
-            block_give(blk, b->offset, b->part);
+            block_give(blk, b->part_at, b->part);
             if (!blk->used && (all || blk->dedicated || spare_count() > BACKING_SPARE_BLOCKS)) {
                 to_free(f, &blk->mem);
                 block_drop(blk);
@@ -767,7 +785,7 @@ static void no_run(void *ctx, uint64_t lo, uint64_t hi) { (void)ctx, (void)lo, (
 // them in the mirror, and the write-back would then put the GPU's page over the CPU's newer bytes in guest memory. When
 // the CPU wrote m since it was current, wait for that submission first. g_coh held, dropped while waiting.
 static void raw_stores_wait(Backing *m, uint64_t value) {
-    uint64_t r = raw_last();
+    uint64_t r = raw_before(value);   // not value's own: a raw-access submission waits for the ones before it
     if (m->fresh || !r || r >= value || r <= gpu_sync_done() || r > gpu_sync_issued()) return;
     if (pagegen_scan(m->gpu_lo, m->gpu_hi) == UINT64_MAX) return;   // mirror_bring stops by name
     if (!pagegen_runs(m->gpu_lo, m->gpu_hi, m->synced, no_run, NULL)) return;
@@ -843,9 +861,12 @@ static void replace_wait(const Cell *c, uint64_t rs, uint64_t re, uint64_t value
         const Backing *o = c->imp[i];
         if (o->gpu_hi <= rs || o->gpu_lo >= re) continue;
         // Raw-access submissions reach every backing their page table maps: their stores into a mirror are written
-        // back at their end, and those through an import land in the guest memory the new mirror copies.
-        uint64_t u = reach(o);
+        // back at their end, and those through an import land in the guest memory the new mirror copies. The submission
+        // being recorded is not waited for (it cannot be): its own raw stores go through the table it ends with.
+        uint64_t u = reach_before(o, value);
         if (value && __atomic_load_n(&o->written, __ATOMIC_ACQUIRE) == value) written_now(o->gpu_lo, o->gpu_hi, value, rs, re);
+        // A bind in a raw-access submission takes pages from a mirror in beside() and leaves none in its run, so this
+        // stands only as a check on that: a mirror the table maps is never replaced by a larger backing.
         if (value && o->kind == BACKING_MIRROR && raw_last() == value)
             rt_fatal("gfx: vulkan: backing map: the mirror [%#llx, %#llx), which the page table of raw-access "
                      "submission %llu maps, would be replaced by a backing over [%#llx, %#llx) while that submission is "
@@ -856,6 +877,65 @@ static void replace_wait(const Cell *c, uint64_t rs, uint64_t re, uint64_t value
     if (wait <= gpu_sync_done()) return;
     g_st.replace_waits++;
     wait_value(wait);
+}
+
+// ---------- a bind in a raw-access submission
+// The page table of a raw-access submission is read after the submission is recorded, and is rewritten as the map moves
+// until then (vk_raw.c), so every raw access of the submission reaches the map as the submission leaves it. A mirror is a
+// copy of its pages, though: a bind that gave its pages to a larger backing would leave two copies of the same bytes, one
+// for what the submission recorded before and one for what it records after. So a bind in such a submission never
+// replaces a mirror by a larger backing. It takes the pages it needs from the mirrors it overlaps (a mirror keeps the part
+// outside the bind, or is dropped when the bind covers all of it), and its own backing, an import, covers the run of
+// committed pages around the bind up to the mirrors that remain: no page has two backings. The bytes a mirror gives up
+// are the CPU's view in the import once every older submission that wrote them is done, which is waited for here. A
+// mirror this submission already resolved where the bind takes pages, or wrote there on the GPU, is a named fatal: what
+// was recorded before reaches the mirror's copy, and what follows reaches the import's.
+// *rs and *re, the committed run around the pages [plo, phi) of the bind, are narrowed to what the new backing covers.
+// g_lock exclusive.
+static void beside(Cell *c, uint64_t plo, uint64_t phi, uint64_t *rs, uint64_t *re, uint64_t value) {
+    int gave = 0;
+    for (int i = 0; i < c->nimp; i++) {
+        Backing *m = c->imp[i];
+        if (m->kind != BACKING_MIRROR || m->gpu_hi <= *rs || m->gpu_lo >= *re) continue;
+        if (m->gpu_hi <= plo) {   // below the bind: the new backing starts where the mirror ends
+            if (m->gpu_hi > *rs) *rs = m->gpu_hi;
+            continue;
+        }
+        if (m->gpu_lo >= phi) {   // above it
+            if (m->gpu_lo < *re) *re = m->gpu_lo;
+            continue;
+        }
+        uint64_t cl = m->gpu_lo > plo ? m->gpu_lo : plo, ch = m->gpu_hi < phi ? m->gpu_hi : phi;   // what the bind takes
+        if (m->res_value == value && m->res_lo < ch && cl < m->res_hi)
+            rt_fatal("gfx: vulkan: backing map: the mirror [%#llx, %#llx) was bound over [%#llx, %#llx) earlier in "
+                     "raw-access submission %llu, and a bind over [%#llx, %#llx) now takes pages of it for an import: "
+                     "what was recorded before would reach the mirror's copy of the bytes the rest reaches in the "
+                     "import", (ull)m->gpu_lo, (ull)m->gpu_hi, (ull)m->res_lo, (ull)m->res_hi, (ull)value, (ull)cl,
+                     (ull)ch);
+        gave = 1;
+        if (m->gpu_lo < plo) {   // it keeps its start; the new backing starts at the bind's first page
+            g_st.mirror_bytes -= m->gpu_hi - plo;
+            m->gpu_hi = plo;
+            if (*rs < plo) *rs = plo;
+        } else if (m->gpu_hi > phi) {   // it keeps its end
+            g_st.mirror_bytes -= phi - m->gpu_lo;
+            m->offset += phi - m->gpu_lo;
+            m->gpu_lo = phi;
+            if (*re > phi) *re = phi;
+        } else {   // the bind covers it all: it goes now, and is freed once the raw-access submission is done
+            defer(m);
+            memmove(c->imp + i, c->imp + i + 1, (size_t)(c->nimp - i - 1) * sizeof *c->imp);
+            c->nimp--;
+            i--;
+        }
+    }
+    if (!gave) return;
+    changed();
+    uint64_t older = raw_before(value);   // raw stores into a mirror reach guest memory when their submission is done
+    if (older > gpu_sync_done()) {
+        g_st.replace_waits++;
+        wait_value(older);
+    }
 }
 
 // ---------- the resolver
@@ -898,6 +978,16 @@ static Backing *find(uint64_t *addr, uint64_t size, Rec **rec, Rec **virt) {
     return r ? backing_in(r, *addr, size) : NULL;
 }
 
+// What submission value resolved in mirror m, as a hull (beside). Only the thread recording value gets here with it.
+static void note_resolved(Backing *m, uint64_t addr, uint64_t size, uint64_t value) {
+    if (m->res_value != value) {
+        m->res_value = value, m->res_lo = addr, m->res_hi = addr + size;
+        return;
+    }
+    if (addr < m->res_lo) m->res_lo = addr;
+    if (addr + size > m->res_hi) m->res_hi = addr + size;
+}
+
 // The backing of [addr, addr + size) when the map holds one, stamped, and a mirror brought current; g_lock, shared at
 // least.
 static int lookup(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out) {
@@ -906,7 +996,10 @@ static int lookup(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out)
     if (!b) return 0;
     if (v) stamp(&v->last_use, value);
     stamp(&r->last_use, value), stamp(&b->last_use, value);
-    if (b->kind == BACKING_MIRROR) mirror_use(b, value);
+    if (b->kind == BACKING_MIRROR) {
+        if (value) note_resolved(b, addr, size, value);
+        mirror_use(b, value);
+    }
     fill(out, b, addr);
     return 1;
 }
@@ -951,10 +1044,14 @@ static void make(uint64_t addr, uint64_t size, uint64_t value) {
     Cell *c = cell_get(r, addr / WINDOW, (addr + size - 1) / WINDOW, 1);
     uint64_t rs, re;
     committed_run(c->lo, c->hi, plo, phi, &rs, &re);
-    // The page table of the raw-access submission being recorded maps these pages to what backs them now: a mirror
-    // made here would give its binds another copy than its raw accesses. An import aliases the guest memory the table's
-    // own import reaches; a later submission's bind can still make the mirror.
-    if (kind == BACKING_MIRROR && value && raw_last() == value) kind = BACKING_IMPORT;
+    // In the raw-access submission being recorded, the page table is rewritten at its end to map what this bind makes, so
+    // its raw accesses reach it however early they were recorded. That is the same copy as the earlier binds' only where
+    // the new backing aliases the guest's memory, as an import does: a mirror made here would be filled in the prologue,
+    // before the submission's own writes through the imports it replaces. A later submission's bind can still make it.
+    if (value && raw_last() == value) {
+        if (kind == BACKING_MIRROR) kind = BACKING_IMPORT;
+        beside(c, plo, phi, &rs, &re, value);
+    }
     replace_wait(c, rs, re, value, kind == BACKING_MIRROR);
     Backing *b = kind == BACKING_MIRROR ? mirror_admit(r, rs, re) : NULL;
     if (!b) {
@@ -1008,11 +1105,11 @@ void backing_gpu_wrote(uint64_t addr, uint64_t size, uint64_t value) {
 
 void backing_sync_mirrors(uint64_t value) {
     if (!g_open || !value) return;
+    // Not a resolve: it leaves each mirror's last_use alone, since a bind of the submission that took pages from one in
+    // beside() asks whether the submission resolved it. A mirror's retirement waits for the raw-access submission anyway
+    // (reach), which is the reason a stamp would have had.
     plat_lock_shared(&g_lock);
-    for (int i = 0; i < g_nmirrors; i++) {
-        stamp(&g_mirrors[i]->last_use, value);
-        mirror_use(g_mirrors[i], value);
-    }
+    for (int i = 0; i < g_nmirrors; i++) mirror_use(g_mirrors[i], value);
     plat_unlock_shared(&g_lock);
 }
 
@@ -1229,6 +1326,8 @@ void backing_raw_begin(uint64_t value) {
                  g_open ? "outside a submission" : "before the map is open");
     uint64_t e = rt_mem_ready() ? rt_mem_commit_epoch() : 0;
     plat_lock(&g_lock);
+    uint64_t before = g_raw_last;
+    if (before && before < value) __atomic_store_n(&g_raw_prev, before, __ATOMIC_RELEASE);   // the one before this
     stamp(&g_raw_last, value);
     g_st.raw_begins++;
     if (!g_filled || e != g_fill_epoch || g_pools_version != g_fill_pools) {
@@ -1246,6 +1345,20 @@ void backing_raw_begin(uint64_t value) {
 }
 
 uint64_t backing_version(void) { return __atomic_load_n(&g_version, __ATOMIC_ACQUIRE); }
+
+int backing_pool_span(uint64_t *lo, uint64_t *hi) {
+    int any = 0;
+    *lo = *hi = 0;
+    plat_lock_shared(&g_lock);
+    for (int i = 0; i < g_index.n; i++) {
+        const Rec *r = (const Rec *)g_index.e[i].key;
+        if (!any || r->lo < *lo) *lo = r->lo;
+        if (!any || r->hi > *hi) *hi = r->hi;
+        any = 1;
+    }
+    plat_unlock_shared(&g_lock);
+    return any;
+}
 
 typedef struct RunList { BackingRun *r; int n, cap; } RunList;
 
@@ -1356,7 +1469,7 @@ void backing_open(const BackingOps *ops) {
     plat_mutex_unlock(&g_coh);
     g_resolves = g_misses = 0;
     g_seen_epoch = rt_mem_ready() ? rt_mem_commit_epoch() : 0;
-    g_raw_last = 0, g_filled = 0, g_pools_version = g_fill_pools = g_fill_epoch = 0;
+    g_raw_last = g_raw_prev = 0, g_filled = 0, g_pools_version = g_fill_pools = g_fill_epoch = 0;
     g_open = 1;
     g_bt_stop = 0, g_bt_want = 1, g_bt_running = 1;
     g_bt = plat_thread_start(bt_main, NULL, BLOCK_THREAD_STACK);

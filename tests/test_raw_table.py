@@ -89,13 +89,15 @@ class RawTableBuilderTest(Harness):
         self.load_fn = next(f for f in helpers if len(f["params"]) == 2)
         self.store_fn = next(f for f in helpers if len(f["params"]) == 3)
 
-    def build(self, runs) -> tuple[str, dict, dict, list]:
-        """The builder's output for runs: its first line, the push words, the table's nonzero words by device address and
-        the mirrored pages (slot, device address, guest address)."""
+    def build(self, runs, span=None) -> tuple[str, dict, dict, list]:
+        """The builder's output for runs, over the span (base chunk, chunk count) when one is given: its first line, the
+        push words, the table's nonzero words by device address and the mirrored pages (slot, device address, guest
+        address)."""
         listing = self.dir / "runs.txt"
         listing.write_text("".join(f"{lo:x} {hi:x} {a:x} {g:x} {k}\n" for lo, hi, a, g, k in runs), encoding="ascii")
         table = self.dir / "table.bin"
-        done = subprocess.run([str(self.exe), str(listing), str(table)], capture_output=True, text=True, timeout=60)
+        done = subprocess.run([str(self.exe), str(listing), str(table), *(str(x) for x in (span or ()))],
+                              capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         lines = done.stdout.splitlines()
         if lines[0].startswith("refused"):
@@ -214,6 +216,31 @@ class RawTableBuilderTest(Harness):
         self.assertEqual(mirrors, [])
         self.assertEqual(self.load(push, table, {}, 0x1000), 0)
         self.assertEqual(self.misses(table), [(0x1000, A["MissKindLoad"], A["MissReasonNoChunk"])])
+
+    def test_a_span_the_caller_gave_is_the_tables(self):
+        # A table rewritten after stages took its push words keeps their span, wider than the runs' own when pools lie
+        # beyond the runs: the header and the push words say it, every page reads as before, and an address the runs' own
+        # span would have called outside is a chunk nothing maps.
+        chunks = {a // CHUNK for a in page_map(RUNS)}
+        base, count = min(chunks) - 5, max(chunks) - min(chunks) + 1 + 12
+        first, push, table, _ = self.build(RUNS, (base, count))
+        self.assertEqual(first.split()[1:3], [str(base), str(count)])
+        self.assertEqual([self.word(table, A[k]) for k in ("HeaderSpanBase", "HeaderSpanCount", "HeaderLeafBlocks")],
+                         [base, count, len(chunks)])
+        pages = page_map(RUNS)
+        data = {address + PROBE: 0x5000 + n for n, (address, _, _) in enumerate(pages.values())}
+        for guest, (address, _, _) in pages.items():
+            with self.subTest(guest=hex(guest)):
+                self.assertEqual(self.load(push, table, data, guest + PROBE), data[address + PROBE])
+        below = (min(chunks) - 2) * CHUNK
+        self.assertEqual(self.load(push, table, data, below + PROBE), 0)
+        self.assertEqual(self.misses(table), [(below + PROBE, A["MissKindLoad"], A["MissReasonNoChunk"])])
+
+    def test_a_run_outside_the_span_given_is_refused_by_name(self):
+        chunks = {a // CHUNK for a in page_map(RUNS)}
+        first, *_ = self.build(RUNS, (min(chunks), max(chunks) - min(chunks)))   # one chunk short at the top
+        self.assertTrue(first.startswith("refused"), first)
+        self.assertIn("reach outside the span", first)
 
     def test_the_builder_refuses_by_name(self):
         lo = 0x10_0000_0000

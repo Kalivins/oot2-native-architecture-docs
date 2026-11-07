@@ -17,6 +17,7 @@
 #include "plat.h"
 
 #define PAGE 0x1000ull
+#define RAW_COPY_ROOM (4ull << 20)   // what a copy has beyond its table for the map to grow in a submission (refresh)
 #define OUT_HEAD 16u   // raw_writeback.comp: the table's head is copied from this word of the out buffer
 #define HEAD_WORDS (RAW_MISS_LOG_WORD + RAW_MISS_ENTRIES * RAW_MISS_ENTRY_WORDS)
 #define PAGE_WORDS 1024u
@@ -35,6 +36,7 @@ typedef struct Copy {
     Mem m;
     uint64_t version;    // the map's version it was built at; 0 never built
     uint64_t last_use;   // the newest submission that read it
+    uint64_t prev_use;   // the submission that read it before last_use did, when last_use took it as it stood (else 0)
     RawLayout l;
     uint64_t pages_at;   // byte offset of the mirrored pages' list
     uint64_t *guest;     // the guest address of each mirrored page (host memory)
@@ -166,44 +168,110 @@ static void *grow_to(void *p, uint64_t *cap, uint64_t need, const char *what) {
     return q;
 }
 
-// Build the table of the map as it is now into a free copy, which becomes the current one.
+// Runs reduced to the chunks span_base to span_base + span_count - 1: a run is cut at the span's ends, and one wholly outside
+// it goes (a pool made after the table was first built, which no pointer the submission recorded can reach). The count.
+static int clip_runs(BackingRun *runs, int n, uint32_t span_base, uint32_t span_count) {
+    uint64_t lo = (uint64_t)span_base << RAW_CHUNK_LOG2, hi = (uint64_t)(span_base + span_count) << RAW_CHUNK_LOG2;
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        BackingRun r = runs[i];
+        if (r.hi <= lo || r.lo >= hi) continue;
+        if (r.lo < lo) r.address += lo - r.lo, r.guest += lo - r.lo, r.lo = lo;
+        if (r.hi > hi) r.hi = hi;
+        runs[k++] = r;
+    }
+    return k;
+}
+
+// The map as it is now, laid out over the span of every pool in it, or over the given one (span_count not 0), and written
+// into the host image, the mirrored pages and their guest addresses: the layout, and the version the map was read at.
+static void make_image(uint32_t span_base, uint32_t span_count, RawLayout *l, uint64_t *version) {
+    BackingRun *runs;
+    int n = backing_raw_runs(&runs, version);
+    uint64_t plo, phi;
+    if (!span_count && backing_pool_span(&plo, &phi) && phi > plo) {
+        span_base = (uint32_t)(plo >> RAW_CHUNK_LOG2);
+        span_count = (uint32_t)(((phi - 1) >> RAW_CHUNK_LOG2) - span_base + 1);
+    }
+    if (span_count) n = clip_runs(runs, n, span_base, span_count);
+    char why[256];
+    if (!raw_layout_span(runs, n, span_base, span_count, l, why, sizeof why))
+        rt_fatal("gfx: vulkan: raw path: the page table: %s", why);
+    g_image = grow_to(g_image, &g_image_bytes, (l->words * 4 + 15) & ~15ull, "the page table's image");
+    g_pages = grow_to(g_pages, &g_pages_cap, (l->mirror_pages + 1) * sizeof *g_pages, "the mirrored pages");
+    g_guest_scratch = grow_to(g_guest_scratch, &g_guest_cap, (l->mirror_pages + 1) * sizeof *g_guest_scratch,
+                              "the mirrored pages");
+    raw_write(runs, n, l, g_image, g_pages, g_guest_scratch);
+    free(runs);
+}
+
+static uint64_t table_bytes_of(const RawLayout *l) { return (l->words * 4 + 15) & ~15ull; }
+static uint64_t copy_bytes_of(const RawLayout *l) { return table_bytes_of(l) + l->mirror_pages * sizeof(RawMirrorPage); }
+
+// The host image into copy c, which no submission in flight reads, and what the copy says about it.
+static void store(Copy *c, const RawLayout *l, uint64_t version) {
+    uint64_t table_bytes = table_bytes_of(l);
+    memcpy(c->m.map, g_image, (size_t)l->words * 4);
+    memcpy(c->m.map + table_bytes, g_pages, (size_t)(l->mirror_pages * sizeof *g_pages));
+    free(c->guest);
+    c->guest = malloc((size_t)(l->mirror_pages + 1) * sizeof *c->guest);
+    if (!c->guest) rt_fatal("gfx: vulkan: raw path: out of memory for %llu mirrored pages", (ull)l->mirror_pages);
+    memcpy(c->guest, g_guest_scratch, (size_t)l->mirror_pages * sizeof *c->guest);
+    c->l = *l, c->version = version, c->pages_at = table_bytes;
+}
+
+static void count_build(const RawLayout *l, uint64_t ns, int refresh) {
+    plat_mutex_lock(&g_lock);
+    if (refresh) g_st.refreshes++, g_st.refresh_ns += ns;
+    else g_st.builds++, g_st.build_ns += ns;
+    if (ns > g_st.build_ns_max) g_st.build_ns_max = ns;
+    g_st.table_bytes = l->words * 4, g_st.pages = l->pages, g_st.mirror_pages = l->mirror_pages;
+    g_st.blocks = l->blocks, g_st.span_count = l->span_count;
+    plat_mutex_unlock(&g_lock);
+}
+
+// Build the table of the map as it is now into a free copy, which becomes the current one. The copy has room beyond the
+// table for the map to grow while the submission that takes it is recorded (refresh).
 static void build(void) {
     uint64_t t0 = plat_now_ns(), version;
-    BackingRun *runs;
-    int n = backing_raw_runs(&runs, &version);
     RawLayout l;
-    char why[256];
-    if (!raw_layout(runs, n, &l, why, sizeof why)) rt_fatal("gfx: vulkan: raw path: the page table: %s", why);
-    uint64_t table_bytes = (l.words * 4 + 15) & ~15ull, bytes = table_bytes + l.mirror_pages * sizeof(RawMirrorPage);
-    g_image = grow_to(g_image, &g_image_bytes, table_bytes, "the page table's image");
-    g_pages = grow_to(g_pages, &g_pages_cap, (l.mirror_pages + 1) * sizeof *g_pages, "the mirrored pages");
-    g_guest_scratch = grow_to(g_guest_scratch, &g_guest_cap, (l.mirror_pages + 1) * sizeof *g_guest_scratch,
-                              "the mirrored pages");
-    raw_write(runs, n, &l, g_image, g_pages, g_guest_scratch);
-    free(runs);
+    make_image(0, 0, &l, &version);
+    uint64_t bytes = copy_bytes_of(&l), room = bytes / 4 > RAW_COPY_ROOM ? bytes / 4 : RAW_COPY_ROOM;
     Copy *c = copy_free();
-    if (c->m.size < bytes) {
+    if (c->m.size < bytes + room) {
         mem_free(&c->m);
-        c->m = mem_new(bytes + bytes / 4, k_table, 2, "a copy of the page table");
+        c->m = mem_new(bytes + room, k_table, 2, "a copy of the page table");
         plat_mutex_lock(&g_lock);
         g_st.copies++;
         plat_mutex_unlock(&g_lock);
     }
-    memcpy(c->m.map, g_image, (size_t)l.words * 4);
-    memcpy(c->m.map + table_bytes, g_pages, (size_t)(l.mirror_pages * sizeof *g_pages));
-    free(c->guest);
-    c->guest = malloc((size_t)(l.mirror_pages + 1) * sizeof *c->guest);
-    if (!c->guest) rt_fatal("gfx: vulkan: raw path: out of memory for %llu mirrored pages", (ull)l.mirror_pages);
-    memcpy(c->guest, g_guest_scratch, (size_t)l.mirror_pages * sizeof *c->guest);
-    c->l = l, c->version = version, c->pages_at = table_bytes;
+    store(c, &l, version);
+    c->prev_use = 0;
     g_current = c;
-    uint64_t ns = plat_now_ns() - t0;
-    plat_mutex_lock(&g_lock);
-    g_st.builds++, g_st.build_ns += ns;
-    if (ns > g_st.build_ns_max) g_st.build_ns_max = ns;
-    g_st.table_bytes = l.words * 4, g_st.pages = l.pages, g_st.mirror_pages = l.mirror_pages;
-    g_st.blocks = l.blocks, g_st.span_count = l.span_count;
-    plat_mutex_unlock(&g_lock);
+    count_build(&l, plat_now_ns() - t0, 0);
+}
+
+// The map moved while the submission was recorded (a bind made an import, a pool came or went), and the stages it
+// recorded took the copy's address and span as they were: write the map as it is now into the same copy, over the same
+// span, before the submission is submitted. The copy may be read by an earlier submission still in flight, which is
+// waited for first (the copies are shared while the map holds still, so this is the rare case, not the frame's cost).
+static void refresh(Copy *c) {
+    uint64_t t0 = plat_now_ns(), version;
+    RawLayout l;
+    make_image(c->l.span_base, c->l.span_count, &l, &version);
+    uint64_t bytes = copy_bytes_of(&l);
+    if (bytes > c->m.size)
+        rt_fatal("gfx: vulkan: raw path: the page table grew to %llu KiB while submission %llu was recorded, past the "
+                 "%llu KiB of its copy: the stages it recorded already hold the copy's address", (ull)(bytes >> 10),
+                 (ull)c->last_use, (ull)(c->m.size >> 10));
+    if (c->prev_use > gpu_sync_done()) {
+        plat_mutex_lock(&g_lock);
+        g_st.refresh_waits++;
+        plat_mutex_unlock(&g_lock);
+        wait_for(c->prev_use);
+    }
+    store(c, &l, version);
+    count_build(&l, plat_now_ns() - t0, 1);
 }
 
 void gpu_vk_raw_begin(uint64_t value, uint32_t push[4]) {
@@ -212,6 +280,7 @@ void gpu_vk_raw_begin(uint64_t value, uint32_t push[4]) {
                               (ull)g_value);
         backing_raw_begin(value);
         if (!g_current || g_current->version != backing_version()) build();
+        else g_current->prev_use = g_current->last_use;
         g_current->last_use = value;
         g_value = value;
         g_push[RAW_PUSH_TABLE_LOW] = (uint32_t)g_current->m.address;
@@ -319,6 +388,7 @@ void gpu_vk_raw_end(uint64_t value) {
     if (!g_value || g_value != value) return;
     g_value = 0;
     Copy *c = g_current;
+    if (c->version != backing_version()) refresh(c);   // the stages took the copy's address, so it follows the map here
     uint32_t slots = c->l.mirror_pages < RAW_WRITEBACK_PAGES ? (uint32_t)c->l.mirror_pages : RAW_WRITEBACK_PAGES;
     Out *o = out_take(slots);
     Done *d = malloc(sizeof *d);
