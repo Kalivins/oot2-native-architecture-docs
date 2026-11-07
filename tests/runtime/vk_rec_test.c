@@ -408,6 +408,18 @@ static void VKAPI_CALL fake_EndRendering(VkCommandBuffer cb) {
     ser_op(&g_got, VKR_EndRendering);
 }
 
+static void ser_Clear(Buf *b, uint32_t na, const VkClearAttachment *a, uint32_t nr, const VkClearRect *r) {
+    ser_op(b, VKR_ClearAttachments);
+    BPUT(b, na), BPUT(b, nr);
+    bput(b, a, sizeof *a * na);
+    bput(b, r, sizeof *r * nr);
+}
+static void VKAPI_CALL fake_ClearAttachments(VkCommandBuffer cb, uint32_t na, const VkClearAttachment *a, uint32_t nr,
+                                             const VkClearRect *r) {
+    CHECK(cb == FAKE_CB);
+    ser_Clear(&g_got, na, a, nr, r);
+}
+
 // The markers the recorder set, and the draw each preceded.
 #define MAX_MARKERS 4096
 static uint64_t g_marker[MAX_MARKERS], g_last_marker;
@@ -574,6 +586,13 @@ static void send_customs(uint64_t seed) {
     memset(&none, 0xEE, sizeof none);
     ser_op(&g_want, VKR_EndRendering);
     vkrec_EndRendering();
+
+    static VkClearAttachment cl[2];
+    static VkClearRect cr[3];
+    fill_bytes(cl, sizeof cl, seed + 5), fill_bytes(cr, sizeof cr, seed + 6);
+    ser_Clear(&g_want, 2, cl, 3, cr);
+    vkrec_ClearAttachments(2, cl, 3, cr);
+    memset(cl, 0xEE, sizeof cl), memset(cr, 0xEE, sizeof cr);
 }
 
 static void case_pack_roundtrip(void) {
@@ -1116,6 +1135,7 @@ static void set_state(void) {
     E_CALL(SetRasterizerDiscardEnable, VK_FALSE);
     E_CALL(SetPolygonModeEXT, VK_POLYGON_MODE_FILL);
     E_CALL(SetDepthClampEnableEXT, VK_FALSE);
+    E_CALL(SetDepthClipNegativeOneToOneEXT, VK_FALSE);
     E_CALL(SetVertexInputEXT, 0, NULL, 0, NULL);   // the draws read no vertex buffer
     E_CALL(SetPrimitiveTopology, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     E_CALL(SetPrimitiveRestartEnable, VK_FALSE);

@@ -35,6 +35,7 @@
 #include "oot2/gpu_vk.h"
 #include "oot2/memory.h"
 #include "oot2/runtime.h"
+#include "oot2/vk_rec.h"
 #include "plat.h"
 
 #define CHECK(cond)                                                                    \
@@ -751,7 +752,8 @@ static void case_loss_submit(const char *dir) {
     gfx_vulkan_backend.finish();
     fake_queries();
     vkQueueSubmit2 = lost_submit;
-    gfx_vulkan_backend.submit(&handle, 1);
+    gfx_vulkan_backend.submit(&handle, 1);   // the recorder thread submits the frame, and stops there
+    vkrec_idle();
     printf("submit returned after the loss\n");
 }
 

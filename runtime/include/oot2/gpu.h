@@ -88,9 +88,3 @@ void gpu_set_report_folder(const char *dir);
 // (the folder is made when missing; -2, -3 and on are added to a name already taken). 1 written, with the text file's
 // path in path; 0 when it could not be, with what failed in path.
 int gpu_write_report(const char *dir, const char *text, const void *bin, size_t size, char *path, size_t path_size);
-
-// ---- what the Vulkan back end replays (vk_submit.c)
-// The check the Vulkan back end makes of recording `index` of submission `value` (a command handle, oot2/nvn_obj.h)
-// while it replays no op: the recording must be whole (OP_BEGIN first, sizes 8-byte aligned, OP_END last, no call or
-// jump) and hold no record but those two, or the run stops by name with the op it holds.
-void gpu_check_recording(uint64_t value, int index, uint64_t handle);

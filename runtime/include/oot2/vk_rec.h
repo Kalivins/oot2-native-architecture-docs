@@ -74,7 +74,8 @@ struct nvn_stage;
       VkStencilFaceFlags f; uint32_t v;)                                                                               \
     F(SetPolygonModeEXT, (VkPolygonMode v), (v), (cb, a->v), VkPolygonMode v;)                                         \
     F(SetDepthClampEnableEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)                                              \
-    F(SetLogicOpEnableEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)
+    F(SetLogicOpEnableEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)                                                 \
+    F(SetDepthClipNegativeOneToOneEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)
 
 #define VKREC_DRAWS(D)                                                                                                 \
     D(Draw, 'd', (uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi), (vc, ic, fv, fi),                               \
@@ -96,7 +97,8 @@ struct nvn_stage;
 #define VKREC_CUSTOM(C)                                                                                                \
     C(BindDescriptorSets) C(PushDescriptorSetKHR) C(PushConstants) C(BindVertexBuffers2) C(SetViewportWithCount)       \
     C(SetScissorWithCount) C(SetVertexInputEXT) C(SetColorBlendEnableEXT) C(SetColorBlendEquationEXT)                  \
-    C(SetColorWriteMaskEXT) C(SetBlendConstants) C(PipelineBarrier2) C(BeginRendering) C(EndRendering)
+    C(SetColorWriteMaskEXT) C(SetBlendConstants) C(PipelineBarrier2) C(BeginRendering) C(EndRendering)               \
+    C(ClearAttachments)
 
 // ---- the calls the recorder makes: the device's entry points, or a test's
 typedef struct VkRecCalls {
@@ -134,8 +136,11 @@ typedef struct VkRecOpen {
 // Start the recorder thread (at the priority architecture 6.1 gives it). Once; the device must be open when the
 // defaults are used. A named fatal when it cannot start.
 void vkrec_open(const VkRecOpen *o);
-// Wait for every frame handed over to be submitted, stop the thread and free the ring (a frame must not be open).
+// Wait for every frame handed over to be submitted, stop the thread and free the ring (a frame must not be open). Does
+// nothing when the recorder is not open.
 void vkrec_close(void);
+// 1 between vkrec_open and vkrec_close (the replay opens the recorder with its first frame when no one has).
+int vkrec_is_open(void);
 
 // ---- the replay's side
 // Wait for a free frame (a frame two before this one is done), then begin a frame of kind GPU_VK_REPLAY or
@@ -182,6 +187,8 @@ void vkrec_SetBlendConstants(const float c[4]);
 void vkrec_PipelineBarrier2(const VkDependencyInfo *info);
 void vkrec_BeginRendering(const VkRenderingInfo *info);
 void vkrec_EndRendering(void);
+void vkrec_ClearAttachments(uint32_t nattachments, const VkClearAttachment *attachments, uint32_t nrects,
+                            const VkClearRect *rects);
 
 // ---- breadcrumbs
 typedef struct VkRecCrumb {

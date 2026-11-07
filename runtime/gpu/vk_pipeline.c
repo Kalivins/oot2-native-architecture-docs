@@ -134,6 +134,8 @@ void vkp_module(const VkpStage *s, int expect, VkpModule *out) {
     out->code = e.module;
     out->bytes = e.module_bytes;
     out->from = from;
+    out->description = e.description;
+    out->description_bytes = e.description_bytes;
 }
 
 // ---------- the table

@@ -318,6 +318,24 @@ void vkrec_EndRendering(void) {
     vkrec_publish();
 }
 
+// Clears inside a pass: the attachments, then the rectangles.
+typedef struct {
+    uint32_t na, nr;
+    const VkClearAttachment *a;
+    const VkClearRect *r;
+} A_ClearAttachments;
+void vkrec_ClearAttachments(uint32_t nattachments, const VkClearAttachment *attachments, uint32_t nrects,
+                            const VkClearRect *rects) {
+    size_t ab = sizeof *attachments * nattachments, rb = sizeof *rects * nrects;
+    A_ClearAttachments *a = vkrec_put(VKR_ClearAttachments, sizeof *a + A8(ab) + A8(rb));
+    uint8_t *at = (uint8_t *)(a + 1);
+    a->na = nattachments;
+    a->nr = nrects;
+    a->a = tail_copy(&at, attachments, ab);
+    a->r = tail_copy(&at, rects, rb);
+    vkrec_publish();
+}
+
 // ---------- the executor
 void vkrec_exec(const VkRecExec *x, uint32_t op, const void *p) {
     const VkRecCalls *calls = x->calls;
@@ -408,6 +426,11 @@ void vkrec_exec(const VkRecExec *x, uint32_t op, const void *p) {
         return;
     }
     case VKR_EndRendering: calls->EndRendering(cb); return;
+    case VKR_ClearAttachments: {
+        const A_ClearAttachments *a = p;
+        calls->ClearAttachments(cb, a->na, a->a, a->nr, a->r);
+        return;
+    }
     default: rt_fatal("gfx: vulkan: recorder: a packet of operation %u that no command has", op);
     }
 }

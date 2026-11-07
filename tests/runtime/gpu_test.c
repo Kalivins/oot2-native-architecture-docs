@@ -3,8 +3,8 @@
 //
 // Contract tests of the Vulkan back end's module (runtime/gpu, oot2/gpu.h, oot2/gpu_vk.h) that need no GPU: the
 // back-end choice, the runtime's embedded shaders and Volk; the timeline and its completion thread over a test's
-// counter; the settings and the choice of a device from synthetic candidates; the device-loss report's file; the check
-// of a recording the back end cannot replay yet. Driven by tests/test_runtime_gpu.py: `gpu_test <case> [folder]`. Each
+// counter; the settings and the choice of a device from synthetic candidates; the device-loss report's file. Driven by
+// tests/test_runtime_gpu.py: `gpu_test <case> [folder]`. Each
 // case runs in its own process. A passing case prints "ok <case>"; a failing case must end in one named fatal, which the
 // driver checks. Nothing here needs a Vulkan device: continuous integration has none (the device's own tests are
 // tests/runtime/vk_test.c).
@@ -364,38 +364,6 @@ static void case_report_write(const char *dir) {
     printf("ok report_write\n");
 }
 
-// ---------- the check of a recording
-static uint64_t recording(uint8_t *buf, const uint32_t *ops, const uint32_t *sizes, int n) {
-    size_t at = 0;
-    for (int i = 0; i < n; i++) {
-        op_hdr h = {ops[i], sizes[i]};
-        memset(buf + at, 0, sizes[i]);
-        memcpy(buf + at, &h, sizeof h);
-        at += sizes[i];
-    }
-    return (uint64_t)(uintptr_t)buf;
-}
-
-static _Alignas(8) uint8_t g_rec[256];
-
-static void case_recording_empty(void) {
-    const uint32_t ops[] = {OP_BEGIN, OP_END}, sizes[] = {8, 8};
-    gpu_check_recording(7, 0, recording(g_rec, ops, sizes, 2));
-    printf("ok recording_empty\n");
-}
-
-static void case_recording_op(void) {
-    const uint32_t ops[] = {OP_BEGIN, OP_DRAW, OP_END}, sizes[] = {8, 32, 8};
-    gpu_check_recording(7, 1, recording(g_rec, ops, sizes, 3));
-    printf("gpu_check_recording returned\n");
-}
-
-static void case_recording_broken(void) {
-    const uint32_t ops[] = {OP_DRAW, OP_END}, sizes[] = {16, 8};
-    gpu_check_recording(9, 0, recording(g_rec, ops, sizes, 2));
-    printf("gpu_check_recording returned\n");
-}
-
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc < 2) {
@@ -415,9 +383,6 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "sync_wait")) case_sync_wait();
     else if (!strcmp(cs, "sync_stop_in_flight")) case_sync_stop_in_flight();
     else if (!strcmp(cs, "report_write") && argc >= 3) case_report_write(argv[2]);
-    else if (!strcmp(cs, "recording_empty")) case_recording_empty();
-    else if (!strcmp(cs, "recording_op")) case_recording_op();
-    else if (!strcmp(cs, "recording_broken")) case_recording_broken();
     else {
         fprintf(stderr, "unknown case %s\n", cs);
         return 2;

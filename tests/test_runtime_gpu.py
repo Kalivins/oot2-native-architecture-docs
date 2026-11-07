@@ -2,8 +2,8 @@
 # Copyright (C) 2026 The oot2-native contributors
 """Tests of the Vulkan back end's module (runtime/gpu, runtime/include/oot2/gpu.h and gpu_vk.h) that need no GPU: the
 runtime's own shaders, the back-end choice and Volk; the timeline and its completion thread over a test's counter; the
-Vulkan settings and the choice of a device from synthetic candidates; the device-loss report's file; the check of a
-recording the back end cannot replay yet. The device's own tests are tests/test_runtime_vk.py.
+Vulkan settings and the choice of a device from synthetic candidates; the device-loss report's file. The device's own
+tests are tests/test_runtime_vk.py; the replay's are tests/test_runtime_vk_replay.py.
 
 The shaders' part needs glslang only: tools/build_game.py compiles runtime/gpu/shaders with it and writes the C file
 that embeds them, and the tests check that the embedded words are what the source compiles to now, including after a
@@ -233,7 +233,7 @@ class GpuTest(unittest.TestCase):
                               env=case_env(env))
 
     def test_passing_cases(self) -> None:
-        for case in ("lookup", "select_null", "volk", "settings", "choose", "recording_empty"):
+        for case in ("lookup", "select_null", "volk", "settings", "choose"):
             for level in LEVELS:
                 with self.subTest(case=case, level=level):
                     done = self.run_case(level, case)
@@ -374,17 +374,6 @@ class GpuTest(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in (Path(d) / "logs").iterdir()),
                              sorted([paths[0].name, paths[0].with_suffix(".bin").name, paths[1].name]))
             self.assertRegex(done.stdout, r"refused: cannot make the folder .*blocker/logs: ")
-
-    def test_a_recording_with_an_op_stops_by_name(self) -> None:
-        for case, line in (("recording_op", "FATAL: gfx: vulkan: recording 1 of submission 7 holds DRAW at +8, and the "
-                                            "Vulkan back end replays no op yet"),
-                           ("recording_broken", "FATAL: gfx: vulkan: recording 0 of submission 9 is not whole at +0 "
-                                                "(op 25, 16 bytes)")):
-            with self.subTest(case=case):
-                done = self.run_case(LEVELS[1], case)
-                self.assertEqual(done.returncode, EXIT_FATAL, done.stdout + done.stderr)
-                self.assertEqual(fatal_lines(done.stderr), [line])
-                self.assertNotIn("returned", done.stdout)
 
 
 if __name__ == "__main__":

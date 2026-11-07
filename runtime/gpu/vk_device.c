@@ -24,6 +24,8 @@
 #include "oot2/gpu_vk.h"
 #include "oot2/runtime.h"
 #include "oot2/vk_bindless.h"
+#include "oot2/vk_rec.h"
+#include "oot2/vk_replay.h"
 #include "plat.h"
 
 GpuVk gpu_vk;
@@ -439,7 +441,9 @@ void gpu_vk_stop_timeline(void);   // vk_submit.c
 void gpu_vk_close(void) {
     plat_mutex_lock(&g_open_lock);
     if (g_open) {
+        vkrec_close();   // the frames handed over, submitted (nothing when the replay never opened the recorder)
         gpu_sync_finish();
+        vkr_device_close();
         vkb_close();
         backing_close();
         gpu_vk_stop_timeline();

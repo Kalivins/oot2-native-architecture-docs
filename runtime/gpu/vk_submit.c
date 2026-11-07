@@ -15,16 +15,14 @@
 // the report on, each command buffer starts and ends with a diagnostic checkpoint naming its value and kind, so the
 // last checkpoints a lost queue reached say which submission was running (per-draw checkpoints come with the recorder).
 //
-// The replay of this back end walks each recording and stops by name at the first record that is not its begin or its
-// end: no op is replayed yet. A replayed submission still takes its value and a command buffer, so fences, finish and
-// the checkpoints work on it as they will once ops are replayed.
+// A replayed submission is the replay's (oot2/vk_replay.h): it walks the recordings on the submitting thread and hands
+// the frame to the recorder (oot2/vk_rec.h), whose thread records and submits it through the calls below.
 //
 // Adapted from DKB Recomp runtime/vk_sync.c at 9d8fa02 (GPL-3.0-or-later; there adapted from LAS Recomp
 // runtime/nvn/vulkan/exec.c at da35b83, MIT, Copyright (c) 2026 Peiikai, licenses/lasrecomp-MIT.txt): a primary command
 // buffer per submission taken from reusable slots, vkQueueSubmit2 signalling the submission's value at all commands, a
-// failed wait treated as a lost device, a stand-in replay that accepts only empty recordings. Changed here: the back
-// end's own work submits on the same timeline through the same calls, with effects of its own; checkpoints mark each
-// command buffer; slots are freed by the published value; a recording holding an op stops with that op's name.
+// failed wait treated as a lost device. Changed here: the back end's own work submits on the same timeline through the
+// same calls, with effects of its own; checkpoints mark each command buffer; slots are freed by the published value.
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +30,7 @@
 #include "oot2/gpu_vk.h"
 #include "oot2/runtime.h"
 #include "oot2/vk_image.h"
+#include "oot2/vk_replay.h"
 #include "plat.h"
 
 // ---------- the timeline's source: the device's timeline semaphore
@@ -189,25 +188,6 @@ uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits) {
     return value;
 }
 
-// ---------- what this back end replays: empty recordings only
-void gpu_check_recording(uint64_t value, int index, uint64_t handle) {
-    const uint8_t *p = (const uint8_t *)(uintptr_t)handle;
-    if (!p) rt_fatal("gfx: vulkan: recording %d of submission %llu is a null handle", index, (unsigned long long)value);
-    for (size_t at = 0;;) {
-        op_hdr h;
-        memcpy(&h, p + at, sizeof h);
-        if (h.size < sizeof h || (h.size & 7) || h.op >= OP_COUNT_ || h.op == OP_JUMP || h.op == OP_CALL ||
-            (at == 0) != (h.op == OP_BEGIN))
-            rt_fatal("gfx: vulkan: recording %d of submission %llu is not whole at +%zu (op %u, %u bytes)", index,
-                     (unsigned long long)value, at, h.op, h.size);
-        if (h.op == OP_END) return;
-        if (h.op != OP_BEGIN)
-            rt_fatal("gfx: vulkan: recording %d of submission %llu holds %s at +%zu, and the Vulkan back end replays no "
-                     "op yet", index, (unsigned long long)value, nvn_op_name(h.op), at);
-        at += h.size;
-    }
-}
-
 // ---------- the back-end table
 // Pools are the backing map's (oot2/backing.h): pool_fini returns once no submission in flight used the pool.
 static int vk_pool_init(pool_t *p) { return backing_pool_init(p); }
@@ -223,16 +203,10 @@ static int vk_pool_map_virtual(pool_t *v, int n, const void *requests) {
     return backing_pool_map_virtual(v, n, requests);
 }
 
-// The replay resolves its bindings in the submission (a mirror's first resolve brings it current in the prologue) and
-// declares its GPU writes (backing_gpu_wrote); its end reads back what it wrote into mirrors.
-static uint64_t vk_submit(const uint64_t *handles, int n) {
-    backing_sync();
-    uint64_t value = gpu_vk_begin(GPU_VK_REPLAY);
-    for (int i = 0; i < n; i++) gpu_check_recording(value, i, handles[i]);
-    gpu_vk_cmd();
-    backing_submit_end(value);
-    return gpu_vk_end(NULL, 0);
-}
+// The replay (oot2/vk_replay.h) resolves its bindings in the submission (a mirror's first resolve brings it current in
+// the prologue) and declares its GPU writes (backing_gpu_wrote); its end reads back what it wrote into mirrors. The
+// recorder thread submits the frame.
+static uint64_t vk_submit(const uint64_t *handles, int n) { return vkr_submit(handles, n); }
 
 static int vk_fence_wait(uint64_t value, uint64_t timeout_ns) { return gpu_sync_wait(value, timeout_ns); }
 static uint64_t vk_fence_done(void) { return gpu_sync_done(); }

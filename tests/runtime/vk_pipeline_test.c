@@ -8,6 +8,7 @@
 //   tables                       the layout's tables and the dynamic state lists, printed
 //   desc FILE                    a description parsed: stage, fit, interface by location, or the refusal
 //   pad VS_DESC PS_DESC          the padding a vertex stage needs for a pixel stage
+//   binds FILE                   a description's bindings parsed (shd_parse_binds), or the refusal
 //   spvdecl MODULE               the capabilities and extensions a module declares
 //   spvpad IN OUT SPEC           a module with outputs added (SPEC "location:component:components:type,...")
 //   capcheck MODULE [drop CAP]   a module judged against the required list (a capability may be dropped from it)
@@ -117,7 +118,8 @@ static void case_tables(void) {
     f.eds3 = (VkPhysicalDeviceExtendedDynamicState3FeaturesEXT){
         .extendedDynamicState3PolygonMode = 1, .extendedDynamicState3DepthClampEnable = 1,
         .extendedDynamicState3LogicOpEnable = 1, .extendedDynamicState3ColorBlendEnable = 1,
-        .extendedDynamicState3ColorBlendEquation = 1, .extendedDynamicState3ColorWriteMask = 1};
+        .extendedDynamicState3ColorBlendEquation = 1, .extendedDynamicState3ColorWriteMask = 1,
+        .extendedDynamicState3DepthClipNegativeOneToOne = 1};
     print_dynamic("all", &f);
     f.eds3.extendedDynamicState3PolygonMode = 0;
     print_dynamic("nopoly", &f);
@@ -150,6 +152,32 @@ static void case_desc(const char *path) {
     printf("kind %s fits %d raw %d\n", shd_kind_name(d.kind), d.fits, d.raw_pointers);
     print_io("in", d.inputs, d.ninputs);
     print_io("out", d.outputs, d.noutputs);
+}
+
+static void case_binds(const char *path) {
+    static ShaderBinds b;
+    char why[256];
+    size_t n;
+    char *text = read_all(path, &n);
+    int ok = shd_parse_binds(text, n, SHC_DESC_SCHEMA, &b, why, sizeof why);
+    free(text);
+    if (!ok) {
+        printf("refused: %s\n", why);
+        return;
+    }
+    printf("kind %s fits %d raw %u support %u\n", shd_kind_name(b.kind), b.fits, b.raw, b.support_read);
+    for (uint32_t i = 0; i < b.ncb; i++) printf("cb %u %u %u\n", b.cb[i].slot, b.cb[i].set, b.cb[i].binding);
+    for (uint32_t i = 0; i < b.nsb; i++)
+        printf("sb %u %u %u %u %u %u\n", b.sb[i].set, b.sb[i].ordinal, b.sb[i].cb_slot, b.sb[i].write, b.sb[i].binding,
+               b.sb[i].address_byte_offset);
+    for (uint32_t i = 0; i < b.ntex; i++)
+        printf("tex %d %d %d %u %u %u %u %d %d %d\n", b.tex[i].via, b.tex[i].kind, b.tex[i].view, b.tex[i].set, b.tex[i].shadow,
+               b.tex[i].binding, b.tex[i].array_length, b.tex[i].push_slot, b.tex[i].push_offset, b.tex[i].c2_slot);
+    for (uint32_t i = 0; i < b.nimg; i++)
+        printf("img %u %u %d %u %d\n", b.img[i].set, b.img[i].write, b.img[i].view, b.img[i].binding, b.img[i].c2_slot);
+    for (uint32_t i = 0; i < b.nvin; i++)
+        printf("vin %u %u %u %u\n", b.vin[i].location, b.vin[i].component, b.vin[i].components, b.vin[i].type);
+    printf("local %u %u %u\n", b.local_size[0], b.local_size[1], b.local_size[2]);
 }
 
 static void case_pad(const char *vs, const char *ps) {
@@ -871,6 +899,7 @@ int main(int argc, char **argv) {
     if (!strcmp(cs, "tables")) case_tables();
     else if (!strcmp(cs, "desc") && argc >= 3) case_desc(argv[2]);
     else if (!strcmp(cs, "pad") && argc >= 4) case_pad(argv[2], argv[3]);
+    else if (!strcmp(cs, "binds") && argc >= 3) case_binds(argv[2]);
     else if (!strcmp(cs, "spvdecl") && argc >= 3) case_spvdecl(argv[2]);
     else if (!strcmp(cs, "spvpad") && argc >= 5) case_spvpad(argv[2], argv[3], argv[4]);
     else if (!strcmp(cs, "capcheck") && argc >= 3) case_capcheck(argv[2], argc - 3, argv + 3);

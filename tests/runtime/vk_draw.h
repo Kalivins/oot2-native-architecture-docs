@@ -141,6 +141,7 @@ static inline void draw_set_state(VkCommandBuffer cb, uint32_t w, uint32_t h, ui
     vkCmdSetRasterizerDiscardEnable(cb, VK_FALSE);
     vkCmdSetPolygonModeEXT(cb, VK_POLYGON_MODE_FILL);
     vkCmdSetDepthClampEnableEXT(cb, VK_FALSE);
+    vkCmdSetDepthClipNegativeOneToOneEXT(cb, VK_FALSE);
     vkCmdSetPrimitiveTopology(cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     vkCmdSetPrimitiveRestartEnable(cb, VK_FALSE);
     vkCmdSetDepthTestEnable(cb, VK_FALSE);

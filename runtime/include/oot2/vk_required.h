@@ -109,7 +109,10 @@
     X(sampler_features, "anisotropic filtering, mirror clamp to edge and min and max reduction in samplers",          \
       f->features.samplerAnisotropy && f->f12.samplerMirrorClampToEdge && f->f12.samplerFilterMinmax,                \
       (e->features.samplerAnisotropy = VK_TRUE, e->f12.samplerMirrorClampToEdge = VK_TRUE,                            \
-       e->f12.samplerFilterMinmax = VK_TRUE))
+       e->f12.samplerFilterMinmax = VK_TRUE))                                                                         \
+    X(depth_clip_control, "depth clip control, set per draw (NVN's -1 to 1 depth)",                                  \
+      f->depth_clip.depthClipControl && f->eds3.extendedDynamicState3DepthClipNegativeOneToOne,                       \
+      (e->depth_clip.depthClipControl = VK_TRUE))
 
 // The device extensions the items read, E(id, name), and the ones they depend on below Vulkan 1.4 (pipeline_library
 // for graphics_pipeline_library, maintenance5 for pipeline_binary). The device the back end creates enables every one
@@ -128,6 +131,7 @@
     E(diagnostic_checkpoints, "VK_NV_device_diagnostic_checkpoints")                                                  \
     E(memory_budget, "VK_EXT_memory_budget")                                                                          \
     E(shader_atomic_float, "VK_EXT_shader_atomic_float")                                                              \
+    E(depth_clip_control, "VK_EXT_depth_clip_control")                                                                \
     E(pipeline_library, "VK_KHR_pipeline_library")                                                                    \
     E(maintenance5, "VK_KHR_maintenance5")
 
@@ -211,6 +215,7 @@ typedef struct Oot2VkFacts {
     VkPhysicalDeviceCooperativeMatrixFeaturesKHR coop;
     VkPhysicalDeviceFaultFeaturesEXT fault;
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float;
+    VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip;
     unsigned char ext[OOT2_VK_EXT_COUNT];   // 1 for each extension of OOT2_VK_EXTENSIONS the device lists
 } Oot2VkFacts;
 
@@ -249,6 +254,8 @@ static inline void oot2_vk_chain_features(Oot2VkFacts *f, VkPhysicalDeviceFeatur
     OOT2_VK_LINK(f->ext[OOT2_VK_EXT_device_fault], f->fault, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT)
     OOT2_VK_LINK(f->ext[OOT2_VK_EXT_shader_atomic_float], f->atomic_float,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT)
+    OOT2_VK_LINK(f->ext[OOT2_VK_EXT_depth_clip_control], f->depth_clip,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT)
     (void)tail;
 }
 

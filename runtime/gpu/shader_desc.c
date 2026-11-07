@@ -5,6 +5,7 @@
 // A description is the translator's JSON, 5 to 40 KiB, and only a handful of members matter to the builder, so this is a
 // scanner that walks the text once, reads the members it knows and skips the rest: no tree, no allocation, and a
 // refusal at the first malformed byte, with the offset.
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -364,4 +365,464 @@ void shd_pad_text(const ShdPad *pad, int n, char *out, size_t cap) {
         if (w < 0) break;
         at += (size_t)w;
     }
+}
+
+// ---- bindings
+//
+// The second reader, for the members that say where a module's resources are (oot2/shader_desc.h, ShaderBinds). It uses
+// the same scanner, but it is strict where the first is lenient: every member it reads must be there, of its type and
+// within the range of the field it fills, because the replay binds from what it reads and a default would bind the
+// wrong thing silently. Members it does not know are skipped.
+
+typedef struct BCtx {
+    ShaderBinds *b;
+    uint32_t want_schema;
+    char stage[8];
+    uint32_t have;          // HAVE_* bits of the top-level members read
+    uint32_t seen;          // the members of the element being read, one bit per name of its list
+    char at[48];            // "textures[3]." while an element is read, "" at the top
+    char msg[200];
+    // the element being read
+    ShdCbuf cb;
+    ShdSbuf sb;
+    ShdTex tex;
+    ShdImg img;
+    ShdVin vin;
+    int sb_module_writes, img_store, img_nonwritable, vin_array, field_read;
+    int tex_kind, tex_type_is_sampler;
+    int raw_page_table, raw_physical;
+    int count;              // the support fields or the local size entries read
+} BCtx;
+
+enum {
+    HAVE_SCHEMA = 1 << 0, HAVE_STAGE = 1 << 1, HAVE_FITS = 1 << 2, HAVE_RAW_PT = 1 << 3, HAVE_RAW_PP = 1 << 4,
+    HAVE_SUPPORT = 1 << 5, HAVE_CB = 1 << 6, HAVE_SB = 1 << 7, HAVE_TEX = 1 << 8, HAVE_IMG = 1 << 9, HAVE_VIN = 1 << 10,
+    HAVE_LOCAL = 1 << 11
+};
+
+// The members of each kind of element, in the bit order of BCtx.seen. All of them are required.
+static const char *const CB_NAMES[] = {"set", "binding", "slot"};
+static const char *const SB_NAMES[] = {"set", "binding", "ordinal", "cb_slot", "address_byte_offset", "write", "module_writes"};
+static const char *const TEX_NAMES[] = {"set", "binding", "via", "push_slot", "push_offset", "type", "shadow", "kind", "array_length", "c2_slot"};
+static const char *const IMG_NAMES[] = {"set", "binding", "type", "c2_slot", "image_store", "non_writable"};
+static const char *const VIN_NAMES[] = {"location", "component", "components", "type"};
+#define COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
+static int bfail(J *j, BCtx *x, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(x->msg, sizeof x->msg, fmt, ap);
+    va_end(ap);
+    j->err = x->msg;
+    return 0;
+}
+
+static int name_index(const char *const *names, int n, const char *key) {
+    for (int i = 0; i < n; i++)
+        if (!strcmp(names[i], key)) return i;
+    return -1;
+}
+
+static int peek(J *j, char c) {
+    ws(j);
+    return j->p < j->end && *j->p == c;
+}
+
+// A number of the member `name` within lo..hi.
+static int bnum(J *j, BCtx *x, const char *name, long long lo, long long hi, long long *v) {
+    ws(j);
+    if (j->p >= j->end || !((*j->p >= '0' && *j->p <= '9') || *j->p == '-'))
+        return bfail(j, x, "%s%s is not a number", x->at, name);
+    if (!jint(j, v)) return 0;
+    if (*v < lo || *v > hi) return bfail(j, x, "%s%s is %lld, outside %lld to %lld", x->at, name, *v, lo, hi);
+    return 1;
+}
+
+static int bbool(J *j, BCtx *x, const char *name, int *v) {
+    ws(j);
+    if (j->p >= j->end || (*j->p != 't' && *j->p != 'f')) return bfail(j, x, "%s%s is not true or false", x->at, name);
+    return jbool(j, v);
+}
+
+static int bstr(J *j, BCtx *x, const char *name, char *out, size_t cap) {
+    ws(j);
+    if (j->p >= j->end || *j->p != '"') return bfail(j, x, "%s%s is not a string", x->at, name);
+    return jstring(j, out, cap);
+}
+
+// What starts and ends an element of any list: the cap, a fresh element, and every member present.
+static int belem_begin(J *j, BCtx *x, const char *list, uint32_t count, uint32_t cap) {
+    if (count >= cap) return bfail(j, x, "%s lists more than the %u entries the replay reads", list, cap);
+    snprintf(x->at, sizeof x->at, "%s[%u].", list, count);
+    x->seen = 0;
+    return 1;
+}
+
+static int belem_end(J *j, BCtx *x, const char *const *names, int n) {
+    for (int i = 0; i < n; i++)
+        if (!(x->seen >> i & 1)) return bfail(j, x, "%s%s is missing", x->at, names[i]);
+    return 1;
+}
+
+// A texture type of the description as the view the replay makes for it (bindless.h BV_*). Multisampled types are the 2D
+// types of Vulkan; a buffer texture has no view; a bare sampler has none either. "unknown" is what the writer prints for
+// a type it cannot name, and is refused with the rest.
+static int view_of(const char *t, int allow_sampler, int *view) {
+    static const struct {
+        const char *name;
+        int view;
+    } map[] = {{"1d", BV_1D},   {"1darray", BV_1D_ARRAY}, {"2d", BV_2D},     {"2darray", BV_2D_ARRAY},
+               {"2dms", BV_2D}, {"2dmsarray", BV_2D_ARRAY}, {"3d", BV_3D},   {"cube", BV_CUBE},
+               {"cubearray", BV_CUBE_ARRAY}, {"buffer", BV_NONE}};
+    for (int i = 0; i < COUNT(map); i++)
+        if (!strcmp(map[i].name, t)) return *view = map[i].view, 1;
+    if (allow_sampler && !strcmp(t, "sampler")) return *view = BV_NONE, 1;
+    return 0;
+}
+
+// ---- constant banks
+
+static int cb_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    long long v;
+    int i = name_index(CB_NAMES, COUNT(CB_NAMES), key);
+    if (i < 0) return jskip(j, 4);
+    switch (i) {
+    case 0: if (!bnum(j, x, key, 0, 255, &v)) return 0; x->cb.set = (uint8_t)v; break;
+    case 1: if (!bnum(j, x, key, 0, 65535, &v)) return 0; x->cb.binding = (uint16_t)v; break;
+    default: if (!bnum(j, x, key, 0, 255, &v)) return 0; x->cb.slot = (uint8_t)v; break;
+    }
+    x->seen |= 1u << i;
+    return 1;
+}
+
+static int cb_element(J *j, void *c) {
+    BCtx *x = c;
+    if (!belem_begin(j, x, "cbufs", x->b->ncb, SHD_MAX_CBUFS)) return 0;
+    memset(&x->cb, 0, sizeof x->cb);
+    if (!jobject(j, cb_member, x, 3) || !belem_end(j, x, CB_NAMES, COUNT(CB_NAMES))) return 0;
+    x->b->cb[x->b->ncb++] = x->cb;
+    return 1;
+}
+
+// ---- storage buffers
+
+static int sb_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    long long v;
+    int b;
+    int i = name_index(SB_NAMES, COUNT(SB_NAMES), key);
+    if (i < 0) return jskip(j, 4);
+    switch (i) {
+    case 0: if (!bnum(j, x, key, 0, 255, &v)) return 0; x->sb.set = (uint8_t)v; break;
+    case 1: if (!bnum(j, x, key, 0, 65535, &v)) return 0; x->sb.binding = (uint16_t)v; break;
+    case 2: if (!bnum(j, x, key, 0, 255, &v)) return 0; x->sb.ordinal = (uint8_t)v; break;
+    case 3: if (!bnum(j, x, key, 0, 255, &v)) return 0; x->sb.cb_slot = (uint8_t)v; break;
+    case 4: if (!bnum(j, x, key, 0, 65535, &v)) return 0; x->sb.address_byte_offset = (uint16_t)v; break;
+    case 5: if (!bbool(j, x, key, &b)) return 0; x->sb.write = (uint8_t)b; break;
+    default: if (!bbool(j, x, key, &x->sb_module_writes)) return 0; break;
+    }
+    x->seen |= 1u << i;
+    return 1;
+}
+
+static int sb_element(J *j, void *c) {
+    BCtx *x = c;
+    if (!belem_begin(j, x, "sbufs", x->b->nsb, SHD_MAX_SBUFS)) return 0;
+    memset(&x->sb, 0, sizeof x->sb);
+    x->sb_module_writes = 0;
+    if (!jobject(j, sb_member, x, 3) || !belem_end(j, x, SB_NAMES, COUNT(SB_NAMES))) return 0;
+    if (x->sb_module_writes) x->sb.write = 1;
+    x->b->sb[x->b->nsb++] = x->sb;
+    return 1;
+}
+
+// ---- textures and storage images
+
+static int tex_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    long long v;
+    int b;
+    char s[24];
+    int i = name_index(TEX_NAMES, COUNT(TEX_NAMES), key);
+    if (i < 0) return jskip(j, 4);
+    switch (i) {
+    case 0: if (!bnum(j, x, key, 0, 255, &v)) return 0; x->tex.set = (uint8_t)v; break;
+    case 1: if (!bnum(j, x, key, 0, 65535, &v)) return 0; x->tex.binding = (uint16_t)v; break;
+    case 2:
+        if (!bstr(j, x, key, s, sizeof s)) return 0;
+        if (!strcmp(s, "push_slot")) x->tex.via = SHD_VIA_PUSH_SLOT;
+        else if (!strcmp(s, "pool")) x->tex.via = SHD_VIA_POOL;
+        else if (!strcmp(s, "descriptor")) x->tex.via = SHD_VIA_DESCRIPTOR;
+        else return bfail(j, x, "%svia \"%s\" is not push_slot, pool or descriptor", x->at, s);
+        break;
+    case 3: if (!bnum(j, x, key, -1, 32767, &v)) return 0; x->tex.push_slot = (int16_t)v; break;
+    case 4: if (!bnum(j, x, key, -1, 32767, &v)) return 0; x->tex.push_offset = (int16_t)v; break;
+    case 5:
+        if (!bstr(j, x, key, s, sizeof s)) return 0;
+        if (!view_of(s, 1, &b)) return bfail(j, x, "%stype \"%s\" is not a texture type the replay knows", x->at, s);
+        x->tex.view = (int8_t)b;
+        x->tex_type_is_sampler = !strcmp(s, "sampler");
+        break;
+    case 6: if (!bbool(j, x, key, &b)) return 0; x->tex.shadow = (uint8_t)b; break;
+    case 7:
+        if (!bstr(j, x, key, s, sizeof s)) return 0;
+        if (!strcmp(s, "combined")) x->tex_kind = SHD_TEX_COMBINED;
+        else if (!strcmp(s, "separate_texture")) x->tex_kind = SHD_TEX_SEPARATE;
+        else if (!strcmp(s, "sampler")) x->tex_kind = SHD_TEX_SAMPLER;
+        else return bfail(j, x, "%skind \"%s\" is not combined, separate_texture or sampler", x->at, s);
+        break;
+    case 8: if (!bnum(j, x, key, 0, 65535, &v)) return 0; x->tex.array_length = (uint16_t)v; break;
+    default: if (!bnum(j, x, key, -1, 32767, &v)) return 0; x->tex.c2_slot = (int16_t)v; break;
+    }
+    x->seen |= 1u << i;
+    return 1;
+}
+
+static int tex_element(J *j, void *c) {
+    BCtx *x = c;
+    if (!belem_begin(j, x, "textures", x->b->ntex, SHD_MAX_TEXS)) return 0;
+    memset(&x->tex, 0, sizeof x->tex);
+    x->tex_kind = x->tex_type_is_sampler = 0;
+    if (!jobject(j, tex_member, x, 3) || !belem_end(j, x, TEX_NAMES, COUNT(TEX_NAMES))) return 0;
+    x->tex.kind = (int8_t)x->tex_kind;
+    if ((x->tex_kind == SHD_TEX_SAMPLER) != (x->tex_type_is_sampler != 0))
+        return bfail(j, x, "%skind and type disagree on whether the entry is a bare sampler", x->at);
+    if (x->tex.via == SHD_VIA_PUSH_SLOT && (x->tex.push_slot < 0 || x->tex.push_offset < 0))
+        return bfail(j, x, "%sreads through a push slot but names none", x->at);
+    x->b->tex[x->b->ntex++] = x->tex;
+    return 1;
+}
+
+static int img_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    long long v;
+    int b;
+    char s[24];
+    int i = name_index(IMG_NAMES, COUNT(IMG_NAMES), key);
+    if (i < 0) return jskip(j, 4);
+    switch (i) {
+    case 0: if (!bnum(j, x, key, 0, 255, &v)) return 0; x->img.set = (uint8_t)v; break;
+    case 1: if (!bnum(j, x, key, 0, 65535, &v)) return 0; x->img.binding = (uint16_t)v; break;
+    case 2:
+        if (!bstr(j, x, key, s, sizeof s)) return 0;
+        if (!view_of(s, 0, &b)) return bfail(j, x, "%stype \"%s\" is not an image type the replay knows", x->at, s);
+        x->img.view = (int8_t)b;
+        break;
+    case 3: if (!bnum(j, x, key, -1, 32767, &v)) return 0; x->img.c2_slot = (int16_t)v; break;
+    case 4: if (!bbool(j, x, key, &x->img_store)) return 0; break;
+    default: if (!bbool(j, x, key, &x->img_nonwritable)) return 0; break;
+    }
+    x->seen |= 1u << i;
+    return 1;
+}
+
+static int img_element(J *j, void *c) {
+    BCtx *x = c;
+    if (!belem_begin(j, x, "images", x->b->nimg, SHD_MAX_IMGS)) return 0;
+    memset(&x->img, 0, sizeof x->img);
+    x->img_store = x->img_nonwritable = 0;
+    if (!jobject(j, img_member, x, 3) || !belem_end(j, x, IMG_NAMES, COUNT(IMG_NAMES))) return 0;
+    x->img.write = (uint8_t)(x->img_store || !x->img_nonwritable);
+    x->b->img[x->b->nimg++] = x->img;
+    return 1;
+}
+
+// ---- vertex inputs
+
+static int vin_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    long long v;
+    char s[24];
+    if (!strcmp(key, "array_length")) {
+        if (!bnum(j, x, key, 1, SHD_MAX_VINS, &v)) return 0;
+        x->vin_array = (int)v;
+        return 1;
+    }
+    int i = name_index(VIN_NAMES, COUNT(VIN_NAMES), key);
+    if (i < 0) return jskip(j, 4);
+    switch (i) {
+    case 0: if (!bnum(j, x, key, 0, 255, &v)) return 0; x->vin.location = (uint8_t)v; break;
+    case 1: if (!bnum(j, x, key, 0, 3, &v)) return 0; x->vin.component = (uint8_t)v; break;
+    case 2: if (!bnum(j, x, key, 1, 4, &v)) return 0; x->vin.components = (uint8_t)v; break;
+    default:
+        if (!bstr(j, x, key, s, sizeof s)) return 0;
+        if (!strcmp(s, "float32")) x->vin.type = SHD_FLOAT;
+        else if (!strcmp(s, "sint32")) x->vin.type = SHD_SINT;
+        else if (!strcmp(s, "uint32")) x->vin.type = SHD_UINT;
+        else return bfail(j, x, "%stype \"%s\" is not float32, sint32 or uint32", x->at, s);
+        break;
+    }
+    x->seen |= 1u << i;
+    return 1;
+}
+
+static int vin_element(J *j, void *c) {
+    BCtx *x = c;
+    if (!belem_begin(j, x, "vertex_inputs", x->b->nvin, SHD_MAX_VINS)) return 0;
+    memset(&x->vin, 0, sizeof x->vin);
+    x->vin_array = 1;
+    if (!jobject(j, vin_member, x, 3) || !belem_end(j, x, VIN_NAMES, COUNT(VIN_NAMES))) return 0;
+    if (x->vin.component + x->vin.components > 4)
+        return bfail(j, x, "%scomponents %u..%u pass the fourth", x->at, x->vin.component, x->vin.component + x->vin.components);
+    // An array takes one location per element, each its own entry.
+    for (int k = 0; k < x->vin_array; k++) {
+        if (x->b->nvin >= SHD_MAX_VINS)
+            return bfail(j, x, "vertex_inputs lists more than the %u entries the replay reads", SHD_MAX_VINS);
+        if (x->vin.location + k > 255) return bfail(j, x, "%sarray reaches location %d, past 255", x->at, x->vin.location + k);
+        ShdVin e = x->vin;
+        e.location = (uint8_t)(x->vin.location + k);
+        x->b->vin[x->b->nvin++] = e;
+    }
+    return 1;
+}
+
+// ---- the other members
+
+static int field_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    if (strcmp(key, "read")) return jskip(j, 4);
+    if (!bbool(j, x, key, &x->field_read)) return 0;
+    x->seen |= 1;
+    return 1;
+}
+
+static int field_element(J *j, void *c) {
+    BCtx *x = c;
+    snprintf(x->at, sizeof x->at, "support_buffer.fields[%d].", x->count++);
+    x->seen = 0;
+    x->field_read = 0;
+    if (!jobject(j, field_member, x, 4)) return 0;
+    if (!(x->seen & 1)) return bfail(j, x, "%sread is missing", x->at);
+    x->b->support_read |= (uint8_t)(x->field_read != 0);
+    return 1;
+}
+
+// An array member of the top level (null where the writer says "none" and `nullable`), counted as present only when it is
+// an array.
+static int blist(J *j, BCtx *x, const char *name, ElementFn element, uint32_t have, int nullable) {
+    ws(j);
+    if (nullable && jword(j, "null")) return 1;
+    if (!peek(j, '[')) return bfail(j, x, "%s is not an array", name);
+    x->have |= have;
+    x->at[0] = 0;
+    return jarray(j, element, x, 1);
+}
+
+static int support_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    if (strcmp(key, "fields")) return jskip(j, 2);
+    x->count = 0;
+    return blist(j, x, "support_buffer.fields", field_element, HAVE_SUPPORT, 0);
+}
+
+static int blayout_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    if (strcmp(key, "fits")) return jskip(j, 2);
+    x->have |= HAVE_FITS;
+    x->at[0] = 0;
+    return bbool(j, x, "layout.fits", &x->b->fits);
+}
+
+static int braw_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    x->at[0] = 0;
+    if (!strcmp(key, "page_table")) {
+        x->have |= HAVE_RAW_PT;
+        return bbool(j, x, "raw_access.page_table", &x->raw_page_table);
+    }
+    if (!strcmp(key, "physical_pointers")) {
+        x->have |= HAVE_RAW_PP;
+        return bbool(j, x, "raw_access.physical_pointers", &x->raw_physical);
+    }
+    return jskip(j, 2);
+}
+
+static int local_element(J *j, void *c) {
+    BCtx *x = c;
+    long long v;
+    x->at[0] = 0;
+    if (x->count >= 3) return bfail(j, x, "compute.local_size has more than 3 entries");
+    if (!bnum(j, x, "compute.local_size entry", 1, 65535, &v)) return 0;
+    x->b->local_size[x->count++] = (uint32_t)v;
+    return 1;
+}
+
+static int compute_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    if (strcmp(key, "local_size")) return jskip(j, 2);
+    x->count = 0;
+    if (!peek(j, '[')) return bfail(j, x, "compute.local_size is not an array");
+    if (!jarray(j, local_element, x, 2)) return 0;
+    if (x->count != 3) return bfail(j, x, "compute.local_size has %d entries, not 3", x->count);
+    x->have |= HAVE_LOCAL;
+    return 1;
+}
+
+static int btop_member(J *j, const char *key, void *c) {
+    BCtx *x = c;
+    long long v;
+    x->at[0] = 0;
+    if (!strcmp(key, "schema")) {
+        if (!bnum(j, x, key, 0, 0xffffffffLL, &v)) return 0;
+        x->have |= HAVE_SCHEMA;
+        if ((uint32_t)v != x->want_schema)
+            return bfail(j, x, "the description is schema %u, the runtime reads schema %u", (uint32_t)v, x->want_schema);
+        return 1;
+    }
+    if (!strcmp(key, "stage")) {
+        x->have |= HAVE_STAGE;
+        return bstr(j, x, key, x->stage, sizeof x->stage);
+    }
+    if (!strcmp(key, "layout")) return jobject(j, blayout_member, x, 1);
+    if (!strcmp(key, "raw_access")) return jobject(j, braw_member, x, 1);
+    if (!strcmp(key, "support_buffer")) return jobject(j, support_member, x, 1);
+    if (!strcmp(key, "cbufs")) return blist(j, x, key, cb_element, HAVE_CB, 0);
+    if (!strcmp(key, "sbufs")) return blist(j, x, key, sb_element, HAVE_SB, 0);
+    if (!strcmp(key, "textures")) return blist(j, x, key, tex_element, HAVE_TEX, 0);
+    if (!strcmp(key, "images")) return blist(j, x, key, img_element, HAVE_IMG, 0);
+    if (!strcmp(key, "vertex_inputs")) return blist(j, x, key, vin_element, HAVE_VIN, 1);
+    if (!strcmp(key, "compute")) {
+        ws(j);
+        if (jword(j, "null")) return 1;
+        return jobject(j, compute_member, x, 1);
+    }
+    return jskip(j, 1);
+}
+
+int shd_parse_binds(const char *json, size_t n, uint32_t schema, ShaderBinds *out, char *why, size_t cap) {
+    static const struct {
+        uint32_t bit;
+        const char *name;
+    } required[] = {{HAVE_SCHEMA, "schema"},   {HAVE_STAGE, "stage"},         {HAVE_FITS, "layout.fits"},
+                    {HAVE_RAW_PT, "raw_access.page_table"}, {HAVE_RAW_PP, "raw_access.physical_pointers"},
+                    {HAVE_SUPPORT, "support_buffer.fields"}, {HAVE_CB, "cbufs"}, {HAVE_SB, "sbufs"},
+                    {HAVE_TEX, "textures"},    {HAVE_IMG, "images"}};
+    memset(out, 0, sizeof *out);
+    out->kind = -1;
+    BCtx x;
+    memset(&x, 0, sizeof x);
+    x.b = out;
+    x.want_schema = schema;
+    J j = {.begin = json, .p = json, .end = json + n};
+#define REFUSE(...)                                                                                                    \
+    do {                                                                                                               \
+        if (why && cap) snprintf(why, cap, __VA_ARGS__);                                                               \
+        return 0;                                                                                                      \
+    } while (0)
+    if (!jobject(&j, btop_member, &x, 0))
+        REFUSE("the bindings of the description are not readable: %s (at byte %lu)", j.err ? j.err : "malformed",
+               (unsigned long)(j.p - j.begin));
+    ws(&j);
+    if (j.p != j.end) REFUSE("the description has text after its object (at byte %lu)", (unsigned long)(j.p - j.begin));
+    for (int i = 0; i < COUNT(required); i++)
+        if (!(x.have & required[i].bit)) REFUSE("the description lacks %s", required[i].name);
+    for (int k = 0; k < SHD_KINDS; k++)
+        if (!strcmp(x.stage, shd_kind_name(k))) out->kind = k;
+    if (out->kind < 0) REFUSE("the description names the stage \"%s\", which is not one of vs, ps, cs, ts, ms", x.stage);
+    if (out->kind == SHD_VS && !(x.have & HAVE_VIN)) REFUSE("the description of a vertex module lacks vertex_inputs");
+    if (out->kind == SHD_CS && !(x.have & HAVE_LOCAL)) REFUSE("the description of a compute module lacks compute.local_size");
+    out->raw = (uint8_t)(x.raw_page_table || x.raw_physical);
+#undef REFUSE
+    return 1;
 }

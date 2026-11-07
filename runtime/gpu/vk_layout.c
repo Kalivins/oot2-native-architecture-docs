@@ -83,6 +83,9 @@ uint32_t vkp_dynamic_states(VkGraphicsPipelineLibraryFlagsEXT part, const Oot2Vk
         n = add(out, n, s, sizeof s / sizeof s[0]);
         if (e3->extendedDynamicState3PolygonMode) out[n++] = VK_DYNAMIC_STATE_POLYGON_MODE_EXT;
         if (e3->extendedDynamicState3DepthClampEnable) out[n++] = VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT;
+        // NVN's depth mode (nvn_depth_mode): -1 to 1 or 0 to 1, chosen per draw by the replay (oot2/vk_replay.h)
+        if (e3->extendedDynamicState3DepthClipNegativeOneToOne)
+            out[n++] = VK_DYNAMIC_STATE_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE_EXT;
     }
     if (part & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) {
         static const VkDynamicState s[] = {

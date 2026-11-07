@@ -1,0 +1,222 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// What the replay (oot2/vk_replay.h) needs of the device: the pipeline builder, the descriptions of the stages it
+// binds, the backing map, the images render targets stand on and their attachment views, the bindless tables, and the
+// frame's scratch memory.
+//
+// Scratch memory comes in chunks of host-visible, coherent memory, each with one buffer over it; a frame takes chunks
+// from a free list and hands them back from the completion thread once its value is done, so a chunk the device may
+// still read is never written. Attachment views are made per frame and destroyed the same way (a render target change
+// is rare next to a draw: research 17 counts 127 a Forest frame).
+#include <stdlib.h>
+#include <string.h>
+
+#include "oot2/backing.h"
+#include "oot2/gpu_vk.h"
+#include "oot2/nvn_program.h"
+#include "oot2/runtime.h"
+#include "oot2/shader_cache.h"
+#include "oot2/shader_desc.h"
+#include "oot2/vk_bindless.h"
+#include "oot2/vk_format.h"
+#include "oot2/vk_image.h"
+#include "oot2/vk_pipeline.h"
+#include "oot2/vk_rec.h"
+#include "oot2/vk_replay.h"
+#include "plat.h"
+
+// ---------- the descriptions of stages, parsed once per stage record (records are immortal: research 35)
+#define BIND_BUCKETS 4096
+typedef struct BindEntry {
+    const nvn_stage *stage;
+    ShaderBinds binds;
+    struct BindEntry *next;
+} BindEntry;
+static BindEntry *g_bind[BIND_BUCKETS];
+static PlatMutex g_bind_lock = PLAT_MUTEX_INIT;
+
+static const ShaderBinds *dev_binds(const nvn_stage *s) {
+    uint32_t h = (uint32_t)(((uintptr_t)s >> 4) * 0x9E3779B1u) % BIND_BUCKETS;
+    plat_mutex_lock(&g_bind_lock);
+    for (BindEntry *e = g_bind[h]; e; e = e->next)
+        if (e->stage == s) {
+            plat_mutex_unlock(&g_bind_lock);
+            return &e->binds;
+        }
+    plat_mutex_unlock(&g_bind_lock);
+    VkpStage st = {s->key, NULL, s};
+    VkpModule m;
+    vkp_module(&st, s->kind, &m);   // the stage kinds are SHD_*'s order
+    BindEntry *e = calloc(1, sizeof *e);
+    if (!e) rt_fatal("gfx: vulkan: out of memory for the description of stage %s", s->key);
+    char why[256];
+    if (!shd_parse_binds(m.description, m.description_bytes, SHC_DESC_SCHEMA, &e->binds, why, sizeof why))
+        rt_fatal("gfx: vulkan: the description of stage %s: %s", s->key, why);
+    e->stage = s;
+    plat_mutex_lock(&g_bind_lock);
+    e->next = g_bind[h], g_bind[h] = e;
+    plat_mutex_unlock(&g_bind_lock);
+    return &e->binds;
+}
+
+// ---------- render targets
+static void view_gone(void *arg, uint64_t value) {
+    (void)value;
+    vkDestroyImageView(gpu_vk.device, (VkImageView)(uintptr_t)arg, NULL);
+}
+
+static int dev_target(const nvn_tex_rec *t, int storage, uint64_t value, VkrTarget *out) {
+    memset(out, 0, sizeof *out);
+    VkbImage *img = vkb_image_get(&t->tex);
+    if (!img) return 0;
+    vkb_image_use(img, value);
+    int fmt = t->has_view && t->view.set_format ? t->view.format : t->tex.d.format;
+    const VkfRow *row = vkf_row(fmt);
+    if (!row || row->vk == VK_FORMAT_UNDEFINED) return 0;
+    uint32_t level = t->has_view && t->view.set_levels ? t->view.base_level : 0;
+    uint32_t base_layer = t->has_view && t->view.set_layers ? t->view.min_layer : 0;
+    uint32_t layers = t->has_view && t->view.set_layers && t->view.nlayers ? t->view.nlayers : 1;
+    VkImageAspectFlags aspect = 0;
+    if (row->flags & VKF_DEPTH) aspect |= VK_IMAGE_ASPECT_DEPTH_BIT;
+    if (row->flags & VKF_STENCIL) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (!aspect) aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    VkImageViewUsageCreateInfo use = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+                                      .usage = storage ? VK_IMAGE_USAGE_STORAGE_BIT
+                                               : aspect == VK_IMAGE_ASPECT_COLOR_BIT
+                                                   ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                                                   : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT};
+    VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = &use,
+                                .image = vkb_image_handle(img),
+                                .viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D,
+                                .format = row->vk, .subresourceRange = {aspect, level, 1, base_layer, layers}};
+    VkImageView view;
+    GPU_VK_OK(vkCreateImageView(gpu_vk.device, &vi, NULL, &view), "vkCreateImageView (a render target)");
+    vkrec_effect(view_gone, (void *)(uintptr_t)view);
+    uint32_t w = t->tex.d.width >> level, h = t->tex.d.height >> level;
+    *out = (VkrTarget){view, row->vk, w ? w : 1, h ? h : 1, layers, aspect};
+    return 1;
+}
+
+// ---------- the bindless tables, recorded into the frame's prologue
+static VkDescriptorSet dev_acquire(uint64_t value, const dpool_ref *textures, const dpool_ref *samplers) {
+    return vkb_acquire(gpu_vk_prologue(), value, textures, samplers);
+}
+static uint32_t dev_image_slot(uint32_t id, int type) { return vkb_image_slot(gpu_vk_prologue(), id, type); }
+
+// ---------- scratch memory
+#define CHUNK_BYTES (4u << 20)
+typedef struct Chunk {
+    VkBuffer buf;
+    VkDeviceMemory mem;
+    uint8_t *map;
+    uint32_t size, used;
+    struct Chunk *next;
+} Chunk;
+static Chunk *g_free;                  // chunks no frame holds (g_chunk_lock)
+static PlatMutex g_chunk_lock = PLAT_MUTEX_INIT;
+static struct {
+    uint64_t value;                    // the frame the chunks below belong to
+    Chunk *held;                       // its chunks, the current one first
+} g_frame;
+
+static Chunk *chunk_new(uint32_t size) {
+    Chunk *c = calloc(1, sizeof *c);
+    if (!c) rt_fatal("gfx: vulkan: out of memory for a scratch chunk");
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+                             .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+    GPU_VK_OK(vkCreateBuffer(gpu_vk.device, &bi, NULL, &c->buf), "vkCreateBuffer (replay scratch)");
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(gpu_vk.device, c->buf, &req);
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(gpu_vk.phys, &mp);
+    const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    uint32_t type = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount && type == UINT32_MAX; i++)
+        if ((req.memoryTypeBits >> i & 1) && (mp.memoryTypes[i].propertyFlags & want) == want) type = i;
+    if (type == UINT32_MAX) rt_fatal("gfx: vulkan: no host-visible coherent memory for the replay's scratch");
+    VkMemoryAllocateInfo alloc = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = req.size,
+                               .memoryTypeIndex = type};
+    GPU_VK_OK(vkAllocateMemory(gpu_vk.device, &alloc, NULL, &c->mem), "vkAllocateMemory (replay scratch)");
+    GPU_VK_OK(vkBindBufferMemory(gpu_vk.device, c->buf, c->mem, 0), "vkBindBufferMemory (replay scratch)");
+    void *p;
+    GPU_VK_OK(vkMapMemory(gpu_vk.device, c->mem, 0, VK_WHOLE_SIZE, 0, &p), "vkMapMemory (replay scratch)");
+    c->map = p, c->size = size;
+    return c;
+}
+
+static void chunks_back(void *arg, uint64_t value) {
+    (void)value;
+    Chunk *c = arg;
+    plat_mutex_lock(&g_chunk_lock);
+    while (c) {
+        Chunk *next = c->next;
+        c->used = 0, c->next = g_free, g_free = c;
+        c = next;
+    }
+    plat_mutex_unlock(&g_chunk_lock);
+}
+
+static void *dev_scratch(uint64_t value, uint32_t bytes, uint32_t align, VkBuffer *buffer, VkDeviceSize *offset) {
+    if (g_frame.value != value) g_frame.value = value, g_frame.held = NULL;
+    Chunk *c = g_frame.held;
+    uint32_t at = c ? (c->used + align - 1) & ~(align - 1) : 0;
+    if (!c || at + bytes > c->size) {
+        c = NULL;
+        if (bytes <= CHUNK_BYTES) {
+            plat_mutex_lock(&g_chunk_lock);
+            if (g_free) c = g_free, g_free = c->next;
+            plat_mutex_unlock(&g_chunk_lock);
+        }
+        if (!c) c = chunk_new(bytes > CHUNK_BYTES ? bytes : CHUNK_BYTES);
+        c->used = 0, c->next = g_frame.held, g_frame.held = c;
+        at = 0;
+    }
+    c->used = at + bytes;
+    *buffer = c->buf, *offset = at;
+    return c->map + at;
+}
+
+// ---------- around a frame
+static void dev_frame_begin(void) { backing_sync(); }
+
+static void dev_frame_end(uint64_t value) {
+    vkb_image_flush(gpu_vk_prologue());   // the images made for the frame, to the general layout before its work
+    backing_submit_end(value);
+    if (g_frame.value == value && g_frame.held) vkrec_effect(chunks_back, g_frame.held);
+    g_frame.held = NULL, g_frame.value = 0;
+}
+
+const VkReplayOps *vkr_device_ops(void) {
+    static VkReplayOps ops = {.graphics = vkp_graphics, .compute = vkp_compute, .binds = dev_binds,
+                              .resolve = backing_resolve, .gpu_wrote = backing_gpu_wrote, .target = dev_target,
+                              .acquire = dev_acquire, .image_slot = dev_image_slot, .scratch = dev_scratch,
+                              .frame_begin = dev_frame_begin, .frame_end = dev_frame_end};
+    const VkpLayouts *l = vkp_layouts();   // read at every call: the pipeline builder may open after the first frame
+    ops.graphics_layout = l->graphics, ops.compute_layout = l->compute;
+    return &ops;
+}
+
+void vkr_device_close(void) {
+    // Every frame is done (gpu_vk_close finished the timeline first), so every chunk is back on the free list.
+    if (g_frame.held) rt_fatal("gfx: vulkan: the replay's scratch is freed inside a frame");
+    plat_mutex_lock(&g_chunk_lock);
+    while (g_free) {
+        Chunk *c = g_free;
+        g_free = c->next;
+        vkDestroyBuffer(gpu_vk.device, c->buf, NULL);
+        vkFreeMemory(gpu_vk.device, c->mem, NULL);
+        free(c);
+    }
+    plat_mutex_unlock(&g_chunk_lock);
+    plat_mutex_lock(&g_bind_lock);   // the parsed descriptions: a device opened again parses them again
+    for (uint32_t i = 0; i < BIND_BUCKETS; i++)
+        while (g_bind[i]) {
+            BindEntry *e = g_bind[i];
+            g_bind[i] = e->next;
+            free(e);
+        }
+    plat_mutex_unlock(&g_bind_lock);
+}

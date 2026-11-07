@@ -1,0 +1,689 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// Contract tests of the Vulkan back end's replay (oot2/vk_replay.h, runtime/gpu/vk_replay.c) that need no device:
+// synthetic recordings (the records of oot2/nvn_obj.h, built here) replayed through stand-in ops (VkReplayOps: the
+// pipeline builder, the stage descriptions, the backing map, render targets, the bindless tables and scratch memory)
+// into the real recorder (oot2/vk_rec.h), whose calls are stand-ins that write each packet as one line of text. Driven
+// by tests/test_runtime_vk_replay.py: `vk_replay_test <case> [args] [--mutant NAME]`. Each case runs in its own process
+// and prints its two logs: "op ..." lines for what the replay asked of its ops (the submitting thread), then "pkt ..."
+// lines for the calls the recorder made (its thread). A stop must end in one named fatal, which the driver checks.
+//
+// The fake address space: HOST is real memory of this program that the backing map would import (the replay reads it:
+// the uniform snapshot, indirect group counts), MIRROR and VRAM are numbers only (a mirror and an extent: never read).
+// Addresses in the logs are printed from their region's start, so the logs do not depend on where this program loads.
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "volk.h"
+
+#include "oot2/backing.h"
+#include "oot2/bindless.h"
+#include "oot2/gpu.h"
+#include "oot2/gpu_vk.h"
+#include "oot2/nvn.h"
+#include "oot2/nvn_obj.h"
+#include "oot2/nvn_program.h"
+#include "oot2/nvn_tex.h"
+#include "oot2/runtime.h"
+#include "oot2/shader_desc.h"
+#include "oot2/vk_rec.h"
+#include "oot2/vk_replay.h"
+#include "plat.h"
+
+#define CHECK(cond)                                                                                                    \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            fprintf(stderr, "check failed at line %d: %s\n", __LINE__, #cond);                                         \
+            exit(1);                                                                                                   \
+        }                                                                                                              \
+    } while (0)
+
+typedef unsigned long long ull;
+
+// ---------- the fake address space
+#define HOST_BYTES (1u << 20)
+static _Alignas(4096) uint8_t g_host[HOST_BYTES];
+#define HOST ((uint64_t)(uintptr_t)g_host)
+#define MIRROR 0x30000000ull
+#define VRAM 0x40000000ull
+#define REGION_BYTES 0x10000000ull
+#define BUF_HOST 0xB1u
+#define BUF_MIRROR 0xB2u
+#define BUF_VRAM 0xB3u
+#define BUF_SCRATCH 0x5Cu
+
+static uint8_t g_arena[8u << 20];
+static uint32_t g_arena_used;
+
+// An address as the logs print it: H+, M+ or V+ and the offset from the region's start.
+static void where(char *out, size_t cap, uint64_t a) {
+    if (a - HOST < HOST_BYTES) snprintf(out, cap, "H+0x%llx", (ull)(a - HOST));
+    else if (a - MIRROR < REGION_BYTES) snprintf(out, cap, "M+0x%llx", (ull)(a - MIRROR));
+    else if (a - VRAM < REGION_BYTES) snprintf(out, cap, "V+0x%llx", (ull)(a - VRAM));
+    else snprintf(out, cap, "0x%llx", (ull)a);
+}
+
+// ---------- the two logs
+typedef struct {
+    char *p;
+    size_t n, cap;
+} Log;
+static Log g_ops, g_pkt;
+static void lput(Log *l, const char *fmt, ...) {
+    char line[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int k = vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    CHECK(k >= 0);
+    size_t n = (size_t)k < sizeof line ? (size_t)k : sizeof line - 1;
+    if (l->n + n + 1 > l->cap) {
+        l->cap = (l->n + n + 1) * 2;
+        l->p = realloc(l->p, l->cap);
+        CHECK(l->p);
+    }
+    memcpy(l->p + l->n, line, n);
+    l->n += n;
+    l->p[l->n] = 0;
+}
+
+// ---------- the stages and their bindings
+static nvn_stage g_vs, g_ps, g_cs;
+static ShaderBinds g_vs_binds, g_ps_binds, g_cs_binds;
+
+static void stage(nvn_stage *s, const char *key, int kind, uint32_t c1_at, uint32_t c1_end) {
+    memset(s, 0, sizeof *s);
+    snprintf(s->key, sizeof s->key, "%s", key);
+    s->kind = (uint8_t)kind;
+    s->ctl_size = NVN_STAGE_CTL_MAX;
+    memcpy(s->ctl + 0x40, &c1_at, 4);
+    memcpy(s->ctl + 0x44, &c1_end, 4);
+}
+static void cbuf(ShaderBinds *b, uint8_t slot, uint16_t binding) { b->cb[b->ncb++] = (ShdCbuf){slot, 1, binding}; }
+
+static void make_stages(void) {
+    stage(&g_vs, "00000000000000a1.00000001", NVN_STAGE_VS, 0x100, 0x140);
+    stage(&g_ps, "00000000000000b2.00000001", NVN_STAGE_PS, 0, 0);
+    stage(&g_cs, "00000000000000c3.00000001", NVN_STAGE_CS, 0, 0);
+    // the compute stage's c[0] layout (vk_nvn.h, VknC0Layout): two root words, three uniform rows, two storage rows
+    g_cs.ctl[0xA9] = 2, g_cs.ctl[0xB1] = 3, g_cs.ctl[0xB2] = 2;
+
+    ShaderBinds *v = &g_vs_binds;
+    memset(v, 0, sizeof *v);
+    v->kind = SHD_VS, v->fits = 1;
+    cbuf(v, 0, 1), cbuf(v, 3, 2), cbuf(v, 1, 3), cbuf(v, 2, 4), cbuf(v, 24, 5);
+    v->vin[v->nvin++] = (ShdVin){0, 0, 4, SHD_FLOAT};
+    v->vin[v->nvin++] = (ShdVin){1, 0, 4, SHD_SINT};   // no attribute bound there: it reads (0, 0, 0, 1), as integers
+
+    ShaderBinds *p = &g_ps_binds;
+    memset(p, 0, sizeof *p);
+    p->kind = SHD_PS, p->fits = 1;
+    cbuf(p, 0, 6), cbuf(p, 4, 7), cbuf(p, 2, 8);
+    p->sb[p->nsb++] = (ShdSbuf){.set = 1, .ordinal = 0, .cb_slot = 0, .write = 1, .binding = 9, .address_byte_offset = 0x510};
+    p->tex[p->ntex++] = (ShdTex){.via = SHD_VIA_PUSH_SLOT, .kind = SHD_TEX_COMBINED, .view = BV_2D, .binding = 0,
+                                 .array_length = 1, .push_slot = 2, .push_offset = 24, .c2_slot = 5};
+    p->tex[p->ntex++] = (ShdTex){.via = SHD_VIA_POOL, .kind = SHD_TEX_COMBINED, .view = BV_2D, .push_slot = -1,
+                                 .push_offset = -1, .c2_slot = -1};
+
+    ShaderBinds *c = &g_cs_binds;
+    memset(c, 0, sizeof *c);
+    c->kind = SHD_CS, c->fits = 1, c->local_size[0] = 64, c->local_size[1] = c->local_size[2] = 1;
+    cbuf(c, 0, 1), cbuf(c, 2, 2), cbuf(c, 24, 3);
+    c->sb[c->nsb++] = (ShdSbuf){.set = 1, .ordinal = 0, .cb_slot = 0, .write = 0, .binding = 4, .address_byte_offset = 0x320};
+}
+
+// ---------- the stand-in ops
+static VkPipeline op_graphics(const VkpStage *vs, const VkpStage *ps, const VkpFormats *f) {
+    lput(&g_ops, "op graphics %s %s colors=%u c0=%d depth=%d stencil=%d\n", vs->key, ps->key, f->ncolor,
+         f->ncolor ? (int)f->color[0] : 0, (int)f->depth, (int)f->stencil);
+    return (VkPipeline)(uintptr_t)0x9A;
+}
+static VkPipeline op_compute(const VkpStage *cs) {
+    lput(&g_ops, "op compute %s\n", cs->key);
+    return (VkPipeline)(uintptr_t)0x9C;
+}
+static const ShaderBinds *op_binds(const nvn_stage *s) {
+    return s == &g_vs ? &g_vs_binds : s == &g_ps ? &g_ps_binds : s == &g_cs ? &g_cs_binds : NULL;
+}
+static void op_resolve(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out) {
+    (void)value;
+    memset(out, 0, sizeof *out);
+    out->address = addr;
+    if (addr - HOST < HOST_BYTES) {
+        CHECK(addr - HOST + size <= HOST_BYTES);
+        out->buffer = BUF_HOST, out->offset = addr - HOST, out->kind = BACKING_IMPORT;
+    } else if (addr - MIRROR < REGION_BYTES) {
+        out->buffer = BUF_MIRROR, out->offset = addr - MIRROR, out->kind = BACKING_MIRROR;
+    } else if (addr - VRAM < REGION_BYTES) {
+        out->buffer = BUF_VRAM, out->offset = addr - VRAM, out->kind = BACKING_EXTENT;
+    } else {
+        fprintf(stderr, "resolve of 0x%llx, outside the fake regions\n", (ull)addr);
+        exit(1);
+    }
+}
+static void op_gpu_wrote(uint64_t addr, uint64_t size, uint64_t value) {
+    char w[64];
+    where(w, sizeof w, addr);
+    lput(&g_ops, "op wrote %s 0x%llx frame %llu\n", w, (ull)size, (ull)value);
+}
+static int op_target(const nvn_tex_rec *t, int storage, uint64_t value, VkrTarget *out) {
+    (void)value;
+    if (storage) return 0;
+    if (t->tex.d.format == NVN_FORMAT_DEPTH24_STENCIL8)
+        *out = (VkrTarget){(VkImageView)(uintptr_t)0x7D00, VK_FORMAT_D24_UNORM_S8_UINT, t->tex.d.width,
+                           t->tex.d.height, 1, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT};
+    else
+        *out = (VkrTarget){(VkImageView)(uintptr_t)(0x7100 + (uint32_t)t->tex.d.format), VK_FORMAT_R8G8B8A8_UNORM,
+                           t->tex.d.width, t->tex.d.height, 1, VK_IMAGE_ASPECT_COLOR_BIT};
+    return 1;
+}
+static VkDescriptorSet op_acquire(uint64_t value, const dpool_ref *textures, const dpool_ref *samplers) {
+    lput(&g_ops, "op acquire frame %llu textures %d samplers %d\n", (ull)value, textures != NULL, samplers != NULL);
+    return (VkDescriptorSet)(uintptr_t)0x5E7;
+}
+static uint32_t op_image_slot(uint32_t id, int type) { return 1000 + id * 8 + (uint32_t)type; }
+static void *op_scratch(uint64_t value, uint32_t bytes, uint32_t align, VkBuffer *buffer, VkDeviceSize *offset) {
+    (void)value;
+    uint32_t at = (g_arena_used + align - 1) & ~(align - 1);
+    CHECK(at + bytes <= sizeof g_arena);
+    g_arena_used = at + bytes;
+    *buffer = (VkBuffer)(uintptr_t)BUF_SCRATCH, *offset = at;
+    return g_arena + at;
+}
+static void op_frame_begin(void) { lput(&g_ops, "op frame_begin\n"); }
+static void op_frame_end(uint64_t value) { lput(&g_ops, "op frame_end %llu\n", (ull)value); }
+
+static const VkReplayOps g_fake_ops = {
+    .graphics = op_graphics, .compute = op_compute,
+    .graphics_layout = (VkPipelineLayout)(uintptr_t)0x6100, .compute_layout = (VkPipelineLayout)(uintptr_t)0x6200,
+    .binds = op_binds, .resolve = op_resolve, .gpu_wrote = op_gpu_wrote, .target = op_target, .acquire = op_acquire,
+    .image_slot = op_image_slot, .scratch = op_scratch, .frame_begin = op_frame_begin, .frame_end = op_frame_end};
+
+// ---------- the stand-in recorder calls: one line per call
+#define FAKE_CB ((VkCommandBuffer)(uintptr_t)0xC0FFEE00u)
+static void pr_f(double v) { lput(&g_pkt, " %g", v); }
+static void pr_p(const void *v) { lput(&g_pkt, " 0x%llx", (ull)(uintptr_t)v); }
+static void pr_i(long long v) { lput(&g_pkt, " %lld", v); }
+#define PRA(x) _Generic((x), float: pr_f, double: pr_f, VkPipeline: pr_p, VkBuffer: pr_p, default: pr_i)(x);
+#define NARG_(_1, _2, _3, _4, _5, _6, N, ...) N
+#define NARG(...) NARG_(__VA_ARGS__, 6, 5, 4, 3, 2, 1)
+#define CAT_(a, b) a##b
+#define CAT(a, b) CAT_(a, b)
+#define EACH_1(m, x) m(x)
+#define EACH_2(m, x, ...) m(x) EACH_1(m, __VA_ARGS__)
+#define EACH_3(m, x, ...) m(x) EACH_2(m, __VA_ARGS__)
+#define EACH_4(m, x, ...) m(x) EACH_3(m, __VA_ARGS__)
+#define EACH_5(m, x, ...) m(x) EACH_4(m, __VA_ARGS__)
+#define EACH_6(m, x, ...) m(x) EACH_5(m, __VA_ARGS__)
+#define EACH(m, ...) CAT(EACH_, NARG(__VA_ARGS__))(m, __VA_ARGS__)
+
+#define FAKE_F(name, params, packargs, ...)                                                                            \
+    static void VKAPI_CALL fake_##name(VkCommandBuffer cb, VKREC_UNPAREN params) {                                     \
+        CHECK(cb == FAKE_CB);                                                                                          \
+        lput(&g_pkt, "pkt %s", #name);                                                                                 \
+        EACH(PRA, VKREC_UNPAREN packargs)                                                                              \
+        lput(&g_pkt, "\n");                                                                                            \
+    }
+#define FAKE_D(name, kind, params, packargs, ...) FAKE_F(name, params, packargs, __VA_ARGS__)
+VKREC_FIXED(FAKE_F)
+VKREC_DRAWS(FAKE_D)
+
+static void VKAPI_CALL fake_BindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout l,
+                                               uint32_t first, uint32_t n, const VkDescriptorSet *s, uint32_t nd,
+                                               const uint32_t *d) {
+    CHECK(cb == FAKE_CB && n == 1 && nd == 0);
+    (void)d;
+    lput(&g_pkt, "pkt BindDescriptorSets %d 0x%llx %u 0x%llx\n", (int)bp, (ull)(uintptr_t)l, first, (ull)(uintptr_t)s[0]);
+}
+
+// A buffer's bytes as the replay left them in scratch memory: the non-zero 32-bit words, by byte offset.
+static void words(const VkDescriptorBufferInfo *b) {
+    if ((uintptr_t)b->buffer != BUF_SCRATCH) return;
+    const uint8_t *p = g_arena + b->offset;
+    int shown = 0, all_zero = 1;
+    for (VkDeviceSize o = 0; o + 4 <= b->range; o += 4) {
+        uint32_t w;
+        memcpy(&w, p + o, 4);
+        if (!w) continue;
+        all_zero = 0;
+        if (shown++ < 24) lput(&g_pkt, " 0x%llx=%#x", (ull)o, w);
+    }
+    if (all_zero) lput(&g_pkt, " zero");
+}
+
+static void VKAPI_CALL fake_PushDescriptorSetKHR(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout l,
+                                                 uint32_t set, uint32_t n, const VkWriteDescriptorSet *w) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt PushDescriptorSetKHR %d 0x%llx set %u writes %u\n", (int)bp, (ull)(uintptr_t)l, set, n);
+    for (uint32_t i = 0; i < n; i++) {
+        CHECK(w[i].descriptorCount == 1 && w[i].pBufferInfo);
+        const VkDescriptorBufferInfo *b = w[i].pBufferInfo;
+        lput(&g_pkt, "pkt  w b=%u %s buf=0x%llx off=0x%llx range=0x%llx", w[i].dstBinding,
+             w[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ? "UB" : "SB", (ull)(uintptr_t)b->buffer,
+             (ull)b->offset, (ull)b->range);
+        words(b);
+        lput(&g_pkt, "\n");
+    }
+}
+static void VKAPI_CALL fake_PushConstants(VkCommandBuffer cb, VkPipelineLayout l, VkShaderStageFlags st, uint32_t off,
+                                          uint32_t size, const void *v) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt PushConstants 0x%llx %#x %u %u", (ull)(uintptr_t)l, st, off, size);
+    for (uint32_t i = 0; i + 4 <= size; i += 4) {
+        uint32_t x;
+        memcpy(&x, (const uint8_t *)v + i, 4);
+        if (x) lput(&g_pkt, " %u=%#x", i, x);
+    }
+    lput(&g_pkt, "\n");
+}
+static void VKAPI_CALL fake_BindVertexBuffers2(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBuffer *buf,
+                                               const VkDeviceSize *off, const VkDeviceSize *sz, const VkDeviceSize *st) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt BindVertexBuffers2 %u %u", first, n);
+    for (uint32_t i = 0; i < n; i++) lput(&g_pkt, " 0x%llx+0x%llx", (ull)(uintptr_t)buf[i], (ull)off[i]);
+    lput(&g_pkt, "%s\n", sz || st ? " sizes" : "");
+}
+static void VKAPI_CALL fake_SetViewportWithCount(VkCommandBuffer cb, uint32_t n, const VkViewport *v) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt SetViewportWithCount %u", n);
+    for (uint32_t i = 0; i < n; i++)
+        lput(&g_pkt, " [%g %g %g %g %g %g]", v[i].x, v[i].y, v[i].width, v[i].height, v[i].minDepth, v[i].maxDepth);
+    lput(&g_pkt, "\n");
+}
+static void VKAPI_CALL fake_SetScissorWithCount(VkCommandBuffer cb, uint32_t n, const VkRect2D *r) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt SetScissorWithCount %u", n);
+    for (uint32_t i = 0; i < n; i++)
+        lput(&g_pkt, " [%d %d %u %u]", r[i].offset.x, r[i].offset.y, r[i].extent.width, r[i].extent.height);
+    lput(&g_pkt, "\n");
+}
+static void VKAPI_CALL fake_SetVertexInputEXT(VkCommandBuffer cb, uint32_t nb, const VkVertexInputBindingDescription2EXT *b,
+                                              uint32_t na, const VkVertexInputAttributeDescription2EXT *a) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt SetVertexInputEXT");
+    for (uint32_t i = 0; i < nb; i++)
+        lput(&g_pkt, " [b%u stride=%u rate=%d div=%u]", b[i].binding, b[i].stride, (int)b[i].inputRate, b[i].divisor);
+    for (uint32_t i = 0; i < na; i++)
+        lput(&g_pkt, " [l%u b%u fmt=%d off=%u]", a[i].location, a[i].binding, (int)a[i].format, a[i].offset);
+    lput(&g_pkt, "\n");
+}
+static void VKAPI_CALL fake_SetColorBlendEnableEXT(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkBool32 *v) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt SetColorBlendEnableEXT %u %u", first, n);
+    for (uint32_t i = 0; i < n; i++) lput(&g_pkt, " %u", v[i]);
+    lput(&g_pkt, "\n");
+}
+static void VKAPI_CALL fake_SetColorBlendEquationEXT(VkCommandBuffer cb, uint32_t first, uint32_t n,
+                                                     const VkColorBlendEquationEXT *e) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt SetColorBlendEquationEXT %u %u", first, n);
+    for (uint32_t i = 0; i < n; i++)
+        lput(&g_pkt, " [%d %d %d %d %d %d]", (int)e[i].srcColorBlendFactor, (int)e[i].dstColorBlendFactor,
+             (int)e[i].colorBlendOp, (int)e[i].srcAlphaBlendFactor, (int)e[i].dstAlphaBlendFactor, (int)e[i].alphaBlendOp);
+    lput(&g_pkt, "\n");
+}
+static void VKAPI_CALL fake_SetColorWriteMaskEXT(VkCommandBuffer cb, uint32_t first, uint32_t n,
+                                                 const VkColorComponentFlags *m) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt SetColorWriteMaskEXT %u %u", first, n);
+    for (uint32_t i = 0; i < n; i++) lput(&g_pkt, " %#x", m[i]);
+    lput(&g_pkt, "\n");
+}
+static void VKAPI_CALL fake_SetBlendConstants(VkCommandBuffer cb, const float c[4]) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt SetBlendConstants %g %g %g %g\n", c[0], c[1], c[2], c[3]);
+}
+static void VKAPI_CALL fake_PipelineBarrier2(VkCommandBuffer cb, const VkDependencyInfo *d) {
+    CHECK(cb == FAKE_CB && d->memoryBarrierCount == 1 && !d->bufferMemoryBarrierCount && !d->imageMemoryBarrierCount);
+    const VkMemoryBarrier2 *m = d->pMemoryBarriers;
+    lput(&g_pkt, "pkt PipelineBarrier2 full=%d\n",
+         m->srcStageMask == VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT && m->dstStageMask == VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT &&
+             m->srcAccessMask == VK_ACCESS_2_MEMORY_WRITE_BIT &&
+             m->dstAccessMask == (VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT));
+}
+static void att(const VkRenderingAttachmentInfo *a) {
+    lput(&g_pkt, " [0x%llx layout=%d load=%d store=%d]", (ull)(uintptr_t)a->imageView, (int)a->imageLayout,
+         (int)a->loadOp, (int)a->storeOp);
+}
+static void VKAPI_CALL fake_BeginRendering(VkCommandBuffer cb, const VkRenderingInfo *r) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt BeginRendering %d,%d %ux%u layers=%u colors=%u", r->renderArea.offset.x, r->renderArea.offset.y,
+         r->renderArea.extent.width, r->renderArea.extent.height, r->layerCount, r->colorAttachmentCount);
+    for (uint32_t i = 0; i < r->colorAttachmentCount; i++) att(&r->pColorAttachments[i]);
+    if (r->pDepthAttachment) lput(&g_pkt, " depth"), att(r->pDepthAttachment);
+    if (r->pStencilAttachment) lput(&g_pkt, " stencil"), att(r->pStencilAttachment);
+    lput(&g_pkt, "\n");
+}
+static void VKAPI_CALL fake_EndRendering(VkCommandBuffer cb) {
+    CHECK(cb == FAKE_CB);
+    lput(&g_pkt, "pkt EndRendering\n");
+}
+static void VKAPI_CALL fake_ClearAttachments(VkCommandBuffer cb, uint32_t na, const VkClearAttachment *a, uint32_t nr,
+                                             const VkClearRect *r) {
+    CHECK(cb == FAKE_CB && na == 1 && nr == 1);
+    lput(&g_pkt, "pkt ClearAttachments aspect=%#x att=%u", a->aspectMask, a->colorAttachment);
+    if (a->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)
+        lput(&g_pkt, " color=%g,%g,%g,%g", a->clearValue.color.float32[0], a->clearValue.color.float32[1],
+             a->clearValue.color.float32[2], a->clearValue.color.float32[3]);
+    else
+        lput(&g_pkt, " depth=%g stencil=%u", a->clearValue.depthStencil.depth, a->clearValue.depthStencil.stencil);
+    lput(&g_pkt, " rect=%d,%d %ux%u layers=%u+%u\n", r->rect.offset.x, r->rect.offset.y, r->rect.extent.width,
+         r->rect.extent.height, r->baseArrayLayer, r->layerCount);
+}
+static void VKAPI_CALL fake_SetCheckpointNV(VkCommandBuffer cb, const void *m) {
+    (void)cb, (void)m;
+}
+
+// ---------- the stand-in submissions, over a test's timeline
+static uint64_t g_counter;
+static PlatMutex g_counter_lock = PLAT_MUTEX_INIT;
+static PlatCond g_counter_cond = PLAT_COND_INIT;
+static void counter_raise(uint64_t v) {
+    plat_mutex_lock(&g_counter_lock);
+    if (v > g_counter) g_counter = v;
+    plat_cond_broadcast(&g_counter_cond);
+    plat_mutex_unlock(&g_counter_lock);
+}
+static uint64_t counter_wait(void *ctx, uint64_t value, uint64_t timeout_ns) {
+    (void)ctx;
+    uint64_t t0 = plat_now_ns();
+    plat_mutex_lock(&g_counter_lock);
+    while (g_counter < value) {
+        uint64_t spent = plat_now_ns() - t0;
+        if (spent >= timeout_ns) break;
+        plat_cond_wait_ns(&g_counter_cond, &g_counter_lock, timeout_ns - spent);
+    }
+    uint64_t r = g_counter;
+    plat_mutex_unlock(&g_counter_lock);
+    return r;
+}
+static uint64_t g_cur_value;
+static uint64_t fake_begin(int kind) {
+    CHECK(kind == GPU_VK_REPLAY);
+    g_cur_value = gpu_sync_begin();
+    return g_cur_value;
+}
+static VkCommandBuffer fake_cmd(void) { return FAKE_CB; }
+static uint64_t fake_end(const VkSemaphoreSubmitInfo *waits, uint32_t n) {
+    CHECK(n == 0 && !waits);
+    uint64_t v = g_cur_value;
+    lput(&g_pkt, "pkt submit %llu\n", (ull)v);
+    gpu_sync_end();
+    counter_raise(v);   // the stand-in device is done at once
+    return v;
+}
+
+static VkRecCalls g_calls;
+static VkRecSubmit g_submit;
+static void open_fakes(void) {
+    GpuTimelineSource src = {.wait = counter_wait};
+    gpu_sync_start(&src, 0);
+    memset(&g_calls, 0, sizeof g_calls);
+#define SET_F(name, ...) g_calls.name = fake_##name;
+#define SET_D(name, kind, ...) g_calls.name = fake_##name;
+#define SET_C(name) g_calls.name = fake_##name;
+    VKREC_FIXED(SET_F)
+    VKREC_DRAWS(SET_D)
+    VKREC_CUSTOM(SET_C)
+#undef SET_F
+#undef SET_D
+#undef SET_C
+    g_calls.SetCheckpointNV = fake_SetCheckpointNV;
+    g_submit = (VkRecSubmit){fake_begin, fake_cmd, fake_end, 0};
+    VkRecOpen o = {1u << 20, 2, &g_calls, &g_submit};
+    vkrec_open(&o);
+    vkr_set_ops(&g_fake_ops);
+    make_stages();
+}
+static void close_fakes(void) {
+    vkrec_idle();
+    uint32_t nf;
+    const VkRecFrame *fr = vkrec_frames(&nf);
+    for (uint32_t i = 0; i < nf; i++)   // the packets' size, for the bytes a draw costs (research 62: 2.8 KB a draw)
+        printf("frame %llu packets %u bytes %llu\n", (ull)fr[i].value, fr[i].packets, (ull)fr[i].bytes);
+    gpu_sync_finish();
+    vkrec_close();
+    gpu_sync_stop();
+    fputs(g_ops.p ? g_ops.p : "", stdout);
+    fputs(g_pkt.p ? g_pkt.p : "", stdout);
+}
+
+// ---------- recordings
+typedef struct {
+    _Alignas(8) uint8_t b[1 << 16];
+    size_t n;
+} Rec;
+static Rec g_rec[2];
+
+static void put(Rec *r, uint32_t op, const void *payload, size_t bytes) {
+    size_t size = (sizeof(op_hdr) + bytes + 7) & ~(size_t)7;
+    CHECK(r->n + size <= sizeof r->b);
+    op_hdr h = {op, (uint32_t)size};
+    memset(r->b + r->n, 0, size);
+    memcpy(r->b + r->n, &h, sizeof h);
+    if (bytes) memcpy(r->b + r->n + sizeof h, payload, bytes);
+    r->n += size;
+}
+#define PUT(r, op, ...) ({ __typeof__(__VA_ARGS__) p_ = __VA_ARGS__; put((r), (op), &p_, sizeof p_); })
+static Rec *rec_begin(int i) {
+    Rec *r = &g_rec[i];
+    r->n = 0;
+    put(r, OP_BEGIN, NULL, 0);
+    return r;
+}
+static uint64_t rec_end(Rec *r) {
+    put(r, OP_END, NULL, 0);
+    return (uint64_t)(uintptr_t)r->b;
+}
+
+static p_set_rt one_target(int with_depth) {
+    p_set_rt rt;
+    memset(&rt, 0, sizeof rt);
+    rt.n = 1;
+    rt.color[0].present = 1;
+    rt.color[0].tex.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = 64, .height = 32,
+                                      .depth = 1, .levels = 1};
+    if (with_depth) {
+        rt.depth.present = 1;
+        rt.depth.tex.d = rt.color[0].tex.d;
+        rt.depth.tex.d.format = NVN_FORMAT_DEPTH24_STENCIL8;
+    }
+    return rt;
+}
+
+static p_bind_program program(int compute) {
+    p_bind_program p;
+    memset(&p, 0, sizeof p);
+    if (compute) {
+        p.stages = 1 << 5, p.nstage = 1, p.code[0] = MIRROR + 0x6000, p.id[0] = &g_cs;
+    } else {
+        p.stages = 1 << 0 | 1 << 1, p.nstage = 2;
+        p.code[0] = MIRROR + 0x1000, p.id[0] = &g_vs;
+        p.code[1] = MIRROR + 0x2000, p.id[1] = &g_ps;
+    }
+    return p;
+}
+
+// The graphics state of the draws: one target, a viewport and a scissor, a vertex stream, a uniform buffer of the
+// vertex stage in host memory (an import: copied at submit), one of the pixel stage in a mirror (bound live), a
+// storage buffer the pixel stage writes, a texture.
+static void graphics_state(Rec *r) {
+    p_set_rt rt = one_target(0);
+    put(r, OP_SET_RT, &rt, sizeof rt);
+    PUT(r, OP_VIEWPORTS, (p_viewports){.first = 0, .n = 1, .v = {{0, 0, 64, 32}}});
+    PUT(r, OP_SCISSOR, (p_scissor){.first = 0, .n = 1, .r = {{8, 4, 16, 8}}});
+    PUT(r, OP_BIND_PROGRAM, program(0));
+    va_st a = {.fmt = NVN_FORMAT_RGBA32F, .offset = 0, .stream = 0};
+    p_bind_vattr va = {.first = 0, .n = 1};
+    memcpy(&va.st[0], &a, sizeof a);
+    put(r, OP_BIND_VATTR, &va, sizeof va);
+    PUT(r, OP_BIND_VSTREAM, (p_bind_vstream){.first = 0, .n = 1, .st = {{16, 0}}});
+    PUT(r, OP_BIND_VBUF, (p_bind_vbuf){.first = 0, .n = 1, .r = {{MIRROR + 0x3000, 64}}});
+    for (uint32_t i = 0; i < 16; i++) memcpy(g_host + 0x100 + 4 * i, &(uint32_t){0xA0 + i}, 4);
+    PUT(r, OP_BIND_UBO, (p_bind_buf){.stage = 0, .index = 0, .addr = HOST + 0x100, .size = 64});
+    PUT(r, OP_BIND_UBO, (p_bind_buf){.stage = 1, .index = 1, .addr = MIRROR + 0x4000, .size = 256});
+    PUT(r, OP_BIND_SSBO, (p_bind_buf){.stage = 1, .index = 0, .addr = VRAM + 0x104, .size = 0x40});
+    PUT(r, OP_BIND_TEX, (p_bind_handles){.stage = 1, .first = 5, .n = 1, .h = {7u | 3u << NVN_HANDLE_TEXTURE_BITS}});
+}
+
+static void case_graphics(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    graphics_state(r);
+    PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .first = 0, .count = 3, .base_instance = 0, .instances = 0});
+    PUT(r, OP_DRAW_IDX, (p_draw_idx){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .itype = NVN_INDEX_TYPE_UNSIGNED_SHORT, .count = 6,
+                                     .base_vertex = 2, .base_instance = 1, .instances = 2, .ibuf = MIRROR + 0x5000});
+    PUT(r, OP_DRAW_IDX_IND, (p_draw_idx_ind){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .itype = NVN_INDEX_TYPE_UNSIGNED_INT,
+                                             .ibuf = MIRROR + 0x5000, .ind = VRAM + 0x200});
+    PUT(r, OP_CLEAR_COLOR, (p_clear_color){.index = 0, .mask = 0xF, .rgba = {1, 0, 0, 1}});
+    PUT(r, OP_BARRIER, (p_barrier){0, 0});
+    uint64_t h = rec_end(r);
+    uint64_t v = vkr_submit(&h, 1);
+    // the bound state lasts: a second submission draws again with nothing bound anew, and its uniform copy is its own
+    for (uint32_t i = 0; i < 16; i++) memcpy(g_host + 0x100 + 4 * i, &(uint32_t){0xB0 + i}, 4);
+    r = rec_begin(1);
+    PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .first = 3, .count = 3, .base_instance = 0, .instances = 1});
+    uint64_t h2 = rec_end(r);
+    uint64_t v2 = vkr_submit(&h2, 1);
+    CHECK(v2 == v + 1);
+    uint32_t n;
+    const VkrWrite *w = vkr_writes(v, &n);
+    CHECK(w && n == 3);
+    for (uint32_t i = 0; i < n; i++) CHECK(w[i].addr == VRAM + 0x100 && w[i].size == 0x44 && w[i].draw == i + 1 && !w[i].image);
+    VkrStats st;
+    vkr_stats(&st);
+    printf("stats frames %llu draws %llu clears %llu passes %llu snapshots %llu live %llu writes %llu\n", (ull)st.frames,
+           (ull)st.draws, (ull)st.clears, (ull)st.passes, (ull)st.snapshots, (ull)st.live_uniforms,
+           (ull)st.storage_writes);
+    close_fakes();
+    printf("ok graphics\n");
+}
+
+static void case_depth(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    p_set_rt rt = one_target(1);
+    put(r, OP_SET_RT, &rt, sizeof rt);
+    PUT(r, OP_CLEAR_DS, (p_clear_ds){.depth = 1.0f, .depth_mask = 1, .stencil = 5, .stencil_mask = 0xFF});
+    PUT(r, OP_SCISSOR, (p_scissor){.first = 0, .n = 1, .r = {{0, 0, 32, 8}}});
+    PUT(r, OP_CLEAR_COLOR, (p_clear_color){.index = 0, .mask = 0xF, .rgba = {0, 0.5f, 0, 1}});
+    PUT(r, OP_SET_RT, one_target(0));
+    PUT(r, OP_CLEAR_COLOR, (p_clear_color){.index = 0, .mask = 0xF, .rgba = {0, 0, 1, 1}});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    close_fakes();
+    printf("ok depth\n");
+}
+
+static void case_compute(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    PUT(r, OP_BIND_PROGRAM, program(1));
+    PUT(r, OP_BIND_UBO, (p_bind_buf){.stage = 5, .index = 2, .addr = MIRROR + 0x7000, .size = 0x80});
+    PUT(r, OP_BIND_SSBO, (p_bind_buf){.stage = 5, .index = 1, .addr = VRAM + 0x300, .size = 0x20});
+    PUT(r, OP_PUSH_CONST, (p_push_const){.compute = 1, .table = 2, .offset = 8, .bytes = 8, .w = {0x11, 0x22}});
+    PUT(r, OP_DISPATCH, (p_dispatch){4, 2, 1, 0});
+    const uint32_t groups[3] = {5, 6, 7};
+    memcpy(g_host + 0x200, groups, sizeof groups);
+    PUT(r, OP_DISPATCH_IND, (p_dispatch_ind){.ind = HOST + 0x200});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    close_fakes();
+    printf("ok compute\n");
+}
+
+// A uniform range copied at submit and a GPU write over it in the same submission, in either order.
+static void case_conflict(int write_first) {
+    open_fakes();
+    g_ps_binds.sb[0].address_byte_offset = 0x510;
+    Rec *r = rec_begin(0);
+    graphics_state(r);
+    PUT(r, OP_BIND_SSBO, (p_bind_buf){.stage = 1, .index = 0, .addr = HOST + 0x100, .size = 0x40});
+    if (write_first) {
+        PUT(r, OP_BIND_UBO, (p_bind_buf){.stage = 0, .index = 0, .addr = 0, .size = 0});
+        PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3});
+        PUT(r, OP_BIND_UBO, (p_bind_buf){.stage = 0, .index = 0, .addr = HOST + 0x100, .size = 64});
+    }
+    PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    printf("submit returned\n");
+}
+
+// A state that needs a core feature the device does not enable stops by name at the draw.
+static void case_clamp(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    graphics_state(r);
+    PUT(r, OP_DEPTH_CLAMP, (p_flag){1});
+    PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    printf("submit returned\n");
+}
+
+static void case_oplist(void) {
+    for (uint32_t op = 0; op < OP_COUNT_; op++) {
+        const char *t = vkr_op_ticket(op);
+        printf("op %u %s %s\n", op, nvn_op_name(op), t ? t : "replayed");
+    }
+    printf("past %s\n", vkr_op_ticket(OP_COUNT_));
+    printf("ok oplist\n");
+}
+
+// A recording holding op (its record zero past the header, as long as the largest record the test knows).
+static void case_stop(uint32_t op) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    static const uint8_t zero[512];
+    put(r, op, zero, sizeof zero);
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    printf("submit returned\n");
+}
+
+static void case_broken(void) {
+    open_fakes();
+    Rec *r = &g_rec[0];
+    r->n = 0;
+    PUT(r, OP_DRAW, (p_draw){0});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    printf("submit returned\n");
+}
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc < 2) {
+        fprintf(stderr, "usage: vk_replay_test <case> [args] [--mutant NAME]\n");
+        return 2;
+    }
+    for (int i = 2; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "--mutant")) continue;
+        const char *m = argv[i + 1];
+        if (!strcmp(m, "noflip")) vkr_no_flip = 1;
+        else if (!strcmp(m, "nosnapshot")) vkr_no_snapshot = 1;
+        else {
+            fprintf(stderr, "unknown mutant %s\n", m);
+            return 2;
+        }
+    }
+    const char *cs = argv[1];
+    if (!strcmp(cs, "graphics")) case_graphics();
+    else if (!strcmp(cs, "depth")) case_depth();
+    else if (!strcmp(cs, "compute")) case_compute();
+    else if (!strcmp(cs, "conflict_read_first")) case_conflict(0);
+    else if (!strcmp(cs, "conflict_write_first")) case_conflict(1);
+    else if (!strcmp(cs, "oplist")) case_oplist();
+    else if (!strcmp(cs, "clamp")) case_clamp();
+    else if (!strcmp(cs, "stop") && argc >= 3) case_stop((uint32_t)strtoul(argv[2], NULL, 10));
+    else if (!strcmp(cs, "broken")) case_broken();
+    else {
+        fprintf(stderr, "unknown case %s\n", cs);
+        return 2;
+    }
+    return 0;
+}

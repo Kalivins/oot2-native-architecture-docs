@@ -78,6 +78,8 @@ typedef struct VkpModule {
     uint32_t bytes;
     int from;                   // SHC_FROM_BASE or SHC_FROM_VARIANTS
     ShaderDesc desc;
+    const char *description;    // the description's text, inside the mapped pack (not NUL-terminated)
+    uint32_t description_bytes;
 } VkpModule;
 
 // Open the packs (variants may be NULL). 1, or 0 with the reason in why.

@@ -247,6 +247,8 @@ void vkrec_close(void) {
     G.open = 0;
 }
 
+int vkrec_is_open(void) { return G.open; }
+
 // ---------- the replay's side
 void *vkrec_put(uint32_t op, size_t bytes) {
     if (!t_frame) rt_fatal("gfx: vulkan: recorder: a command outside a frame (vkrec_begin first)");

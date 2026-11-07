@@ -258,7 +258,7 @@ class TablesTest(unittest.TestCase):
 
     def test_dynamic_states_follow_what_the_device_allows(self) -> None:
         counts = {(l[1], l[2]): (int(l[3]), l[4:]) for l in self.lines if l[0] == "dyn"}
-        for variant, want in (("none", (3, 8, 10, 1)), ("all", (3, 10, 10, 5)), ("nopoly", (3, 9, 10, 5))):
+        for variant, want in (("none", (3, 8, 10, 1)), ("all", (3, 11, 10, 5)), ("nopoly", (3, 10, 10, 5))):
             got = tuple(counts[(variant, p)][0] for p in ("vertex_input", "pre_rasterization", "fragment", "output"))
             self.assertEqual(got, want, variant)
         for key, (n, states) in counts.items():
@@ -353,6 +353,256 @@ class DescriptionTest(unittest.TestCase):
         self.assertTrue(out[0].startswith("refused: ") and "past the 64" in out[0], out)
         out = self.pad([], [io(i, 1, 0) for i in range(17)])
         self.assertTrue(out[0].startswith("refused: ") and "more than 16" in out[0], out)
+
+
+class BindingsTest(unittest.TestCase):
+    """The bindings reader (shd_parse_binds): synthetic descriptions with the members xlate/host/ResultWriter.cs writes."""
+
+    BV = {"1d": 0, "2d": 1, "3d": 2, "cube": 3, "1darray": 4, "2darray": 5, "cubearray": 6}
+
+    def setUp(self) -> None:
+        self.dir = scratch()
+
+    @staticmethod
+    def cbuf(slot: int, binding: int, set_: int = 1) -> dict:
+        return {"set": set_, "binding": binding, "slot": slot, "ordinal": 0, "size": 65536, "role": "user"}
+
+    @staticmethod
+    def sbuf(ordinal: int, binding: int, offset: int, cb_slot: int = 0, write: bool = False, module_writes: bool = False,
+             set_: int = 1) -> dict:
+        return {"set": set_, "binding": binding, "ordinal": ordinal, "cb_slot": cb_slot, "cb_word_offset": offset // 4,
+                "cb_byte_offset": offset, "role": "guest", "address_byte_offset": offset, "size_byte_offset": offset + 8,
+                "write": write, "module_reads": True, "module_writes": module_writes, "non_writable": not write,
+                "non_readable": False}
+
+    @staticmethod
+    def tex(type_: str = "2d", via: str = "push_slot", kind: str = "combined", slot: int = 5, binding: int | None = None,
+            set_: int | None = None, array_length: int = 1, shadow: bool = False, c2_slot: int = 1) -> dict:
+        push = via == "push_slot"
+        sampler = kind == "sampler"
+        return {"set": (0 if push or via == "pool" else 1) if set_ is None else set_,
+                "binding": (1 if sampler else 0) if binding is None else binding, "via": via,
+                "push_slot": slot if push else -1, "push_offset": 16 + 4 * slot if push else -1, "type_raw": 3,
+                "type": type_, "shadow": shadow, "kind": kind, "array_length": array_length, "separate": kind != "combined",
+                "cbuf_slot_raw": -1, "c2_slot": c2_slot, "format": "Unknown", "flags_raw": 0, "image_store": False}
+
+    @staticmethod
+    def img(type_: str = "2d", binding: int = 30, c2_slot: int = 0, store: bool = False, non_writable: bool = True) -> dict:
+        return {"set": 1, "binding": binding, "via": "descriptor", "push_slot": -1, "push_offset": -1, "type": type_,
+                "kind": "combined", "array_length": 1, "c2_slot": c2_slot, "image_store": store, "module_reads": True,
+                "module_writes": store, "non_writable": non_writable, "non_readable": False}
+
+    @staticmethod
+    def vin(location: int, components: int = 4, component: int = 0, type_: str = "float32", array_length: int | None = None,
+            ) -> dict:
+        d = io(location, components, component, type_)
+        d["answer"] = "float"
+        if array_length is not None:
+            d["array_length"] = array_length
+        return d
+
+    @staticmethod
+    def base(stage: str = "ps", **over) -> dict:
+        d: dict = {"schema": cp.DESC_SCHEMA, "key": "k.1", "stage": stage, "layout": {"name": "uni", "fits": True},
+                   "support_buffer": {"set": 1, "binding": 0, "size": 1392,
+                                      "fields": [{"name": "alpha_test", "offset": 0, "bytes": 16, "read": False},
+                                                 {"name": "viewport_size", "offset": 160, "bytes": 16, "read": False}]},
+                   "raw_access": {"physical_pointers": False, "page_table": False, "store_bits": False},
+                   "cbufs": [], "sbufs": [], "textures": [], "images": [],
+                   "compute": {"local_size": [8, 4, 1], "shared_bytes": 0} if stage == "cs" else None,
+                   "vertex_inputs": [] if stage == "vs" else None, "notes": ["a \"quoted\" note"]}
+        d.update(over)
+        return d
+
+    def binds(self, d: dict | bytes) -> list[str]:
+        p = self.dir / "b.json"
+        p.write_bytes(d if isinstance(d, bytes) else json.dumps(d, indent=1).encode())
+        done = run("binds", str(p))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        return done.stdout.splitlines()
+
+    def refused(self, d: dict | bytes, text: str) -> None:
+        out = self.binds(d)
+        self.assertEqual(len(out), 1, out)
+        self.assertTrue(out[0].startswith("refused: ") and text in out[0], f"want {text!r}: {out}")
+
+    def test_an_empty_module_has_no_bindings(self) -> None:
+        self.assertEqual(self.binds(self.base()), ["kind ps fits 1 raw 0 support 0", "local 0 0 0"])
+
+    def test_constant_banks_keep_their_slot_and_place(self) -> None:
+        out = self.binds(self.base(cbufs=[self.cbuf(0, 14), self.cbuf(13, 16), self.cbuf(24, 24)]))
+        self.assertEqual(out[1:4], ["cb 0 1 14", "cb 13 1 16", "cb 24 1 24"])
+        self.assertEqual(len(out), 5)
+
+    def test_storage_buffers_keep_the_contract_offsets_and_the_write_flag(self) -> None:
+        out = self.binds(self.base(sbufs=[self.sbuf(0, 25, 512), self.sbuf(1, 26, 416, cb_slot=2, write=True),
+                                          self.sbuf(2, 27, 65528, module_writes=True)]))
+        # set ordinal cb_slot write binding address_byte_offset; a buffer the post-pass saw written is written too
+        self.assertEqual(out[1:4], ["sb 1 0 0 0 25 512", "sb 1 1 2 1 26 416", "sb 1 2 0 1 27 65528"])
+
+    def test_textures_through_push_slots_pools_and_descriptors(self) -> None:
+        out = self.binds(self.base(textures=[
+            self.tex("2d", slot=5, c2_slot=1),
+            self.tex("cubearray", slot=6, c2_slot=7, shadow=True),
+            self.tex("3d", via="pool", binding=0, c2_slot=-1),
+            self.tex("1darray", via="descriptor", binding=33, set_=1),
+            self.tex("sampler", kind="sampler", slot=7, c2_slot=130),
+            self.tex("buffer", via="descriptor", binding=32, set_=1),
+            self.tex("2dms", slot=8), self.tex("2dmsarray", slot=9),
+            self.tex("2darray", kind="separate_texture", slot=10, c2_slot=129, array_length=32),
+        ]))
+        # via kind view set shadow binding array push_slot push_offset c2_slot; BV_NONE is -1
+        self.assertEqual(out[1:], [
+            "tex 0 0 1 0 0 0 1 5 36 1",
+            "tex 0 0 6 0 1 0 1 6 40 7",
+            "tex 1 0 2 0 0 0 1 -1 -1 -1",
+            "tex 2 0 4 1 0 33 1 -1 -1 1",
+            "tex 0 2 -1 0 0 1 1 7 44 130",
+            "tex 2 0 -1 1 0 32 1 -1 -1 1",
+            "tex 0 0 1 0 0 0 1 8 48 1",
+            "tex 0 0 5 0 0 0 1 9 52 1",
+            "tex 0 1 5 0 0 0 32 10 56 129",
+            "local 0 0 0"])
+
+    def test_every_type_string_has_its_view(self) -> None:
+        for name, view in self.BV.items():
+            out = self.binds(self.base(textures=[self.tex(name)], images=[self.img(name)]))
+            self.assertEqual(out[1].split()[3], str(view), name)
+            self.assertEqual(out[2].split()[3], str(view), name)
+
+    def test_images_are_written_when_stored_to_or_not_declared_non_writable(self) -> None:
+        out = self.binds(self.base(images=[
+            self.img("2d", 30, 0), self.img("2darray", 31, 1, store=True, non_writable=False),
+            self.img("3d", 32, 2, non_writable=False), self.img("buffer", 33, -1)]))
+        # set write view binding c2_slot
+        self.assertEqual(out[1:5], ["img 1 0 1 30 0", "img 1 1 5 31 1", "img 1 1 2 32 2", "img 1 0 -1 33 -1"])
+
+    def test_vertex_inputs_by_location_with_arrays_one_entry_per_location(self) -> None:
+        out = self.binds(self.base("vs", vertex_inputs=[
+            self.vin(0), self.vin(1, 2, 1, "sint32"), self.vin(2, 1, 3, "uint32"), self.vin(5, 3, array_length=2)]))
+        self.assertEqual(out[0], "kind vs fits 1 raw 0 support 0")
+        self.assertEqual(out[1:], ["vin 0 0 4 0", "vin 1 1 2 1", "vin 2 3 1 2", "vin 5 0 3 0", "vin 6 0 3 0", "local 0 0 0"])
+
+    def test_a_compute_module_has_its_local_size(self) -> None:
+        out = self.binds(self.base("cs"))
+        self.assertEqual(out, ["kind cs fits 1 raw 0 support 0", "local 8 4 1"])
+        out = self.binds(self.base("ps", compute={"local_size": [64, 2, 1]}))
+        self.assertEqual(out[-1], "local 64 2 1")
+
+    def test_raw_access_and_the_support_buffer_are_flags(self) -> None:
+        for pt, pp, want in ((False, False, 0), (True, False, 1), (False, True, 1), (True, True, 1)):
+            d = self.base(raw_access={"physical_pointers": pp, "page_table": pt})
+            self.assertEqual(self.binds(d)[0], f"kind ps fits 1 raw {want} support 0", (pt, pp))
+        d = self.base()
+        d["support_buffer"]["fields"][1]["read"] = True
+        self.assertEqual(self.binds(d)[0], "kind ps fits 1 raw 0 support 1")
+        self.assertEqual(self.binds(self.base(layout={"fits": False}))[0], "kind ps fits 0 raw 0 support 0")
+
+    def test_a_parser_that_skips_any_member_it_should_read_fails_this(self) -> None:
+        # Every number differs from every other, and a member of each list is true where its sibling is false, so a
+        # parser that ignores one member (or reads it into the wrong field) prints another line.
+        d = self.base(
+            cbufs=[self.cbuf(9, 301, 3)],
+            sbufs=[self.sbuf(4, 302, 1204, cb_slot=7, write=True, set_=5)],
+            textures=[self.tex("cube", slot=11, binding=303, set_=6, array_length=13, shadow=True, c2_slot=77)],
+            images=[{**self.img("1d", 304, 22, store=True, non_writable=False), "set": 7}],
+            support_buffer={"fields": [{"read": True}]}, raw_access={"physical_pointers": False, "page_table": True})
+        d["textures"][0]["via"] = "descriptor"
+        d["textures"][0].update(push_slot=-1, push_offset=-1)
+        out = self.binds(d)
+        self.assertEqual(out, ["kind ps fits 1 raw 1 support 1", "cb 9 3 301", "sb 5 4 7 1 302 1204",
+                               "tex 2 0 3 6 1 303 13 -1 -1 77", "img 7 1 0 304 22", "local 0 0 0"])
+
+    def test_members_it_does_not_know_are_skipped_whatever_their_shape(self) -> None:
+        d = self.base(cbufs=[{**self.cbuf(1, 2), "extra": {"a": [1, 2.5e-3, None, "x\"y"], "b": False}}], zzz=[[[]]])
+        self.assertEqual(self.binds(d)[1], "cb 1 1 2")
+
+    def test_lists_at_their_caps_are_read_and_one_more_is_refused(self) -> None:
+        self.assertEqual(len(self.binds(self.base(cbufs=[self.cbuf(i, i) for i in range(32)]))), 34)
+        self.refused(self.base(cbufs=[self.cbuf(i, i) for i in range(33)]), "cbufs lists more than the 32")
+        self.assertEqual(len(self.binds(self.base(sbufs=[self.sbuf(i, i, 4 * i) for i in range(32)]))), 34)
+        self.refused(self.base(sbufs=[self.sbuf(i, i, 4 * i) for i in range(33)]), "sbufs lists more than the 32")
+        self.assertEqual(len(self.binds(self.base(textures=[self.tex(slot=i % 28) for i in range(64)]))), 66)
+        self.refused(self.base(textures=[self.tex(slot=i % 28) for i in range(65)]), "textures lists more than the 64")
+        self.assertEqual(len(self.binds(self.base(images=[self.img() for _ in range(16)]))), 18)
+        self.refused(self.base(images=[self.img() for _ in range(17)]), "images lists more than the 16")
+        self.assertEqual(len(self.binds(self.base("vs", vertex_inputs=[self.vin(i) for i in range(32)]))), 34)
+        self.refused(self.base("vs", vertex_inputs=[self.vin(i) for i in range(33)]), "vertex_inputs lists more than the 32")
+        self.refused(self.base("vs", vertex_inputs=[self.vin(i) for i in range(31)] + [self.vin(31, array_length=2)]),
+                     "vertex_inputs lists more than the 32")
+
+    def test_a_type_or_name_the_replay_does_not_know_is_refused_with_its_text(self) -> None:
+        self.refused(self.base(textures=[self.tex("unknown")]), 'textures[0].type "unknown" is not a texture type')
+        self.refused(self.base(textures=[self.tex("4d")]), 'type "4d"')
+        self.refused(self.base(textures=[self.tex("sampler")]), "kind and type disagree")
+        self.refused(self.base(textures=[self.tex("2d", kind="sampler")]), "kind and type disagree")
+        self.refused(self.base(textures=[{**self.tex(), "via": "bindless"}]), 'textures[0].via "bindless" is not push_slot')
+        self.refused(self.base(textures=[{**self.tex(), "kind": "storage"}]), 'textures[0].kind "storage"')
+        self.refused(self.base(images=[self.img("sampler")]), 'images[0].type "sampler" is not an image type')
+        self.refused(self.base("vs", vertex_inputs=[self.vin(0, type_="float16")]), 'vertex_inputs[0].type "float16"')
+        self.refused(self.base("vs", vertex_inputs=[self.vin(0, type_="unknown")]), 'type "unknown"')
+        self.refused(self.base("gs"), 'names the stage "gs"')
+        self.refused(self.base(textures=[{**self.tex(), "push_slot": -1}]), "reads through a push slot but names none")
+
+    def test_a_missing_member_is_refused_by_its_name(self) -> None:
+        required = {
+            "cbufs": (self.cbuf(0, 1), ("set", "binding", "slot")),
+            "sbufs": (self.sbuf(0, 9, 8), ("set", "binding", "ordinal", "cb_slot", "address_byte_offset", "write", "module_writes")),
+            "textures": (self.tex(), ("set", "binding", "via", "push_slot", "push_offset", "type", "shadow", "kind",
+                                      "array_length", "c2_slot")),
+            "images": (self.img(), ("set", "binding", "type", "c2_slot", "image_store", "non_writable")),
+        }
+        for name, (item, members) in required.items():
+            for member in members:
+                cut = dict(item)
+                del cut[member]
+                self.refused(self.base(**{name: [cut]}), f"{name}[0].{member} is missing")
+        self.refused(self.base("vs", vertex_inputs=[{k: v for k, v in self.vin(0).items() if k != "components"}]),
+                     "vertex_inputs[0].components is missing")
+        self.refused(self.base(cbufs=[self.cbuf(0, 1), {"set": 1, "slot": 3}]), "cbufs[1].binding is missing")
+
+    def test_a_missing_list_or_flag_is_refused_by_its_name(self) -> None:
+        for path, text in ((("cbufs",), "cbufs"), (("sbufs",), "sbufs"), (("textures",), "textures"), (("images",), "images"),
+                           (("schema",), "schema"), (("stage",), "stage"), (("layout", "fits"), "layout.fits"),
+                           (("raw_access", "page_table"), "raw_access.page_table"),
+                           (("raw_access", "physical_pointers"), "raw_access.physical_pointers"),
+                           (("support_buffer", "fields"), "support_buffer.fields")):
+            d = self.base()
+            holder = d
+            for step in path[:-1]:
+                holder = holder[step]
+            del holder[path[-1]]
+            self.refused(d, f"lacks {text}")
+        d = self.base()
+        d["support_buffer"]["fields"][0].pop("read", None)
+        d["support_buffer"]["fields"][1].pop("read", None)
+        self.refused(d, "support_buffer.fields[0].read is missing")
+        self.refused(self.base("vs", vertex_inputs=None), "lacks vertex_inputs")
+        self.refused(self.base("cs", compute=None), "lacks compute.local_size")
+        self.refused(self.base("cs", compute={"shared_bytes": 0}), "lacks compute.local_size")
+        self.refused(self.base("cs", compute={"local_size": [8, 8]}), "has 2 entries, not 3")
+        self.refused(self.base("cs", compute={"local_size": [8, 8, 1, 1]}), "more than 3 entries")
+
+    def test_a_member_of_the_wrong_type_or_range_is_refused(self) -> None:
+        self.refused(self.base(cbufs=[{**self.cbuf(0, 1), "binding": "1"}]), "cbufs[0].binding is not a number")
+        self.refused(self.base(cbufs=[{**self.cbuf(0, 70000)}]), "cbufs[0].binding is 70000, outside 0 to 65535")
+        self.refused(self.base(cbufs=[{**self.cbuf(300, 1)}]), "cbufs[0].slot is 300")
+        self.refused(self.base(sbufs=[{**self.sbuf(0, 9, 8), "write": 1}]), "sbufs[0].write is not true or false")
+        self.refused(self.base(sbufs=[{**self.sbuf(0, 9, 70000)}]), "sbufs[0].address_byte_offset is 70000")
+        self.refused(self.base(textures=[{**self.tex(), "type": 3}]), "textures[0].type is not a string")
+        self.refused(self.base(textures=[{**self.tex(), "c2_slot": -2}]), "textures[0].c2_slot is -2")
+        self.refused(self.base("vs", vertex_inputs=[self.vin(0, 3, 2)]), "components 2..5 pass the fourth")
+        self.refused(self.base("vs", vertex_inputs=[self.vin(0, array_length=0)]), "array_length is 0")
+        self.refused(self.base(layout={"fits": "yes"}), "layout.fits is not true or false")
+        self.refused(self.base(cbufs={"a": 1}), "cbufs is not an array")
+        self.refused(self.base("cs", compute={"local_size": [0, 1, 1]}), "outside 1 to 65535")
+
+    def test_a_schema_other_than_the_runtimes_and_unreadable_text_are_refused(self) -> None:
+        self.refused(self.base(schema=1), "is schema 1, the runtime reads schema 2")
+        good = json.dumps(self.base()).encode()
+        self.refused(good + b" x", "text after its object")
+        self.refused(good[:len(good) // 2], "bindings of the description are not readable")
+        self.refused(b"[1]", "bindings of the description are not readable")
 
 
 class SpirvTest(unittest.TestCase):
