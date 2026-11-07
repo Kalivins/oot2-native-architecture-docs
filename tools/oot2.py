@@ -26,7 +26,8 @@ count, capped by the free memory). The program it builds is DIR/oot2.exe.
 --xlate gives the shader translator (default: the OOT2_XLATE variable, else
 oot2-xlate on PATH), and --translate-jobs how many copies of it the translate
 step runs at once (default: the CPU count, capped by the free memory). The
-translated shaders go to DIR/shaders/shader-base.bin.
+translated shaders go to DIR/shaders/shader-base.bin. The next step, ledger, reads DIR/ledger.jsonl (the game writes
+it when a run ends) and translates the shader answers it recorded as variants into DIR/shaders/shader-variants.bin.
 
 --plain-modules gives modules the player already has in plain form (files named main, sdk, ...): they are checked
 against the dump's and used instead of decoding, so the ZBIC decoder is not fetched for them. --zbic-archive gives
