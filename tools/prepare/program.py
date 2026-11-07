@@ -67,7 +67,8 @@ def compiler_id(ctx: Context) -> str:
 
 def toolchain(ctx: Context) -> build_game.Toolchain:
     try:
-        return build_game.find_toolchain(check.compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None))
+        return build_game.find_toolchain(check.compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None),
+                                         dav1d_dir=getattr(ctx.options, "dav1d_dir", None))
     except build_game.BuildError as e:
         raise PrepareError(str(e)) from None
 
@@ -75,7 +76,8 @@ def toolchain(ctx: Context) -> build_game.Toolchain:
 def vulkan_key(ctx: Context) -> list:
     """The part of the link step's key that the Vulkan SDK gives (build_game.vulkan_inputs)."""
     include = build_game.vulkan_include(getattr(ctx.options, "vulkan_sdk", None))
-    return build_game.vulkan_inputs(include, build_game.find_glslang(include))
+    kit = build_game.find_dav1d(getattr(ctx.options, "dav1d_dir", None))
+    return build_game.vulkan_inputs(include, build_game.find_glslang(include)) + build_game.dav1d_inputs(kit)
 
 
 def log_lines(ctx: Context, name: str, progress):

@@ -146,7 +146,26 @@ jobs:
       - name: Fetch Dear ImGui
         run: python tools/fetch_imgui.py
 
-      # Here a missing clang, Ninja, translator, capstone, Vulkan SDK or Dear ImGui fails the tests instead of skipping them.
+      # dav1d, the AV1 decoder of the movies, built by tools/fetch_dav1d.py from its release archive (checked against a
+      # pinned SHA-256) with llvm-mingw's clang and the pinned NASM 2.16.03 (also checked), laid out as a kit that
+      # DAV1D_DIR names. The cache key is the script (which holds the pins and a hash of itself) and the compiler's tag; the
+      # script checks a restored folder against the hashes it recorded. About a minute on a cache miss; both archives come from
+      # their projects' own servers (VideoLAN, nasm.us), so an outage there fails this job on a cache miss.
+      - name: Cache the dav1d kit
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\dav1d-kit
+          key: dav1d-kit-${{ runner.os }}-${{ env.LLVM_MINGW }}-${{ hashFiles('tools/fetch_dav1d.py') }}
+
+      - name: Build dav1d
+        shell: pwsh
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP 'dav1d-kit'
+          python tools/fetch_dav1d.py --dest $kit
+          if ($LASTEXITCODE -ne 0) { throw "fetch_dav1d.py failed" }
+          "DAV1D_DIR=$kit" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      # Here a missing clang, Ninja, translator, capstone, Vulkan SDK, Dear ImGui or dav1d fails the tests instead of skipping them.
       - name: Run the unit tests
         env:
           OOT2_REQUIRE_CLANG: "1"
@@ -154,6 +173,7 @@ jobs:
           OOT2_REQUIRE_CAPSTONE: "1"
           OOT2_REQUIRE_VULKAN: "1"
           OOT2_REQUIRE_IMGUI: "1"
+          OOT2_REQUIRE_DAV1D: "1"
         run: |
           clang --version
           python -m unittest discover -s tests -v

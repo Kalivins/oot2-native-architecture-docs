@@ -9,6 +9,7 @@
 // slot column is left empty; an offline join to the game's slot map fills it. Nothing here includes the hos layer.
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "nvn_api.h"
 #include "oot2/nvn_pace.h"
@@ -46,13 +47,50 @@ static void take(uint64_t seq) {
     plat_mutex_unlock(&g_lock);
 }
 
+// The title, as the log shows it (ticket 98, research 54). The movie's frame is 14 compute dispatches (13 of them tensor
+// dispatches of the neural upscaler, one the conversion of the decoded planes to RGBA) and 10 nvnCommandBufferSetRenderTargets
+// calls a present; the menu then appears over the looping movie by itself. A window of 60 presents whose calls a present
+// reach both counts is a "movie window"; two in a row is the title's movie: the log says so once. The menu's own draws are
+// not part of that line: each window's line also carries the draws a present, whose step up over the movie's own marks the
+// menu fading in (the movie's full-screen triangle and the window pass may sit in command memory the front end does not
+// see, so the draw count is a floor).
+#define TITLE_DISPATCHES 14
+#define TITLE_TARGETS 10
+static uint64_t g_prev_calls[3], g_prev_present;
+static int g_movie_windows, g_title_said;
+
+static uint64_t named_calls(const char *name) { return rt_hostfn_calls(nvn_proc_address(name)); }
+
+// The calls a present of the last window, once per window, for the log line and the title.
+static void window_line(uint64_t seq, double secs) {
+    uint64_t cur[3] = {named_calls("nvnCommandBufferSetRenderTargets"), named_calls("nvnCommandBufferDispatchCompute"),
+                       named_calls("nvnCommandBufferDrawElementsInstanced")};
+    uint64_t frames = seq - g_prev_present;
+    if (seq == 1 || !frames) {
+        g_prev_present = seq;
+        memcpy(g_prev_calls, cur, sizeof cur);
+        rt_log("nvn: present %llu, %.2f s after the first", (unsigned long long)seq, secs);
+        return;
+    }
+    double rt = (double)(cur[0] - g_prev_calls[0]) / (double)frames, dp = (double)(cur[1] - g_prev_calls[1]) / (double)frames,
+           dr = (double)(cur[2] - g_prev_calls[2]) / (double)frames;
+    g_prev_present = seq;
+    memcpy(g_prev_calls, cur, sizeof cur);
+    rt_log("nvn: present %llu, %.2f s after the first; a present: %.1f SetRenderTargets, %.1f DispatchCompute, %.1f DrawElementsInstanced",
+           (unsigned long long)seq, secs, rt, dp, dr);
+    g_movie_windows = (rt >= TITLE_TARGETS && dp >= TITLE_DISPATCHES) ? g_movie_windows + 1 : 0;
+    if (g_movie_windows >= 2 && !g_title_said) {
+        g_title_said = 1;
+        rt_log("nvn: title: the movie's frame (%d dispatches and %d SetRenderTargets a present) in two windows in a row, at "
+               "present %llu", TITLE_DISPATCHES, TITLE_TARGETS, (unsigned long long)seq);
+    }
+}
+
 // Called by nvnQueuePresentTexture after present number seq (1 on) went to the back end.
 void nvn_census_present(uint64_t seq) {
     uint64_t now = plat_now_ns();
     if (seq == 1) g_first_ns = now;
-    if (seq == 1 || seq % WINDOW == 0)
-        rt_log("nvn: present %llu, %.2f s after the first", (unsigned long long)seq,
-               seq == 1 ? 0.0 : (double)(now - g_first_ns) / 1e9);
+    if (seq == 1 || seq % WINDOW == 0) window_line(seq, seq == 1 ? 0.0 : (double)(now - g_first_ns) / 1e9);
     if (!rt_census_on()) return;
     if (seq == 1 || seq % WINDOW == 0) take(seq);
     if (seq % FLUSH_EVERY == 0) rt_census_flush();

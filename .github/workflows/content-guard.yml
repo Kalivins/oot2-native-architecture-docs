@@ -98,6 +98,23 @@ jobs:
           test -f fetched/imgui/imgui.cpp
           python tools/check_content.py --all
 
+      # dav1d, the AV1 decoder of the movies, built C-only by tools/fetch_dav1d.py from its release archive (checked against
+      # a pinned SHA-256) with the runner's clang. The pictures are the same as the assembly's, so the decoder tests mean
+      # the same here as on Windows, where windows-build.yml builds the assembly too and requires the tests to run. This
+      # step has not been run on a Linux runner when it was written: it must not stop the guard, so a failure leaves
+      # the kit out and the decoder tests skip with their stated reason (no kit).
+      - name: Cache the dav1d kit
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/dav1d-kit
+          key: dav1d-kit-${{ runner.os }}-${{ hashFiles('tools/fetch_dav1d.py') }}
+
+      - name: Build dav1d
+        continue-on-error: true
+        run: |
+          python tools/fetch_dav1d.py --no-asm --dest "$RUNNER_TEMP/dav1d-kit"
+          echo "DAV1D_DIR=$RUNNER_TEMP/dav1d-kit" >> "$GITHUB_ENV"
+
       # The runtime boundary and lifter tests build C with clang (preinstalled on the
       # runner, with the AArch64 assembler the lifter tests use); here a missing
       # compiler, Ninja, capstone, Vulkan SDK or Dear ImGui fails them instead of skipping them.

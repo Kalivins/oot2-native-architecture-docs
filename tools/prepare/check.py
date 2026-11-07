@@ -160,12 +160,22 @@ def build_tools(ctx: Context) -> str:
     # tools/ is on the path (tools/oot2.py, prepare/program.py)
     from build_game import BuildError, find_toolchain, vulkan_header_version
     try:
-        tools = find_toolchain(compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None))
+        tools = find_toolchain(compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None),
+                               dav1d_dir=getattr(ctx.options, "dav1d_dir", None))
     except BuildError as e:
         raise PrepareError(f"{e}.") from None
     return (f"C++ driver {tools.cxx}, Ninja {tools.ninja}, archiver {tools.ar}, Vulkan headers "
             f"{vulkan_header_version(tools.vulkan)} and Volk "
-            f"in {tools.vulkan}, glslang {tools.glslang}")
+            f"in {tools.vulkan}, glslang {tools.glslang}, {av1_note(tools)}")
+
+
+def av1_note(tools) -> str:
+    """The AV1 decoder of the movies (runtime/video) comes from a dav1d kit (tools/fetch_dav1d.py). Without one the game
+    builds and runs up to its first movie, where it stops by name: said here, not refused, so a build for other work
+    needs no kit."""
+    if tools.dav1d:
+        return f"AV1 decoder dav1d kit {tools.dav1d}"
+    return "no dav1d kit (the movies cannot play: run tools/fetch_dav1d.py and set DAV1D_DIR)"
 
 
 def lift_tools() -> str:

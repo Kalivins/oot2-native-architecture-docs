@@ -763,6 +763,46 @@ static void case_census_mode(void) {
     nvn_census_stats(print_stat, NULL);
     printf("ok census_mode\n");
 }
+// ---------- cases title_*: the title line of the movie's frame (ticket 98)
+// n presents like presents(), but each frame's recording holds the calls shape() asks for: SetRenderTargets, DispatchCompute and
+// DrawElementsInstanced (a window's counts a present are the front end's own calls over its presents).
+typedef void (*Shape)(int f, int *rt, int *dp, int *dr);
+static void shaped(int n, Shape shape) {
+    setup(0, NULL);
+    objects();
+    uint64_t q = queue(), cb = command_buffer(), s = sync_object();
+    const uint64_t tex[2] = {texture(64, 64, 1), texture(64, 64, 2)};
+    uint64_t w = window(2, tex);
+    NVN(nvnWindowSetPresentInterval, w, 0);
+    for (int f = 0; f < n; f++) {
+        int rt = 0, dp = 0, dr = 0;
+        shape(f, &rt, &dp, &dr);
+        int i = acquire(w, s);
+        NVN(nvnCommandBufferBeginRecording, cb);
+        for (int k = 0; k < rt; k++) NVN(nvnCommandBufferSetRenderTargets, cb, 0, 0, 0, 0, 0);
+        for (int k = 0; k < dp; k++) NVN(nvnCommandBufferDispatchCompute, cb, 8, 4, 1);
+        for (int k = 0; k < dr; k++) NVN(nvnCommandBufferDrawElementsInstanced, cb, 4, 2, 6, 0x8000, 0, 0, 1);
+        submit(q, NVN(nvnCommandBufferEndRecording, cb));
+        NVN(nvnQueuePresentTexture, q, w, (uint64_t)i);
+    }
+}
+// The movie's frame from the start (10 targets, 14 dispatches), and the menu's two draws a present from present 181 on.
+static void shape_movie(int f, int *rt, int *dp, int *dr) { *rt = 10; *dp = 14; *dr = f >= 180 ? 2 : 0; }
+// One dispatch short of the movie's frame, and one target short of it.
+static void shape_short_dispatch(int f, int *rt, int *dp, int *dr) { (void)f; (void)dr; *rt = 10; *dp = 13; }
+static void shape_short_target(int f, int *rt, int *dp, int *dr) { (void)f; (void)dr; *rt = 9; *dp = 14; }
+// The movie's frame, then 60 presents without it, then the movie's frame again: never two windows in a row.
+static void shape_gap(int f, int *rt, int *dp, int *dr) {
+    (void)dr;
+    int plain = f >= 60 && f < 120;
+    *rt = plain ? 0 : 10;
+    *dp = plain ? 0 : 14;
+}
+static void case_title_movie(void) { shaped(300, shape_movie); printf("ok title_movie\n"); }
+static void case_title_short_dispatch(void) { shaped(300, shape_short_dispatch); printf("ok title_short_dispatch\n"); }
+static void case_title_short_target(void) { shaped(300, shape_short_target); printf("ok title_short_target\n"); }
+static void case_title_gap(void) { shaped(180, shape_gap); printf("ok title_gap\n"); }
+
 // A run that ends on a window boundary (present 120, a snapshot taken there) has no tail window.
 static void case_census_boundary(void) {
     presents(120);
@@ -829,6 +869,8 @@ int main(int argc, char **argv) {
         {"census_gap_default", case_census_gap_default}, {"census_mode", case_census_mode},
         {"census_cap", case_census_cap}, {"census_limit", case_census_limit}, {"census_flush", case_census_flush},
         {"census_boundary", case_census_boundary}, {"event_words", case_event_words},
+        {"title_movie", case_title_movie}, {"title_short_dispatch", case_title_short_dispatch},
+        {"title_short_target", case_title_short_target}, {"title_gap", case_title_gap},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)
         if (!strcmp(cs, cases[i].name)) {

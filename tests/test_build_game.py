@@ -458,6 +458,105 @@ class PiecesTest(unittest.TestCase):
         with self.assertRaisesRegex(build_game.BuildError, "without the Vulkan headers and Volk"):
             build_game.plan(build_game.Build(self.dir / "build", without, gen=gen, exefs=self.dir, jobs=1), lifted)
 
+    def make_kit(self, name: str = "dav1d kit") -> Path:
+        """A folder laid out as tools/fetch_dav1d.py lays out a kit (the files are empty: nothing here links them)."""
+        kit = self.dir / name
+        (kit / "include" / "dav1d").mkdir(parents=True)
+        (kit / "include" / "dav1d" / "dav1d.h").write_text("", encoding="utf-8")
+        (kit / "lib").mkdir()
+        (kit / "lib" / "libdav1d.a").write_bytes(b"!<arch>\n")
+        return kit.resolve()
+
+    def test_a_dav1d_kit_reaches_the_runtime_flags_the_libraries_and_the_link(self) -> None:
+        gen = self.dir / "gen"
+        fake_gen(gen, {"main": 1})
+        tool = fake_tool(self.dir)
+        kit = self.make_kit()
+
+        def plan_text(t: build_game.Toolchain) -> tuple[str, Path]:
+            b = build_game.Build(self.dir / "build", t, gen=gen, exefs=self.dir, jobs=1)
+            _, lifted = build_game.lifted_modules(gen)
+            return build_game.plan(b, lifted).text, b.out
+
+        def flags(text: str, name: str) -> str:
+            return next(line for line in text.splitlines() if line.startswith(f"{name} = "))
+
+        text, out = plan_text(dataclasses.replace(tool, dav1d=kit))
+        include = build_game.cmd_arg(build_game.rel(kit / "include", out))
+        lib = build_game.rel(kit / "lib" / "libdav1d.a", out)
+        self.assertIn(f" -DOOT2_DAV1D=1 -I {include}", flags(text, "rtflags"))   # the runtime's AV1 backend, not the lifted code
+        for name in ("genflags", "glueflags"):
+            self.assertNotIn("DAV1D", flags(text, name))
+        self.assertIn(build_game.cmd_arg(lib), flags(text, "libs").split(" ", 2)[2])   # the program links the library
+        link = next(line for line in text.splitlines() if line.startswith(f"build {build_game.EXE_NAME}: link "))
+        # an implicit input of the link: a new kit relinks the program
+        self.assertTrue(link.endswith(f" | {build_game.LIB_NAME} {build_game.ninja_path(kit / 'lib' / 'libdav1d.a', out)}"), link)
+        if not WIN:   # dav1d's own threads
+            self.assertIn("-pthread", flags(text, "libs"))
+        text, _ = plan_text(tool)
+        self.assertNotIn("libdav1d", text)   # (runtime/video/av1_dav1d.c is in the library either way: the stub)
+        self.assertNotIn("DAV1D", text)
+
+    def test_a_dav1d_kit_is_found_by_its_header_and_library_and_keys_the_link(self) -> None:
+        kit = self.make_kit()
+        self.assertEqual(build_game.find_dav1d(kit), kit)
+        with mock.patch.dict(os.environ, {"DAV1D_DIR": str(kit)}):
+            self.assertEqual(build_game.find_dav1d(None), kit)   # else the DAV1D_DIR variable
+        with mock.patch.dict(os.environ):
+            os.environ.pop("DAV1D_DIR", None)
+            self.assertIsNone(build_game.find_dav1d(None))
+        self.assertIsNone(build_game.find_dav1d(self.dir / "no kit here"))
+        self.assertEqual(build_game.dav1d_inputs(kit), [kit / "lib" / "libdav1d.a", kit / "include" / "dav1d" / "dav1d.h"])
+        self.assertEqual(build_game.dav1d_inputs(None), ["no dav1d kit"])
+        (kit / "lib" / "libdav1d.a").unlink()
+        self.assertIsNone(build_game.find_dav1d(kit))   # a kit with no library is no kit
+        (kit / "lib" / "libdav1d.a").write_bytes(b"x")
+        (kit / "include" / "dav1d" / "dav1d.h").unlink()
+        self.assertIsNone(build_game.find_dav1d(kit))   # nor one with no header
+
+    def test_the_prepare_check_says_whether_there_is_a_kit_and_the_link_key_holds_the_library(self) -> None:
+        from prepare import check
+        tool = fake_tool(self.dir)
+        kit = self.make_kit()
+        self.assertEqual(check.av1_note(dataclasses.replace(tool, dav1d=kit)), f"AV1 decoder dav1d kit {kit}")
+        none = check.av1_note(tool)
+        self.assertIn("no dav1d kit", none)
+        self.assertIn("tools/fetch_dav1d.py", none)
+        self.assertIn("DAV1D_DIR", none)
+        ctx = argparse.Namespace(options=argparse.Namespace(vulkan_sdk=self.dir / "no SDK", dav1d_dir=kit))
+        key = steps.vulkan_key(ctx)
+        self.assertIn(kit / "lib" / "libdav1d.a", key)
+        self.assertIn(kit / "include" / "dav1d" / "dav1d.h", key)
+        ctx.options.dav1d_dir = None
+        with mock.patch.dict(os.environ):
+            os.environ.pop("DAV1D_DIR", None)
+            self.assertEqual(steps.vulkan_key(ctx), ["no Vulkan SDK", "no dav1d kit"])
+
+    def test_the_toolchain_and_the_check_step_carry_the_kit(self) -> None:
+        """find_toolchain and prepare's build check take the kit from the option or the variable; every tool is this
+        interpreter (they are only looked up), the Vulkan SDK a folder of empty headers."""
+        from prepare import check
+        exe = sys.executable
+        sdk = self.dir / "SDK"
+        for rel_name in ("Include/vulkan/vulkan_core.h", "Include/Volk/volk.c", "Include/Volk/volk.h"):
+            (sdk / rel_name).parent.mkdir(parents=True, exist_ok=True)
+            (sdk / rel_name).write_text("", encoding="utf-8")
+        kit = self.make_kit()
+        with mock.patch.dict(os.environ, {"OOT2_GLSLANG": exe, "OOT2_NINJA": exe}):
+            os.environ.pop("DAV1D_DIR", None)
+            self.assertEqual(build_game.find_toolchain(exe, exe, exe, vulkan_sdk=sdk, dav1d_dir=kit).dav1d, kit)
+            self.assertIsNone(build_game.find_toolchain(exe, exe, exe, vulkan_sdk=sdk).dav1d)
+            os.environ["DAV1D_DIR"] = str(kit)
+            self.assertEqual(build_game.find_toolchain(exe, exe, exe, vulkan_sdk=sdk).dav1d, kit)
+            os.environ.pop("DAV1D_DIR")
+            ctx = argparse.Namespace(options=argparse.Namespace(cc=exe, vulkan_sdk=sdk, dav1d_dir=kit))
+            self.assertTrue(check.build_tools(ctx).endswith(f", AV1 decoder dav1d kit {kit}"))
+            ctx.options.dav1d_dir = None
+            self.assertTrue(check.build_tools(ctx).endswith(", no dav1d kit (the movies cannot play: run "
+                                                            "tools/fetch_dav1d.py and set DAV1D_DIR)"))
+            self.assertEqual(steps.toolchain(argparse.Namespace(options=argparse.Namespace(cc=exe, vulkan_sdk=sdk,
+                                                                                        dav1d_dir=kit))).dav1d, kit)
+
     def test_check_step_needs_the_vulkan_headers_and_volk(self) -> None:
         from prepare import check
         from prepare.runner import PrepareError

@@ -91,6 +91,14 @@ void hos_audio_renderer_open(Cpu *c, uint32_t event, uint64_t handle, uint64_t p
 // How many clock threads the stand-in has started: one for the life of the process, however many renderers are opened.
 int hos_audio_clock_threads(void);
 
+// ov_codec.c: the AV1 video decoder service under the SDK's movie library (ticket 98). Its submission-ready events are
+// made with hos_bind_system_event; a test gives it a binder of its own (the synthetic module has no SDK to attach
+// through). NULL restores hos_bind_system_event.
+void hos_codec_set_event_binder(uint32_t (*bind)(Cpu *c, uint64_t ev, int autoclear));
+// The same for the two nn::os calls the sync point events make (ClearSystemEvent, and InitializeMultiWaitHolder over a system
+// event); NULL restores the SDK's own, found with hos_sdk.
+void hos_codec_set_event_hooks(void (*clear)(Cpu *c, uint64_t ev), void (*init_holder)(Cpu *c, uint64_t holder, uint64_t ev));
+
 // ---- the game folder (the folder oot2 prepare wrote, which holds the program): set once by hos_init
 const char *hos_game_folder(void);
 // The file the program glue lists under that description ("RomFS image", "RomFS index"), as a path the host opens;

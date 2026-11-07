@@ -236,8 +236,9 @@ class QueueTest(unittest.TestCase):
             # the seconds since present 1, which the case delayed by 30 ms: at least 0.03 (a unit error is far under),
             # under 5 (a loaded machine may be slow; a unit error the other way is far over)
             secs = r"(?:0\.(?:0[3-9]|[1-9]\d)|[1-4]\.\d\d)"
-            self.assertRegex(done.stderr, rf"(?m)^\[rt\] nvn: present 60, {secs} s after the first$")
-            self.assertRegex(done.stderr, rf"(?m)^\[rt\] nvn: present 120, {secs} s after the first$")
+            self.assertRegex(done.stderr, rf"(?m)^\[rt\] nvn: present 60, {secs} s after the first; a present: 0\.0 SetRenderTargets, 0\.0 DispatchCompute, 0\.0 DrawElementsInstanced$")
+            self.assertRegex(done.stderr, rf"(?m)^\[rt\] nvn: present 120, {secs} s after the first; a present: 0\.0 SetRenderTargets, 0\.0 DispatchCompute, 0\.0 DrawElementsInstanced$")
+            self.assertNotIn("nvn: title:", done.stderr)   # no movie frame in this case
             self.assertNotIn("census mode", done.stderr)
         for level in nvn.LEVELS:
             with self.subTest(level=level):
@@ -245,6 +246,31 @@ class QueueTest(unittest.TestCase):
                 self.assertEqual(done.returncode, nvn.EXIT_UNIMPLEMENTED, done.stderr)
                 self.assertIn("FATAL: unimplemented nvn: nvnQueueSetDebugLabel", done.stderr)
                 self.assertNotIn("census mode", done.stderr)
+
+    def test_the_movie_frame_says_the_title_once_and_each_window_carries_the_draws(self) -> None:
+        for done in self.assert_passes("title_movie", OOT2_CENSUS="0"):
+            rows = {int(m[1]): m[2] for m in re.finditer(
+                r"(?m)^\[rt\] nvn: present (\d+), [\d.]+ s after the first; a present: (.*)$", done.stderr)}
+            self.assertEqual(sorted(rows), [60, 120, 180, 240, 300], done.stderr)
+            self.assertEqual(rows[60], "10.0 SetRenderTargets, 14.0 DispatchCompute, 0.0 DrawElementsInstanced")
+            self.assertEqual(rows[180], "10.0 SetRenderTargets, 14.0 DispatchCompute, 0.0 DrawElementsInstanced")
+            # the menu's draws step in over the movie: two a present from present 181 on
+            self.assertEqual(rows[240], "10.0 SetRenderTargets, 14.0 DispatchCompute, 2.0 DrawElementsInstanced")
+            titles = re.findall(r"(?m)^\[rt\] nvn: title: .*$", done.stderr)
+            self.assertEqual(titles, ["[rt] nvn: title: the movie's frame (14 dispatches and 10 SetRenderTargets a present) "
+                                      "in two windows in a row, at present 120"], done.stderr)
+
+    def test_a_frame_short_of_the_movie_or_a_lone_movie_window_says_no_title(self) -> None:
+        for case in ("title_short_dispatch", "title_short_target", "title_gap"):
+            for done in self.assert_passes(case, OOT2_CENSUS="0"):
+                self.assertIn("nvn: present 60, ", done.stderr)
+                self.assertNotIn("nvn: title:", done.stderr, case)
+        for done in self.assert_passes("title_short_dispatch", OOT2_CENSUS="0"):
+            self.assertIn("a present: 10.0 SetRenderTargets, 13.0 DispatchCompute, 0.0 DrawElementsInstanced", done.stderr)
+        for done in self.assert_passes("title_gap", OOT2_CENSUS="0"):   # the movie, a window without it, the movie again
+            rows = re.findall(r"(?m)^\[rt\] nvn: present (\d+), [\d.]+ s after the first; a present: (\S+) SetRenderTargets",
+                              done.stderr)
+            self.assertEqual(rows, [("60", "10.0"), ("120", "0.0"), ("180", "10.0")], done.stderr)
 
     def test_census_mode_passes_a_gap_once_and_counts_calls_per_frame(self) -> None:
         for done in self.assert_passes("census_mode", OOT2_CENSUS="1"):

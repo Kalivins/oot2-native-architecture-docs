@@ -45,8 +45,8 @@ TIMEOUT = 60
 
 EXIT_FATAL, EXIT_UNIMPLEMENTED, EXIT_GUEST_STOP, EXIT_CENSUS = 70, 71, 72, 73
 
-MOVIE = ("_ZN5movie12VideoDecoder10InitializeEPvmN2nn5movie13MediaMimeTypeENS_24VideoDecoderOutputFormatENS_14"
-         "VideoCodecModeE")
+MOVIE = ("_ZN2nn5codec34InitializeAv1DecoderByRemoteMemoryEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24"
+         "VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE")
 OPEN = ("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm")
 ACQUIRE = "_ZN2nn5audio36AcquireAudioOutputDeviceNotificationEPNS_2os11SystemEventE"
 
@@ -65,10 +65,10 @@ FAILING = {
                "command\tsm: control 0\tnamed-fatal\t1\t"),
     "boot": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented boot: the SDK function _ZN2nn4init5StartEmmPFvvES2_S2_ is not "
                                  "defined by any module", "boot\t<rtld>\timplemented\t1\t"),
-    # the movie player's first step is a named fatal until the movie ticket
-    "movie": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented movie: movie::VideoDecoder::Initialize: the game's movie player "
-                                  "starts, and the host has no video decoder and no media extractor yet",
-              f"import\t{MOVIE}\tnamed-fatal\t1\t0x7000000250 (main+0x250)\t"),
+    # the AV1 decoder service's first step is a named fatal in a build with no decoder (no dav1d kit)
+    "movie": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented movie: nn::codec::InitializeAv1Decoder: the host has no AV1 "
+                                  "decoder (fake)",
+              f"import\t{MOVIE}\timplemented\t1\t0x7000000250 (main+0x250)\t"),
     # the audio stand-ins that bind the game's SystemEvent reach the SDK's own attach function, which this synthetic
     # module does not define; a null handle or event stops the guest; a second renderer is a gap
     "audio_open_binds": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented boot: the SDK function "

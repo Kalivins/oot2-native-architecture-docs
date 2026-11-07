@@ -12,9 +12,10 @@
 """Compile the lifted C and link it with the runtime library into oot2.exe (architecture D4 and section 13).
 
     py -3 tools/build_game.py --gen DIR --exefs DIR --out DIR [--exe FILE] [--jobs N] [--cc CC] [--cxx CXX]
-                              [--ninja FILE] [--vulkan-sdk DIR] [--runtime-lib FILE] [--compile-only]
-                              [--file WHAT=PATH] [--file-size WHAT=PATH]
+                              [--ninja FILE] [--vulkan-sdk DIR] [--dav1d-dir DIR] [--runtime-lib FILE]
+                              [--compile-only] [--file WHAT=PATH] [--file-size WHAT=PATH]
     py -3 tools/build_game.py --make-runtime-lib --out DIR [--cc CC] [--cxx CXX] [--ninja FILE] [--vulkan-sdk DIR]
+                              [--dav1d-dir DIR]
 
 --gen is the lifter's output (tools/lift/gen.py: layout.json, layout.h, <mod>/manifest.json and the chunks it lists).
 --exefs holds the player's plain modules and main.npdm, which oot2.exe loads at each start. --out is the build folder
@@ -55,6 +56,12 @@ it is not this project's code) and join the runtime library; every C++ file of t
 the definitions of fetch_imgui.DEFINES, and OOT2_WITH_IMGUI. Without a folder nothing changes: the runtime builds as
 before and runtime/ui reports that it has no Dear ImGui. Only a command line names the folder through the variable or
 the default: find_toolchain takes it as an argument, so no test builds Dear ImGui by accident.
+
+The AV1 decoder. The movies of the game are AV1, decoded with dav1d behind the runtime's video decoder service
+(runtime/hos/ov_codec.c, runtime/video). tools/fetch_dav1d.py builds dav1d from its pinned release into a kit (headers,
+libdav1d.a, licence texts); --dav1d-dir, else the DAV1D_DIR variable, names it. With a kit the runtime is compiled with
+OOT2_DAV1D=1 against its headers and the program links its library; without one the runtime builds and its decoder refuses
+to open (the game then stops by name at its first movie, and the prepare check says there is no kit).
 
 program_glue.c, written into --out, carries what the build knows of the player's dump: the layout (checked against
 layout.h at compile time), the lifted modules' function tables, each module file to load with its whole-file SHA-256,
@@ -154,6 +161,7 @@ class Toolchain:
     glslang: str | None = None    # compiles the runtime's own shaders (find_glslang)
     cxx: str | None = None        # the C++ driver: compiles the runtime's .cpp files and links the program (find_cxx)
     imgui: Path | None = None     # a fetched Dear ImGui folder (find_imgui), compiled into the runtime library
+    dav1d: Path | None = None     # a dav1d kit (tools/fetch_dav1d.py): include/dav1d, lib/libdav1d.a (find_dav1d)
 
 
 VOLK_FILES = ("volk.c", "volk.h")
@@ -188,6 +196,27 @@ def vulkan_include(sdk: str | os.PathLike | None = None) -> Path | None:
         if (inc / "vulkan" / "vulkan_core.h").is_file() and all((inc / "Volk" / f).is_file() for f in VOLK_FILES):
             return inc.resolve()
     return None
+
+
+def find_dav1d(kit: str | os.PathLike | None = None) -> Path | None:
+    """The dav1d kit (else the DAV1D_DIR variable) when it holds the headers and the library tools/fetch_dav1d.py
+    lays out, else None. Without a kit the runtime builds with no AV1 decoder (runtime/video): its movie decoder then
+    refuses to open, and the game stops at the first movie by name."""
+    kit = kit or os.environ.get("DAV1D_DIR")
+    if not kit:
+        return None
+    root = Path(kit)
+    if (root / "include" / "dav1d" / "dav1d.h").is_file() and (root / "lib" / "libdav1d.a").is_file():
+        return root.resolve()
+    return None
+
+
+def dav1d_inputs(kit: Path | None) -> list:
+    """What the runtime library takes from the dav1d kit, for the link step's key: the library and dav1d.h (a kit's own
+    version record is not part of the key); a placeholder text when there is no kit."""
+    if kit is None:
+        return ["no dav1d kit"]
+    return [kit / "lib" / "libdav1d.a", kit / "include" / "dav1d" / "dav1d.h"]
 
 
 def vulkan_header_version(include: Path) -> str:
@@ -236,11 +265,12 @@ def find_cxx(cc_path: str, cxx: str | None = None) -> str | None:
 
 def find_toolchain(cc: str | None = None, ninja: str | None = None, ar: str | None = None,
                    vulkan_sdk: str | os.PathLike | None = None, cxx: str | None = None,
-                   imgui: Path | None = None) -> Toolchain:
+                   imgui: Path | None = None, dav1d_dir: str | os.PathLike | None = None) -> Toolchain:
     """The C compiler (cc, else OOT2_CC, else clang), its C++ driver (find_cxx), Ninja (ninja, else OOT2_NINJA, else
     ninja on PATH), the archiver (ar, else llvm-ar beside the compiler, else llvm-ar or ar on PATH), the Vulkan headers
     and Volk (the Vulkan SDK vulkan_sdk, else VULKAN_SDK) and glslang (find_glslang). imgui is a folder find_imgui
-    returned, or None for a build without Dear ImGui. BuildError names what is missing."""
+    returned, or None for a build without Dear ImGui. The dav1d kit (dav1d_dir, else DAV1D_DIR) is optional
+    (find_dav1d). BuildError names what is missing."""
     name = cc or os.environ.get("OOT2_CC") or "clang"
     cc_path = shutil.which(name)
     if not cc_path:
@@ -277,7 +307,7 @@ def find_toolchain(cc: str | None = None, ninja: str | None = None, ar: str | No
     if not glslang:
         raise BuildError("glslang was not found (OOT2_GLSLANG, the Vulkan SDK's Bin folder or PATH): it compiles the "
                          "runtime's own shaders (runtime/gpu/shaders)")
-    return Toolchain(cc_path, ar_path, ninja_path, include, glslang, cxx_path, imgui)
+    return Toolchain(cc_path, ar_path, ninja_path, include, glslang, cxx_path, imgui, find_dav1d(dav1d_dir))
 
 
 def vulkan_inputs(include: Path | None, glslang: str | None) -> list:
@@ -627,6 +657,12 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
     # and the core compiled from it agree; OOT2_WITH_IMGUI tells runtime/ui that the headers are there.
     ig = (f" -I {cmd_arg(rel(imgui, o))} -DOOT2_WITH_IMGUI=1" +
           "".join(f" -D{d}" for d in fetch_imgui.DEFINES)) if imgui else ""
+    # dav1d, for the runtime's AV1 backend (runtime/video) only: OOT2_DAV1D selects the real decoder over the refusal.
+    dav1d_lib = b.tool.dav1d / "lib" / "libdav1d.a" if b.tool.dav1d else None
+    if b.tool.dav1d:
+        vk += f" -DOOT2_DAV1D=1 -I {cmd_arg(rel(b.tool.dav1d / 'include', o))}"
+    libs = [*LINK_LIBS, *(["-pthread"] if dav1d_lib and not WIN else []),
+            *([cmd_arg(rel(dav1d_lib, o))] if dav1d_lib else [])]
     glue, glue_object = o / GLUE_NAME, o / "obj" / "program_glue.o"
     lines = [
         "# Written by tools/build_game.py; do not edit.",
@@ -641,7 +677,7 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
         f"glueflags = {' '.join(RT_FLAGS)} {inc}" + (f" -I {cmd_arg(rel(b.gen, o))}" if b.gen else ""),
         f"ldflags = {' '.join(LINK_FLAGS)}",
         f"lib = {cmd_arg(rel(b.lib, o))}",
-        f"libs = {' '.join(LINK_LIBS)}",
+        f"libs = {' '.join(libs)}",
         "",
         "rule cc_gen",
         "  command = $cc $genflags -MD -MF $out.d -c $in -o $out",
@@ -700,7 +736,8 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
         lines.append(f"build {ninja_path(glue_object, o)}: cc_glue {ninja_path(glue, o)}")
         lines.append("build gen_objects: phony " + " ".join(ninja_path(x, o) for x in gen_list))
         lines.append(f"build {ninja_path(b.exe, o)}: link " + " ".join(ninja_path(x, o) for x in gen_list) +
-                     f" {ninja_path(glue_object, o)} | {ninja_path(b.lib, o)}")
+                     f" {ninja_path(glue_object, o)} | {ninja_path(b.lib, o)}" +
+                     (f" {ninja_path(dav1d_lib, o)}" if dav1d_lib else ""))
         lines.append(f"default {ninja_path(b.exe, o)}")
     else:
         lines.append(f"default {ninja_path(b.lib, o)}")
@@ -1094,6 +1131,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--imgui", type=Path,
                     help="fetched Dear ImGui folder (tools/fetch_imgui.py; default: the OOT2_IMGUI variable, else "
                          "fetched/imgui when it exists, else a build without Dear ImGui)")
+    ap.add_argument("--dav1d-dir", type=Path,
+                    help="dav1d kit made by tools/fetch_dav1d.py (default: the DAV1D_DIR variable; none: no AV1 decoder)")
     ap.add_argument("--runtime", type=Path, default=RUNTIME, help="runtime source folder (default runtime/)")
     ap.add_argument("--runtime-lib", type=Path, help=f"a prebuilt {LIB_NAME} to link instead of building one")
     ap.add_argument("--make-runtime-lib", action="store_true", help=f"build only {LIB_NAME} into --out")
@@ -1113,7 +1152,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         tool = find_toolchain(args.cc, args.ninja, vulkan_sdk=args.vulkan_sdk, cxx=args.cxx,
-                              imgui=find_imgui(args.imgui))
+                              imgui=find_imgui(args.imgui), dav1d_dir=args.dav1d_dir)
         files = [GameFile(w, p.resolve(), True) for w, p in args.file]
         files += [GameFile(w, p.resolve(), False) for w, p in args.file_size]
         b = Build(args.out, tool, gen=args.gen.resolve() if args.gen else None,

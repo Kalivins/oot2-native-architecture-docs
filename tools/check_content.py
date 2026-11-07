@@ -42,7 +42,14 @@ MAX_BYTES = 512 * 1024
 # from the generated-code heuristics and from the key-assignment rule. It is the
 # route for known tables (a CRC-32 table, an S-box) and for a reviewed list of
 # hashes whose labels are file names. A PEM private key is never exempt.
-ALLOW_BINARY: set[str] = set()
+ALLOW_BINARY: set[str] = {
+    # Three short AV1 clips of generated test pictures (three ramps), made by tests/fixtures/av1/make_fixtures.py with
+    # rav1e 0.8.1; the command and the encoder's SHA-256 are in tests/fixtures/av1/README.md. An IVF file starts with
+    # NUL bytes. Nothing in them is from a game (the pictures are formulas), and each is a few KB.
+    "tests/fixtures/av1/clip_200x126.ivf",
+    "tests/fixtures/av1/clip_201x125.ivf",
+    "tests/fixtures/av1/clip_1920x1080.ivf",
+}
 ALLOW_BLOBS: set[str] = {
     # The lifter's FP and SIMD helpers hold four architectural tables, none from
     # the game: the FRECPE and FRSQRTE estimate tables of the Arm architecture's

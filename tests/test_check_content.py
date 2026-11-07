@@ -217,6 +217,22 @@ class MagicRules(PathsCase):
             self.green({"blob.dat": b"abc\0def"})
         self.red({"blob.dat": b"abc\0def"}, "binary")
 
+    def test_the_allowlist_holds_the_av1_test_clips_and_only_them(self):
+        """Ticket 98: three short AV1 clips of generated pictures (tests/fixtures/av1) are the allowlist's first entries.
+        Each passes under its own name and is a binary file under any other; a game signature in a file of that name is
+        still refused."""
+        root = Path(__file__).resolve().parent.parent
+        self.assertEqual(sorted(cc.ALLOW_BINARY), [f"tests/fixtures/av1/{n}.ivf" for n in
+                                                   ("clip_1920x1080", "clip_200x126", "clip_201x125")])
+        for name in sorted(cc.ALLOW_BINARY):
+            with self.subTest(name=name):
+                data = (root / name).read_bytes()
+                self.assertTrue(data.startswith(b"DKIF"), name)   # an IVF file
+                self.assertLess(len(data), 64 * 1024, name)
+                self.green({name: data})
+                self.red({name.replace("tests/fixtures/av1/", "tests/fixtures/other/"): data}, "binary")
+                self.red({name: b"NSO0" + b"\0" * 64}, "magic")
+
 
 class KeyRules(PathsCase):
     def test_key_assignment(self):

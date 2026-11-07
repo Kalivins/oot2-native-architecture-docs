@@ -21,6 +21,7 @@
 #include "oot2/kernel.h"
 #include "oot2/memory.h"
 #include "plat.h"
+#include "av1_fake.h"   // runtime/hos links the AV1 service; the fake stands for the decoder
 #include "../../runtime/hos/hos.h"
 
 #define CHECK(cond)                                                                        \
@@ -77,9 +78,9 @@ enum { A_WORK, A_LIST, A_DROP, A_OPUS_WORK, A_OPUS_INIT, A_OPUS_RATE, A_OPUS_CH,
        A_ACTIVE_OUT, A_VIRTUAL_PROPS, A_ACQUIRE, A_RELEASE, A_AUTOTUNE_GET, A_AUTOTUNE_SET, A_CHANNELS, A_OPUS_RESET,
        A_OPUS_FINALIZE, A_COUNT };
 static uint64_t g_audio[A_COUNT];
-// the movie player's first step (runtime/hos/ov_movie.c)
+// the AV1 decoder service's first step (runtime/hos/ov_codec.c), which is a named fatal when the build has no decoder
 static const char MOVIE_SYMBOL[] =
-    "_ZN5movie12VideoDecoder10InitializeEPvmN2nn5movie13MediaMimeTypeENS_24VideoDecoderOutputFormatENS_14VideoCodecModeE";
+    "_ZN2nn5codec34InitializeAv1DecoderByRemoteMemoryEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE";
 static uint64_t g_movie;
 static char g_nvn_name[96];
 static const char *g_case;
@@ -218,6 +219,7 @@ static void g_fatal(Cpu *c) {
         c->pc = nvn_proc_address(name);
         rt_dispatch(c);
     } else if (!strcmp(g_case, "movie")) {
+        c->x[0] = HEAP + 0x500, c->x[1] = 0x1000, c->x[2] = 64, c->x[3] = 64;   // decoder, memory size, width, height
         c->x[30] = G(2) + 0x54;
         c->pc = g_movie;
         rt_dispatch(c);
@@ -333,7 +335,10 @@ static void boot(const char *folder) {
     CHECK(g_bound != 0);
     if (audio_case())
         for (int i = 0; i < A_COUNT; i++) CHECK((g_audio[i] = rt_hostfn_bind(AUDIO_SYMBOLS[i])) != 0);
-    if (!strcmp(g_case, "movie")) CHECK((g_movie = rt_hostfn_bind(MOVIE_SYMBOL)) != 0);
+    if (!strcmp(g_case, "movie")) {
+        CHECK((g_movie = rt_hostfn_bind(MOVIE_SYMBOL)) != 0);
+        g_fake_refuse_open = 1;   // a build with no dav1d kit
+    }
     if (!strcmp(g_case, "nvn") || !strcmp(g_case, "nvn_census") || !strcmp(g_case, "census_files"))
         nvn_procs_register();   // as main.c does, before the layer
     hos_init(folder, NULL, 0);
