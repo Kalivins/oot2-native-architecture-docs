@@ -30,6 +30,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -977,6 +978,40 @@ class RuntimeLibTest(unittest.TestCase):
             lib = (Path(tmp) / build_game.LIB_NAME).read_bytes()
             for symbol in (b"DebugCheckVersionAndDataLayout", b"ui_standin_list", b"volkInitialize"):
                 self.assertIn(symbol, lib)
+
+
+class MeasuredTest(unittest.TestCase):
+    """run_measured reports the peak memory of what it ran: private bytes of the process, and its working set."""
+
+    def child(self, megabytes: int) -> build_game.Measured:
+        # bytearray(b"x") * n writes every page (bytearray(n) alone would leave them untouched).
+        code = f"b = bytearray(b'x') * ({megabytes} << 20); print(len(b))"
+        lines: list[str] = []
+        m = build_game.run_measured([sys.executable, "-I", "-c", code], ROOT, lines.append)
+        self.assertEqual((m.code, lines), (0, [str(megabytes << 20)]))
+        return m
+
+    def test_a_process_that_holds_a_buffer_has_it_in_both_peaks(self) -> None:
+        m = self.child(200)
+        self.assertGreaterEqual(m.peak_process, 200 << 20)
+        self.assertGreaterEqual(m.peak_working_set, 200 << 20)
+        if WIN:   # elsewhere the figure is the largest of every child the test process ever ran
+            self.assertLess(m.peak_working_set, 400 << 20)
+
+    @unittest.skipUnless(WIN, "the handle is a Windows one")
+    def test_a_working_set_the_system_will_not_give_is_zero_and_stops_nothing(self) -> None:
+        class NoHandle:   # a Popen whose handle is not there
+            pass
+
+        self.assertEqual(build_game._peak_working_set(NoHandle()), 0)   # type: ignore[arg-type]
+        self.assertEqual(build_game._peak_working_set(types.SimpleNamespace(_handle=0)), 0)  # type: ignore[arg-type]
+
+    @unittest.skipUnless(WIN, "elsewhere the child's resident set is the system's cumulative figure for all children")
+    def test_the_peaks_are_those_of_the_run_and_not_of_the_machine(self) -> None:
+        small = self.child(1)
+        self.assertLess(small.peak_working_set, 150 << 20)
+        self.assertLess(small.peak_process, 150 << 20)
+        self.assertGreater(small.peak_working_set, 1 << 20)
 
 
 class GivenModules(Step):

@@ -76,7 +76,8 @@ Ninja just rebuilt is recorded. A mismatch deletes the object, Ninja compiles it
 
 Compile jobs default to the CPU count, capped by the free memory at JOB_MEM per job. Each phase reports its wall time
 and its peak memory: on Windows from a job object (committed private bytes, of the largest process and of all of them
-at once), elsewhere the largest resident set of one child.
+at once) and, for the process it started, its peak working set read from its handle after it exits; elsewhere the
+largest resident set of one child, for both.
 
 Exit codes: 0 built, 1 the build failed (the message says why), 2 bad command line.
 """
@@ -855,6 +856,7 @@ class Measured:
     peak_process: int   # bytes, the largest process
     peak_all: int       # bytes, every process of the run at once (Windows only, else 0)
     tail: list[str]     # the last lines of the output
+    peak_working_set: int = 0   # bytes resident at most, the started process alone (0 when unknown)
 
 
 def run_measured(cmd: list[str], cwd: Path, on_line: Callable[[str], None] | None = None) -> Measured:
@@ -876,6 +878,7 @@ def run_measured(cmd: list[str], cwd: Path, on_line: Callable[[str], None] | Non
                 if on_line:
                     on_line(line)
         code = proc.wait()
+        working_set = _peak_working_set(proc) if job else 0
     except BaseException:
         if job:
             job.close()   # kills every compiler of the run
@@ -890,7 +893,32 @@ def run_measured(cmd: list[str], cwd: Path, on_line: Callable[[str], None] | Non
     else:
         import resource
         peak_one, peak_all = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024, 0
-    return Measured(code, seconds, peak_one, peak_all, list(tail))
+        working_set = peak_one   # the resident set is what the system reports
+    return Measured(code, seconds, peak_one, peak_all, list(tail), working_set)
+
+
+def _peak_working_set(proc: subprocess.Popen) -> int:
+    """The peak working set of a process that has exited (Windows), from the handle Popen still holds; 0 if the
+    system will not say (a figure that is only reported never stops the run)."""
+    import ctypes.wintypes as wt
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wt.DWORD), ("PageFaultCount", wt.DWORD), ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t), ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t), ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t), ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t)]
+
+    try:
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        psapi.GetProcessMemoryInfo.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.DWORD]
+        counters = Counters()
+        counters.cb = ctypes.sizeof(counters)
+        if psapi.GetProcessMemoryInfo(int(proc._handle), ctypes.byref(counters), counters.cb):
+            return int(counters.PeakWorkingSetSize)
+    except (OSError, AttributeError, TypeError, ValueError):
+        pass
+    return 0
 
 
 class _Job:

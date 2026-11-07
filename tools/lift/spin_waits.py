@@ -5,10 +5,11 @@
 # Adapted from DKB Recomp (https://github.com/Lucas-blip-png/dkb-pc-recomp) at 9d8fa02, tools/spin_waits.py (no licence
 # header of its own: the repository's GPL-3.0-or-later), which is adapted from nxnative dm/tools/patch_nso.py @ 6d34984
 # (MIT, Copyright (c) 2026 seedds): the spin wait search ("Spin waits": spin_rw, spin_kind, spin_rmw, spin_lock,
-# spin_store, spin_quick, spin_region, spin_region1). Changed in oot2-native: the search is unchanged (the constants and
-# the Search class are as upstream). The patch table is gone, so `touched` is an optional argument that defaults to
-# empty; the modules are read through tools/lift/nso.py and placed by name only; find_module() is a library entry
-# point; the command writes a JSON file in a build folder instead of printing `spin` lines of a checked-in table.
+# spin_store, spin_quick, spin_region, spin_region1). Changed in oot2-native: the search finds what upstream's does (the
+# constants and the Search class are as upstream, but for the memo of decoded words, which is bounded: SPIN_MEMO). The
+# patch table is gone, so `touched` is an optional argument that defaults to empty; the modules are read through
+# tools/lift/nso.py and placed by name only; find_module() is a library entry point; the command writes a JSON file in
+# a build folder instead of printing `spin` lines of a checked-in table.
 """Find the spin waits of the ExeFS modules and write them as JSON.
 
     py -3 tools/lift/spin_waits.py --exefs DIR --out FILE [--modules main,subsdk0,sdk]
@@ -35,6 +36,18 @@ that every path back to T undoes on the same address, a spin lock taken and rele
 path, a test loop on a word inside R, and at most SPIN_STORES stores of registers R never writes (fixed values to
 fixed addresses, so the passes repeat after a few). Offsets in `touched`, if given, are kept out of regions.
 
+Memory. The search decodes words with capstone and memoises them (Search.ins). A decoded word costs about 3.4 KiB in
+the process (a copy of capstone's instruction and of its detail record, and the Python objects around them), and an
+unbounded memo grew with every head searched, to several GiB for the game's main module: the peak of a whole prepare.
+The memo is bounded to SPIN_MEMO words (about 7 MiB) and is dropped when it fills. It only saves decoding the same
+word again, so no answer depends on it; the search of one head reads from 4 bytes before the head to 24 bytes past its
+farthest back-edge, which is far fewer than SPIN_MEMO words, so a head is searched from the memo almost entirely.
+What is left is the module image, the loader's copies and the table of candidate heads. The search's peak private
+bytes are held to 1 GiB (ticket 122): a quarter of the 4 GiB or so that an 8 GB machine has free once the system and
+the player's other programs have their share, and under the 1.2 GiB per process of the lift's code generation, so the
+search is no longer the peak of the lift step. The lift step records the peak beside the seconds
+(tools/prepare/program.py).
+
 Exit codes: 0 written, 1 the output file could not be written, 2 bad input.
 """
 import argparse
@@ -58,6 +71,7 @@ from nso import Nso, NsoError  # noqa: E402
 SPIN_WIN = 512   # bytes from a backward branch back to its target
 SPIN_TOPS = {0x16, 0x17, 0x54, 0x34, 0x35, 0xB4, 0xB5, 0x36, 0x37, 0xB6, 0xB7}   # b, b.cond, cbz/cbnz, tbz/tbnz
 SPIN_PATHS, SPIN_STEPS, SPIN_STORES = 256, 4096, 4   # complete paths back to T; search steps; stores in a region
+SPIN_MEMO = 2048   # decoded words the memo keeps before it is dropped (one head reads at most about 150)
 SPIN_LSE = ('ldadd', 'ldclr', 'ldeor', 'ldset', 'ldsmax', 'ldsmin', 'ldumax', 'ldumin')
 SPIN_BAD = {'bl', 'blr', 'br', 'ret', 'eret', 'svc', 'hvc', 'smc', 'brk', 'hlt', 'udf', 'mrs', 'msr', 'sys', 'sysl',
             'wfe', 'wfi', 'sev', 'sevl', 'clrex', 'dc', 'ic', 'at', 'tlbi', 'drps', 'dcps1', 'dcps2', 'dcps3', 'blraa',
@@ -87,16 +101,21 @@ def norm(n):
 
 
 class Search:
-    """The spin waits of one module image. touched: image offsets no region may contain (none by default)."""
+    """The spin waits of one module image. touched: image offsets no region may contain (none by default). memo: how
+    many decoded words are kept at once (see the docstring's Memory paragraph)."""
 
-    def __init__(self, img, text_end, touched=()):
+    def __init__(self, img, text_end, touched=(), memo=SPIN_MEMO):
         self.img, self.text_end, self.touched = img, text_end, set(touched)
         self.md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
         self.md.detail = True
-        self.dec = {}
+        self.dec, self.memo = {}, max(1, memo)
 
     def ins(self, a):
+        """The instruction at a, or None outside the text or when capstone cannot decode it. A pure function of the
+        image: self.dec only saves decoding a word again, and holds at most self.memo of them."""
         if a not in self.dec:
+            if len(self.dec) >= self.memo:
+                self.dec.clear()   # the callers hold what they decoded; a word asked for again is decoded again
             self.dec[a] = next(self.md.disasm(bytes(self.img[a:a + 4]), a), None) if 0 <= a < self.text_end else None
         return self.dec[a]
 

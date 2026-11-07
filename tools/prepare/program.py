@@ -192,7 +192,10 @@ class Lift(Step):
             raise PrepareError(f"the spin-wait search stopped with exit code {search.code}. The end of {path}:\n" +
                                "\n".join(search.tail[-15:]))
         waits = sum(len(v) for v in json.loads(table.read_text(encoding="utf-8")).values())
-        rep.say(f"lift: {waits:,} spin waits found in {search.seconds:.0f} s")
+        # Private bytes are Windows's figure; elsewhere the only one is the resident set.
+        peak = (f"{mib(search.peak_process)} private, {mib(search.peak_working_set)} resident" if build_game.WIN
+                else f"{mib(search.peak_working_set)} resident")
+        rep.say(f"lift: {waits:,} spin waits found in {search.seconds:.0f} s, peak {peak}")
         on_line, log, path = log_lines(ctx, "lift", lambda line: rep.progress(
             "lift", f"lift: {line}", every=10.0) if line.startswith("emitted ") else rep.say(f"lift: {line}"))
         cmd = [*python(), str(LIFTER / "gen.py"), "--exefs", str(ctx.dest / EXEFS), "--out", str(gen),
@@ -215,8 +218,10 @@ class Lift(Step):
                 f"peak {mib(m.peak_process)} per process" + (f", {mib(m.peak_all)} all processes" if m.peak_all else ""))
         return {"modules": [p.name for p in mods], "functions": report["total_functions"],
                 "unsupported": unsupported, "spin_waits": waits, "spin_gates": gates,
-                "spin_search_seconds": round(search.seconds, 1), "peak_process": m.peak_process, "peak_all": m.peak_all,
-                "bytes": c_bytes}
+                "spin_search_seconds": round(search.seconds, 1),
+                "spin_search_peak_process": search.peak_process, "spin_search_peak_all": search.peak_all,
+                "spin_search_peak_working_set": search.peak_working_set,
+                "peak_process": m.peak_process, "peak_all": m.peak_all, "bytes": c_bytes}
 
 
 class Compile(Step):

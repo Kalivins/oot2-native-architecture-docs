@@ -13,6 +13,8 @@ Run: python -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import argparse
+import io
 import json
 import os
 import re
@@ -22,6 +24,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 GEN = ROOT / "tools" / "lift" / "gen.py"
@@ -30,9 +33,13 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tools" / "lift"))
 sys.path.insert(0, str(ROOT / "tests" / "lift"))
 
+import build_game  # noqa: E402
 import gen  # noqa: E402
 import synth  # noqa: E402
 from module import Module  # noqa: E402
+from prepare import program  # noqa: E402
+from prepare import state as statefile  # noqa: E402
+from prepare.runner import Context, Reporter  # noqa: E402
 
 try:
     import capstone  # noqa: F401
@@ -207,6 +214,79 @@ class SearchTest(unittest.TestCase):
         self.assertEqual(self.found(FORWARD_ONLY), [])
 
 
+class MemoTest(unittest.TestCase):
+    """The memo of decoded words (Search.dec) is bounded and changes no answer (ticket 122: unbounded, it held 3.4 KiB
+    per word searched and made the search the peak memory of the whole prepare)."""
+
+    SHAPES = [POLL, TEST_LOOP, POLL_STORE, LOCK_LOOP, CALL_IN_LOOP, COUNTED, STORE_OF_WRITTEN, FORWARD_ONLY]
+    COPIES = 90
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        need_capstone()
+        # Every shape 90 times over, each followed by padding: thousands of words are decoded, in several kinds of
+        # loop, so a word served for the wrong address would change a verdict somewhere.
+        ws = [NOP, NOP]
+        for _ in range(cls.COPIES):
+            for fn in cls.SHAPES:
+                ws += fn + [NOP] * 3
+        cls.img = words(*ws, *([NOP] * 8))
+
+    def run_search(self, memo: int | None = None, cls=None):
+        kw = {} if memo is None else {"memo": memo}
+        s = (cls or spin_waits.Search)(self.img, len(self.img), **kw)
+        return s, [(g["T"], sorted(g["valid"]), g["size"], g["kinds"]) for g in s.all()]
+
+    def test_the_default_bound_is_the_constant_and_covers_the_reach_of_a_head(self) -> None:
+        s = spin_waits.Search(self.img, len(self.img))
+        self.assertEqual(s.memo, spin_waits.SPIN_MEMO)
+        # A head reads from 4 bytes before it to 24 past its farthest back-edge, (SPIN_WIN + 28) / 4 words: a bound
+        # under that decodes the same words again and again within one search, and a few times that keeps a clear
+        # from falling inside most heads.
+        self.assertGreaterEqual(spin_waits.SPIN_MEMO, 8 * ((spin_waits.SPIN_WIN + 28) // 4 + 1))
+        self.assertEqual(spin_waits.Search(self.img, len(self.img), memo=0).memo, 1)
+
+    def test_the_memo_never_holds_more_than_its_bound(self) -> None:
+        peaks = []
+
+        class Watched(spin_waits.Search):
+            def ins(self, a):
+                r = super().ins(a)
+                peaks.append(len(self.dec))
+                return r
+
+        _, unbounded = self.run_search(10 ** 9, Watched)
+        self.assertGreater(max(peaks), 2 * spin_waits.SPIN_MEMO,
+                           "the image must decode more words than any bound below")
+        for memo in (1, 64, spin_waits.SPIN_MEMO):
+            peaks.clear()
+            _, found = self.run_search(memo, Watched)
+            self.assertLessEqual(max(peaks), memo, memo)
+            self.assertEqual(found, unbounded, memo)
+
+    def test_a_bounded_memo_finds_what_an_unbounded_one_does(self) -> None:
+        _, unbounded = self.run_search(10 ** 9)
+        self.assertEqual(len(unbounded), 4 * self.COPIES)        # POLL, TEST_LOOP, POLL_STORE and LOCK_LOOP each time
+        for memo in (1, 5, 100, spin_waits.SPIN_MEMO):
+            self.assertEqual(self.run_search(memo)[1], unbounded, memo)
+
+    def test_the_default_search_keeps_a_fraction_of_the_words_it_decoded(self) -> None:
+        decoded = []
+
+        class Counting(spin_waits.Search):
+            def ins(self, a):
+                if a not in self.dec:
+                    decoded.append(a)
+                return super().ins(a)
+
+        s, _ = self.run_search(None, Counting)
+        self.assertLessEqual(len(s.dec), spin_waits.SPIN_MEMO)
+        self.assertGreater(len(set(decoded)), 2 * spin_waits.SPIN_MEMO)
+        # Dropping the memo costs little: a word is decoded again only after a drop, and a head asks for the same few
+        # dozen words many times over.
+        self.assertLess(len(decoded), 2 * len(set(decoded)))
+
+
 def write_main(folder: Path, functions: list[list[int]]) -> dict[str, int]:
     text, exports = module_with(functions)
     (folder / "main").write_bytes(synth.Module(text, exports).build())
@@ -270,6 +350,57 @@ class EmitterSpinTest(unittest.TestCase):
         mod, starts, at, _ = self.load([POLL, f1])
         with self.assertRaisesRegex(gen.LiftError, r"main\+0x24: .*outside"):
             gen.Emitter(mod, starts, spins={at["f1"] + 4: at["f0"]})
+
+
+class LiftRecordTest(unittest.TestCase):
+    """The lift step's record carries the spin-wait search's peak memory beside its seconds, and not the code
+    generation's (ticket 122: the search was the peak of the whole prepare and nothing recorded it)."""
+
+    TABLE = {"main": [{"head": 16, "back_edges": [20], "size": 2, "kinds": []}]}
+    REPORT = {"total_functions": 3, "spin_gates": 1, "modules": {"main": {"stats": {"c_bytes": 100}}}}
+
+    def context(self, tmp: str) -> tuple[Context, io.StringIO]:
+        dest = Path(tmp)
+        (dest / "exefs").mkdir()
+        out = io.StringIO()
+        return Context(dest, argparse.Namespace(), Reporter(out, out), state=statefile.load(dest)), out
+
+    def test_the_record_holds_the_searchs_peaks_and_the_lifts_apart(self) -> None:
+        def fake(cmd, cwd, on_line=None):
+            out = Path(cmd[cmd.index("--out") + 1])
+            if any(str(word).endswith("spin_waits.py") for word in cmd):
+                out.write_text(json.dumps(self.TABLE), encoding="utf-8")
+                return build_game.Measured(0, 12.34, 111 << 20, 222 << 20, [], 333 << 20)
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "lift_report.json").write_text(json.dumps(self.REPORT), encoding="utf-8")
+            return build_game.Measured(0, 5.0, 7 << 20, 8 << 20, [])
+
+        for win in (True, False):   # the report line says what the platform measures (private bytes are Windows's)
+            with self.subTest(windows=win), tempfile.TemporaryDirectory() as tmp:
+                ctx, out = self.context(tmp)
+                (ctx.dest / "exefs" / "main").write_bytes(b"x")
+                with mock.patch.object(build_game, "run_measured", fake), mock.patch.object(build_game, "WIN", win):
+                    record = program.Lift().run(ctx)
+                self.assertEqual((record["spin_search_seconds"], record["spin_search_peak_process"],
+                                  record["spin_search_peak_all"], record["spin_search_peak_working_set"]),
+                                 (12.3, 111 << 20, 222 << 20, 333 << 20))
+                self.assertEqual((record["peak_process"], record["peak_all"]), (7 << 20, 8 << 20))
+                say = "peak 111.0 MiB private, 333.0 MiB resident" if win else "peak 333.0 MiB resident"
+                self.assertIn(f"1 spin waits found in 12 s, {say}", out.getvalue())
+
+    def test_a_real_search_is_measured(self) -> None:
+        need_capstone()
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx, _ = self.context(tmp)
+            write_main(ctx.dest / "exefs", [POLL])
+            record = program.Lift().run(ctx)
+            self.assertEqual(record["spin_waits"], 1)
+            # An interpreter with capstone loaded is tens of MiB, whatever the platform counts it by.
+            self.assertGreater(record["spin_search_peak_process"], 8 << 20)
+            self.assertGreater(record["spin_search_peak_working_set"], 8 << 20)
+            if build_game.WIN:
+                self.assertGreaterEqual(record["spin_search_peak_all"], record["spin_search_peak_process"])
+            self.assertGreater(record["spin_search_seconds"], 0)
 
 
 class SpinFlagTest(unittest.TestCase):
