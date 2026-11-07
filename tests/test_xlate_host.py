@@ -75,7 +75,7 @@ OP = dict(Capability=17, MemoryModel=14, EntryPoint=15, ExecutionMode=16, TypeVo
           Variable=59, Load=61, Decorate=71, MemberDecorate=72, ImageRead=98, ImageWrite=99,
           Label=248, Return=253, GroupNonUniformShuffleUp=347, GroupNonUniformShuffleDown=348,
           TypeRuntimeArray=29, Store=62, AccessChain=65, ArrayLength=68, CopyObject=83,
-          AtomicIAdd=234)
+          AtomicIAdd=234, Extension=10)
 
 
 def words(op: int, *operands: int) -> list[int]:
@@ -101,9 +101,10 @@ def module(body: list[list[int]], bound: int) -> bytes:
 class Builder:
     """A tiny valid shader: a void main and the ids 1 (void), 2 (void()), 3 (float)."""
 
-    def __init__(self, model: int, caps: tuple[int, ...] = ()):
+    def __init__(self, model: int, caps: tuple[int, ...] = (), extensions: tuple[str, ...] = ()):
         self.model = model
         self.caps = [1, *caps]  # Shader
+        self.extensions = extensions
         self.decos: list[list[int]] = []
         self.types = [words(OP["TypeVoid"], 1), words(OP["TypeFunction"], 2, 1), words(OP["TypeFloat"], 3, 32)]
         self.globals: list[list[int]] = []
@@ -121,6 +122,7 @@ class Builder:
     def build(self) -> bytes:
         main = 4
         head = [words(OP["Capability"], c) for c in self.caps]
+        head += [[((len(string_words(e)) + 1) << 16) | OP["Extension"], *string_words(e)] for e in self.extensions]
         head.append(words(OP["MemoryModel"], 0, 1))  # Logical, GLSL450
         head.append(entry_point(self.model, main, "main", *self.interface))
         if self.model == 5:
@@ -153,6 +155,37 @@ def image_module(dim: int, arrayed: int, ms: int, sampled: int, fmt: int, access
             b.code.append(words(OP["ImageRead"], vec4, texel, loaded, coord))
         if access != "read":
             b.code.append(words(OP["ImageWrite"], loaded, coord, texel))
+    return b.build()
+
+
+CAP_SHADER_NON_UNIFORM, CAP_RUNTIME_DESCRIPTOR_ARRAY, CAP_STORAGE_IMAGE_ARRAY_NON_UNIFORM = 5301, 5302, 5309
+DECORATION_NON_UNIFORM = 5300
+
+
+def image_array_module(sampled: int, index: str, runtime: bool = False, declared: bool = False) -> bytes:
+    """A compute shader with an array of images (set 0, binding 0; Rgba8 when they are storage images, so that no
+    capability but the one under test is involved) indexed once at element 1. How the index is marked:
+    "chain" the access chain's result is decorated NonUniform, "index" only the index, "load" only the loaded
+    image, "uniform" nothing, "none" the array is never indexed. `declared`: the module declares the capability."""
+    caps = [CAP_SHADER_NON_UNIFORM]
+    if runtime:
+        caps.append(CAP_RUNTIME_DESCRIPTOR_ARRAY)
+    if declared:
+        caps.append(CAP_STORAGE_IMAGE_ARRAY_NON_UNIFORM)
+    b = Builder(5, caps=tuple(caps), extensions=("SPV_EXT_descriptor_indexing",))
+    uint, four, img, arr, parr, pimg, var, one, index_id, chain, loaded = (b.new_id() for _ in range(11))
+    b.decos += [words(OP["Decorate"], var, 34, 0), words(OP["Decorate"], var, 33, 0)]  # DescriptorSet, Binding
+    b.globals += [words(OP["TypeInt"], uint, 32, 0), words(OP["Constant"], uint, four, 4),
+                  words(OP["TypeImage"], img, 3, 1, 0, 0, 0, sampled, 4 if sampled == 2 else 0),
+                  words(OP["TypeRuntimeArray"], arr, img) if runtime else words(OP["TypeArray"], arr, img, four),
+                  words(OP["TypePointer"], parr, 0, arr), words(OP["TypePointer"], pimg, 0, img),  # UniformConstant
+                  words(OP["Variable"], parr, var, 0), words(OP["Constant"], uint, one, 1)]
+    if index != "none":
+        b.code += [words(OP["CopyObject"], uint, index_id, one),
+                   words(OP["AccessChain"], pimg, chain, var, index_id), words(OP["Load"], img, loaded, chain)]
+        marked = {"chain": chain, "index": index_id, "load": loaded}.get(index)
+        if marked is not None:
+            b.decos.append(words(OP["Decorate"], marked, DECORATION_NON_UNIFORM))
     return b.build()
 
 
@@ -741,6 +774,33 @@ class CapabilityPostPassTest(Harness):
     def test_multisampled_storage_array(self):
         self.check("msa", image_module(1, 1, 1, 2, 4),
                    ["ImageMSArray", "StorageImageMultisample", "NonWritable@0.0", "NonReadable@0.0"], invalid_before=True)
+
+    # The declaration of StorageImageArrayNonUniformIndexing: where a storage image array is indexed
+    # with a non-uniform index, and nowhere else. The generator no longer declares it.
+    UNREAD = ["NonWritable@0.0", "NonReadable@0.0"]   # the Rgba8 images are never read nor written
+
+    def test_a_storage_image_array_indexed_non_uniformly_declares_the_capability(self):
+        for index in ("chain", "index", "load"):
+            with self.subTest(index=index):
+                self.check("sia_" + index, image_array_module(2, index),
+                           ["StorageImageArrayNonUniformIndexing", *self.UNREAD])
+
+    def test_a_runtime_array_of_storage_images_counts_too(self):
+        self.check("sia_rt", image_array_module(2, "chain", runtime=True),
+                   ["StorageImageArrayNonUniformIndexing", *self.UNREAD])
+
+    def test_a_storage_image_array_not_indexed_non_uniformly_declares_nothing(self):
+        for index in ("uniform", "none"):
+            with self.subTest(index=index):
+                self.check("siu_" + index, image_array_module(2, index), self.UNREAD)
+
+    def test_a_sampled_image_array_indexed_non_uniformly_declares_nothing_here(self):
+        # SampledImageArrayNonUniformIndexing is the generator's, not the post-pass's.
+        self.check("sa_chain", image_array_module(1, "chain"), [])
+        self.check("sa_rt", image_array_module(1, "chain", runtime=True), [])
+
+    def test_a_capability_the_module_declares_is_not_added_again(self):
+        self.check("sia_decl", image_array_module(2, "chain", declared=True), self.UNREAD)
 
     def test_clip_and_cull_distance(self):
         self.check("clip", builtin_module(), ["ClipDistance", "CullDistance"])

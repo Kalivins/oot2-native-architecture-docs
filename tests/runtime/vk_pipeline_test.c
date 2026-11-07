@@ -11,7 +11,10 @@
 //   binds FILE                   a description's bindings parsed (shd_parse_binds), or the refusal
 //   spvdecl MODULE               the capabilities and extensions a module declares
 //   spvpad IN OUT SPEC           a module with outputs added (SPEC "location:component:components:type,...")
-//   capcheck MODULE [drop CAP]   a module judged against the required list (a capability may be dropped from it)
+//   capcheck MODULE [storage-image-indexing] [drop CAP]   a module judged against the capabilities of a device that has
+//                                every item (with the optional feature when the argument names it; a capability may be dropped)
+//   optional                     the required list's ids and count, and for facts without and with the optional feature:
+//                                the items the device has, the features enabled and whether capability 5309 is allowed
 //   cachejudge                   cache file headers judged for a device
 //   store BASE VARIANTS KEY KIND SHAPE   a stage looked up in a pack of packs (VARIANTS "-" for none)
 //   storeopen BASE VARIANTS      the packs opened: "ok" or the refusal
@@ -242,6 +245,38 @@ static void case_spvpad(const char *in, const char *out, const char *spec) {
     free(o), free(w);
 }
 
+// The facts of a device that has every item of the required list and none of the optional features: the features
+// the items enable (read off oot2_vk_enable of empty facts) with the limits, properties and extensions their tests read.
+static void facts_with_every_item(Oot2VkFacts *f) {
+    Oot2VkFacts zero, en;
+    memset(&zero, 0, sizeof zero);
+    oot2_vk_enable(&zero, &en);
+    memset(f, 0, sizeof *f);
+    f->features = en.features, f->f11 = en.f11, f->f12 = en.f12, f->f13 = en.f13;
+    f->gpl = en.gpl, f->mesh = en.mesh, f->shader_object = en.shader_object, f->pipeline_binary = en.pipeline_binary;
+    f->vertex_input = en.vertex_input, f->coop = en.coop, f->fault = en.fault, f->atomic_float = en.atomic_float;
+    f->depth_clip = en.depth_clip, f->index_u8 = en.index_u8;
+    f->eds3.extendedDynamicState3DepthClipNegativeOneToOne = f->eds3.extendedDynamicState3PolygonMode = VK_TRUE;
+    f->eds3.extendedDynamicState3DepthClampEnable = f->eds3.extendedDynamicState3ColorBlendEnable = VK_TRUE;
+    f->eds3.extendedDynamicState3ColorBlendEquation = f->eds3.extendedDynamicState3ColorWriteMask = VK_TRUE;
+    memset(f->ext, 1, sizeof f->ext);
+    f->props.apiVersion = VK_API_VERSION_1_3;
+    f->props.limits.maxViewports = 16;
+    f->host.minImportedHostPointerAlignment = 4096;
+    f->push.maxPushDescriptors = 32;
+    f->p11.subgroupSize = f->p13.minSubgroupSize = f->p13.maxSubgroupSize = 32;
+    f->p11.subgroupSupportedOperations = OOT2_VK_SUBGROUP_OPS;
+    f->p11.subgroupSupportedStages = OOT2_VK_SUBGROUP_STAGES;
+    f->p12.maxDescriptorSetUpdateAfterBindSampledImages = 1u << 20;
+    f->p13.requiredSubgroupSizeStages = OOT2_VK_TASK_MESH;
+    f->gpl_props.graphicsPipelineLibraryFastLinking = VK_TRUE;
+    f->mesh_props.maxMeshOutputVertices = 160;
+    f->mesh_props.maxMeshOutputPrimitives = 128;
+    f->mesh_props.maxMeshOutputMemorySize = 28160;
+    unsigned char has[OOT2_VK_ITEM_COUNT];
+    CHECK(oot2_vk_judge(f, has) == OOT2_VK_ITEM_COUNT);   // an item added to the list needs its facts here
+}
+
 static void case_capcheck(const char *path, int argc, char **argv) {
     size_t n;
     uint32_t *w = read_all(path, &n);
@@ -249,10 +284,14 @@ static void case_capcheck(const char *path, int argc, char **argv) {
     char why[256];
     CHECK(spv_declarations(w, n / 4, &d, why, sizeof why));
     static Oot2VkFacts f;
+    facts_with_every_item(&f);
+    for (int i = 0; i < argc; i++)
+        if (!strcmp(argv[i], "storage-image-indexing")) f.f12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
     VkcList l;
     vkc_list(&f, &l);
-    if (argc >= 2 && !strcmp(argv[0], "drop")) {
-        uint32_t drop = (uint32_t)strtoul(argv[1], NULL, 10);
+    for (int i = 0; i + 1 < argc; i++) {
+        if (strcmp(argv[i], "drop")) continue;
+        uint32_t drop = (uint32_t)strtoul(argv[i + 1], NULL, 10);
         size_t at = 0;
         for (size_t i = 0; i < l.ncaps; i++)
             if (l.caps[i] != drop) l.caps[at++] = l.caps[i];
@@ -262,6 +301,27 @@ static void case_capcheck(const char *path, int argc, char **argv) {
     else printf("ok\n");
     printf("list %zu capabilities, %zu extensions\n", l.ncaps, l.nexts);
     free(w);
+}
+
+static void case_optional(void) {
+    printf("items %d optional %d\n", OOT2_VK_ITEM_COUNT, OOT2_VK_OPTIONAL_COUNT);
+    for (int i = 0; i < OOT2_VK_ITEM_COUNT; i++) printf("item %s\n", oot2_vk_item_id(i));
+    for (int i = 0; i < OOT2_VK_OPTIONAL_COUNT; i++) printf("optional %s\n", oot2_vk_optional_id(i));
+    for (int present = 0; present < 2; present++) {
+        const char *tag = present ? "present" : "absent";
+        Oot2VkFacts f, en;
+        facts_with_every_item(&f);
+        f.f12.shaderStorageImageArrayNonUniformIndexing = present ? VK_TRUE : VK_FALSE;
+        unsigned char has[OOT2_VK_ITEM_COUNT];
+        printf("%s: has %d of %d\n", tag, oot2_vk_judge(&f, has), OOT2_VK_ITEM_COUNT);
+        for (int i = 0; i < OOT2_VK_ITEM_COUNT; i++)
+            if (!has[i]) printf("%s: lacks %s\n", tag, oot2_vk_item_id(i));
+        oot2_vk_enable(&f, &en);
+        printf("%s: enabled %d\n", tag, en.f12.shaderStorageImageArrayNonUniformIndexing ? 1 : 0);
+        VkcList l;
+        vkc_list(&f, &l);
+        printf("%s: capability 5309 %s\n", tag, vkc_has_cap(&l, 5309) ? "allowed" : "refused");
+    }
 }
 
 static void case_cachejudge(void) {
@@ -903,6 +963,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "spvdecl") && argc >= 3) case_spvdecl(argv[2]);
     else if (!strcmp(cs, "spvpad") && argc >= 5) case_spvpad(argv[2], argv[3], argv[4]);
     else if (!strcmp(cs, "capcheck") && argc >= 3) case_capcheck(argv[2], argc - 3, argv + 3);
+    else if (!strcmp(cs, "optional")) case_optional();
     else if (!strcmp(cs, "cachejudge")) case_cachejudge();
     else if (!strcmp(cs, "store") && argc >= 7) case_store(argv[2], argv[3], argv[4], argv[5], argv[6]);
     else if (!strcmp(cs, "storeopen") && argc >= 4) case_storeopen(argv[2], argv[3]);

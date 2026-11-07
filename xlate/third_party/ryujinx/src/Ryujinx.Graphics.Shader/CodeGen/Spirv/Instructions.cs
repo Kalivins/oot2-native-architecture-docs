@@ -692,7 +692,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     context.AddExtension("SPV_EXT_descriptor_indexing");
                     context.AddCapability(Capability.ShaderNonUniform);
                     context.AddCapability(Capability.SampledImageArrayNonUniformIndexing);
-                    context.AddCapability(Capability.StorageImageArrayNonUniformIndexing);
+                    // oot2-native: StorageImageArrayNonUniformIndexing is not declared here. The generator marks every
+                    // indexed access NonUniform, and the corpus has no array of storage images; the host's post-pass
+                    // (SpirvFixup) declares the capability where a storage image array is indexed non-uniformly.
                 }
 
                 context.Decorate(inst, Decoration.NonUniform);

@@ -13,8 +13,8 @@
 //   test    a C expression over `const Oot2VkFacts *f` (below), true when the device has the item
 //   enable  a C expression over `const Oot2VkFacts *f` and `Oot2VkFacts *e`: it sets in e the features the device must
 //           be created with for the item ((void)0 when the item is a limit or an extension alone); the device the
-//           runtime creates enables these and nothing more, every extension of OOT2_VK_EXTENSIONS the device lists
-//           aside
+//           runtime creates enables these and the optional features of OOT2_VK_OPTIONAL (below) and nothing more,
+//           every extension of OOT2_VK_EXTENSIONS the device lists aside
 // A use that only names the items (an X that ignores test, as oot2_vk_item_id does) needs no Vulkan header: the
 // preprocessor never expands an argument that the replacement does not use. The facts, the query that fills them and
 // the judgement are defined only after <vulkan/vulkan_core.h> (or Volk's volk.h) has been included.
@@ -26,18 +26,22 @@
 // Items 20 to 27 came with the Vulkan back end's device: what the device itself, the uni layout, the mesh path and the
 // translated programs use (architecture D12, D16, D18; the mesh shader, first draw, pipeline cost and translator defects studies).
 //
-// Items 28 to 31 came with the pipeline builder's capability check (oot2/vk_caps.h): the translated modules
-// declare 64-bit integers (the raw-access helper), storage images without a format, cube array images and non-uniform
-// indexing of storage image arrays, and the check over the whole corpus found no item that enables them. All four are
-// features every desktop GPU that has the items above offers.
+// Items 28 to 30 came with the pipeline builder's capability check (oot2/vk_caps.h): the translated modules
+// declare 64-bit integers (the raw-access helper), storage images without a format and cube array images, and the
+// check over the whole corpus found no item that enables them. All three are features every desktop GPU that has the
+// items above offers. The check found a fourth, non-uniform indexing of storage image arrays, which only the
+// translator's own declaration asked for (no module indexes an array of storage images); the translator declares
+// it only where one is indexed, so no item asks for it. It is the one optional feature, enabled when the GPU reports
+// it: shader packs prepared before that change still declare the capability in about 9,500 modules, and a device that
+// lacks the feature refuses such a module by name.
 //
-// Items 34 to 42 are the core features the replay's draw state needs (the core features requirement): one viewport and scissor for each of
+// Items 33 to 41 are the core features the replay's draw state needs (the core features requirement): one viewport and scissor for each of
 // the 16 NVN has, line and point fill, depth clamp, the depth bias clamp, the depth bounds test, wide lines, a blend
 // state and write mask for each colour target, dual-source blend factors and indirect draws with a first instance.
 // Every desktop GPU that has the items above has them. robustBufferAccess is not among them and stays off: a raw
 // device address is not covered by it, and a read the game guards past a declared range is data, not zero.
 //
-// Item 43 is 8-bit indices (VK_KHR_index_type_uint8): the title draws with NVN's unsigned byte index type, which Vulkan
+// Item 42 is 8-bit indices (VK_KHR_index_type_uint8): the title draws with NVN's unsigned byte index type, which Vulkan
 // 1.3 takes only through this extension; primitive restart at 0xFF comes with it.
 #pragma once
 #include <stdint.h>
@@ -113,8 +117,6 @@
       f->features.shaderStorageImageReadWithoutFormat && f->features.shaderStorageImageWriteWithoutFormat,           \
       (e->features.shaderStorageImageReadWithoutFormat = e->features.shaderStorageImageWriteWithoutFormat = VK_TRUE)) \
     X(cube_array_images, "cube array images", f->features.imageCubeArray, (e->features.imageCubeArray = VK_TRUE))     \
-    X(storage_image_array_indexing, "non-uniform indexing of storage image arrays",                                   \
-      f->f12.shaderStorageImageArrayNonUniformIndexing, (e->f12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE)) \
     X(sampler_features, "anisotropic filtering, mirror clamp to edge and min and max reduction in samplers",          \
       f->features.samplerAnisotropy && f->f12.samplerMirrorClampToEdge && f->f12.samplerFilterMinmax,                \
       (e->features.samplerAnisotropy = VK_TRUE, e->f12.samplerMirrorClampToEdge = VK_TRUE,                            \
@@ -151,6 +153,16 @@
       f->features.drawIndirectFirstInstance,                                                                           \
       (e->features.drawIndirectFirstInstance = VK_TRUE))                                                                   X(index_type_uint8, "8-bit indices", f->index_u8.indexTypeUint8, (e->index_u8.indexTypeUint8 = VK_TRUE))
 
+// The features the device enables when the GPU reports them and does not require: OOT2_VK_OPTIONAL(X) expands
+// X(id, enable) once per feature. A device without one is still chosen, and none is an item (the check,
+// `oot2 --vulkan-items` and the probe list the items only). enable is an item's enable: a C expression over f and e,
+// and it copies the feature from f, so the feature stays off where the GPU lacks it. The capability check of the
+// pipeline builder (oot2/vk_caps.h) reads the structure oot2_vk_enable fills, so a capability behind an optional
+// feature is allowed exactly when the feature was enabled.
+#define OOT2_VK_OPTIONAL(X)                                                                                            \
+    X(storage_image_array_indexing,                                                                                    \
+      (e->f12.shaderStorageImageArrayNonUniformIndexing = f->f12.shaderStorageImageArrayNonUniformIndexing))
+
 // The device extensions the items read, E(id, name), and the ones they depend on below Vulkan 1.4 (pipeline_library
 // for graphics_pipeline_library, maintenance5 for pipeline_binary). The device the back end creates enables every one
 // the device lists.
@@ -180,6 +192,13 @@ enum {
 };
 
 enum {
+#define OOT2_VK_OPTIONAL_ENUM(id, enable) OOT2_VK_OPTIONAL_##id,
+    OOT2_VK_OPTIONAL(OOT2_VK_OPTIONAL_ENUM)
+#undef OOT2_VK_OPTIONAL_ENUM
+    OOT2_VK_OPTIONAL_COUNT
+};
+
+enum {
 #define OOT2_VK_EXT_ENUM(id, name) OOT2_VK_EXT_##id,
     OOT2_VK_EXTENSIONS(OOT2_VK_EXT_ENUM)
 #undef OOT2_VK_EXT_ENUM
@@ -203,6 +222,16 @@ static inline const char *oot2_vk_item_what(int i) {
 #undef OOT2_VK_ITEM_WHAT
     };
     return i >= 0 && i < OOT2_VK_ITEM_COUNT ? whats[i] : NULL;
+}
+
+// Optional feature i's id, in list order; NULL past the end.
+static inline const char *oot2_vk_optional_id(int i) {
+    static const char *const ids[] = {
+#define OOT2_VK_OPTIONAL_ID(id, enable) #id,
+        OOT2_VK_OPTIONAL(OOT2_VK_OPTIONAL_ID)
+#undef OOT2_VK_OPTIONAL_ID
+    };
+    return i >= 0 && i < OOT2_VK_OPTIONAL_COUNT ? ids[i] : NULL;
 }
 
 // Extension e's name (OOT2_VK_EXT_*), as the device lists it; NULL past the end.
@@ -345,7 +374,8 @@ static inline int oot2_vk_judge(const Oot2VkFacts *f, unsigned char has[OOT2_VK_
     return n;
 }
 
-// e = the features a device with facts f is created with: every item's enable, and nothing else. e keeps f's API
+// e = the features a device with facts f is created with: every item's enable and every optional feature's, and nothing
+// else. e keeps f's API
 // version and extension list, so oot2_vk_chain_features(e, ...) chains the same structures the query read.
 static inline void oot2_vk_enable(const Oot2VkFacts *f, Oot2VkFacts *e) {
     memset(e, 0, sizeof *e);
@@ -354,5 +384,8 @@ static inline void oot2_vk_enable(const Oot2VkFacts *f, Oot2VkFacts *e) {
 #define OOT2_VK_ITEM_ENABLE(id, what, test, enable) enable;
     OOT2_VK_ITEMS(OOT2_VK_ITEM_ENABLE)
 #undef OOT2_VK_ITEM_ENABLE
+#define OOT2_VK_OPTIONAL_ENABLE(id, enable) enable;
+    OOT2_VK_OPTIONAL(OOT2_VK_OPTIONAL_ENABLE)
+#undef OOT2_VK_OPTIONAL_ENABLE
 }
 #endif

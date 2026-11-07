@@ -44,6 +44,9 @@ internal sealed class DescriptorAccess
 /// for. Rather than patch the vendored tree, the host scans the emitted module and
 /// inserts the missing OpCapability instructions.
 ///
+/// It declares StorageImageArrayNonUniformIndexing, which the generator no longer
+/// does, where an array of storage images is indexed with a non-uniform index.
+///
 /// It also marks storage buffers and storage images by what the module does with
 /// them: NonWritable when no instruction writes the memory behind the variable,
 /// NonReadable when none reads it. The generator declares every one writable, and
@@ -130,6 +133,7 @@ internal static class SpirvFixup
     public const uint CapStorageImageReadWithoutFormat = 55;     // spirv.h:1132
     public const uint CapStorageImageWriteWithoutFormat = 56;    // spirv.h:1133
     public const uint CapGroupNonUniformShuffleRelative = 66;    // spirv.h:1143
+    public const uint CapStorageImageArrayNonUniformIndexing = 5309;  // spirv.h:1260
     public const uint CapPhysicalStorageBufferAddresses = 5347;  // spirv.h:1275
 
     // Operand values.
@@ -143,6 +147,7 @@ internal static class SpirvFixup
     private const uint StorageClassUniform = 2;    // spirv.h:227
     private const uint StorageClassStorageBuffer = 12;   // spirv.h:237
     private const uint DecorationBuiltIn = 11;     // spirv.h:518
+    private const uint DecorationNonUniform = 5300;    // spirv.h:582
     private const uint BuiltInClipDistance = 3;    // spirv.h:712
     private const uint BuiltInCullDistance = 4;    // spirv.h:713
     private const uint Dim1D = 0;                  // spirv.h:267
@@ -201,6 +206,7 @@ internal static class SpirvFixup
         List<string> extensions = new();
         Dictionary<uint, uint> imageSampled = new();   // OpTypeImage id -> sampled operand when the format is Unknown
         Dictionary<uint, uint> loadType = new();       // OpLoad result id -> its type id
+        StorageImageIndexing indexing = new();
         int capabilityEnd = HeaderWords;
         uint model = uint.MaxValue;
 
@@ -215,6 +221,8 @@ internal static class SpirvFixup
             {
                 throw new InvalidOperationException($"instruction at word {i} has a bad length {count}");
             }
+
+            indexing.Note(op, w.Slice(i, count));
 
             switch (op)
             {
@@ -267,6 +275,11 @@ internal static class SpirvFixup
             }
 
             i += count;
+        }
+
+        if (indexing.Found)
+        {
+            needed.Add(CapStorageImageArrayNonUniformIndexing);
         }
 
         List<uint> added = new();
@@ -362,6 +375,91 @@ internal static class SpirvFixup
             Access = scan.Access,
             Decorated = decorated,
         };
+    }
+
+    /// <summary>
+    /// Whether an array of storage images is indexed with a non-uniform index: an access chain whose base is a
+    /// variable of an array of images with Sampled 2 (a runtime array included; an array of arrays of images is not
+    /// a valid UniformConstant variable) and whose result or one of whose index operands is decorated NonUniform,
+    /// or a load of such a chain's result that is decorated NonUniform. The vendored generator marks every indexed
+    /// access NonUniform, since it cannot know that an index is uniform, so an indexed access is what the rule
+    /// finds. Arrays of sampled images and of
+    /// storage buffers need other capabilities (SampledImageArrayNonUniformIndexing, which the generator declares)
+    /// and do not count. Annotations come before types and types before the code, so one pass in the order of the
+    /// module sees each definition before its use.
+    /// </summary>
+    private sealed class StorageImageIndexing
+    {
+        private readonly HashSet<uint> _nonUniform = new();
+        private readonly HashSet<uint> _storageImages = new();       // OpTypeImage ids with Sampled 2
+        private readonly HashSet<uint> _arrays = new();              // array types whose element is one
+        private readonly HashSet<uint> _arrayPointers = new();       // pointer types to those arrays
+        private readonly HashSet<uint> _arrayVariables = new();
+        private readonly HashSet<uint> _chains = new();              // access chain results that index such a variable
+
+        public bool Found { get; private set; }
+
+        public void Note(uint op, ReadOnlySpan<uint> inst)
+        {
+            switch (op)
+            {
+                case OpDecorate when inst.Length >= 3 && inst[2] == DecorationNonUniform:
+                    _nonUniform.Add(inst[1]);
+                    break;
+                case OpTypeImage when inst.Length >= 9:
+                    if (inst[7] == 2 && inst[3] != DimSubpassData)
+                    {
+                        _storageImages.Add(inst[1]);
+                    }
+
+                    break;
+                case OpTypeArray when inst.Length >= 4:
+                case OpTypeRuntimeArray when inst.Length >= 3:
+                    if (_storageImages.Contains(inst[2]))
+                    {
+                        _arrays.Add(inst[1]);
+                    }
+
+                    break;
+                case OpTypePointer when inst.Length >= 4:
+                    if (_arrays.Contains(inst[3]))
+                    {
+                        _arrayPointers.Add(inst[1]);
+                    }
+
+                    break;
+                case OpVariable when inst.Length >= 4:
+                    if (_arrayPointers.Contains(inst[1]))
+                    {
+                        _arrayVariables.Add(inst[2]);
+                    }
+
+                    break;
+                case OpAccessChain or OpInBoundsAccessChain or OpPtrAccessChain or OpInBoundsPtrAccessChain when inst.Length >= 5:
+                    if (_arrayVariables.Contains(inst[3]))
+                    {
+                        _chains.Add(inst[2]);
+
+                        bool nonUniform = _nonUniform.Contains(inst[2]);
+
+                        for (int k = 4; k < inst.Length; k++)
+                        {
+                            nonUniform |= _nonUniform.Contains(inst[k]);
+                        }
+
+                        Found |= nonUniform;
+                    }
+
+                    break;
+                case OpLoad when inst.Length >= 4:
+                    if (_chains.Contains(inst[3]) && _nonUniform.Contains(inst[2]))
+                    {
+                        Found = true;
+                    }
+
+                    break;
+            }
+        }
     }
 
     private sealed class AccessScan

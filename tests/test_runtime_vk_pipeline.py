@@ -724,6 +724,44 @@ class SpirvTest(unittest.TestCase):
             self.assertEqual(done.returncode, 0, f"{spec}: {done.stdout}{done.stderr}")
 
 
+def header_required_ids() -> list[str]:
+    """The ids of OOT2_VK_ITEMS as the header text lists them, apart from anything the C preprocessor does."""
+    text = (ROOT / "runtime" / "include" / "oot2" / "vk_required.h").read_text(encoding="utf-8")
+    block = text[text.index("#define OOT2_VK_ITEMS(X)"):text.index("// The features the device enables when")]
+    return re.findall(r"\bX\((\w+),", block)
+
+
+class OptionalFeatureTest(unittest.TestCase):
+    """The features the device enables when the GPU reports them and does not require (OOT2_VK_OPTIONAL)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        done = run("optional")
+        assert done.returncode == 0, done.stdout + done.stderr
+        cls.lines = done.stdout.splitlines()
+
+    def test_facts_with_the_feature_enable_it_and_allow_its_capability(self) -> None:
+        self.assertIn("present: enabled 1", self.lines)
+        self.assertIn("present: capability 5309 allowed", self.lines)
+
+    def test_facts_without_the_feature_keep_the_device_acceptable_and_the_feature_off(self) -> None:
+        count = len(header_required_ids())
+        self.assertIn(f"absent: has {count} of {count}", self.lines)
+        self.assertEqual([l for l in self.lines if l.startswith("absent: lacks")], [])   # not among the lacking items
+        self.assertIn("absent: enabled 0", self.lines)
+        self.assertIn("absent: capability 5309 refused", self.lines)
+
+    def test_the_required_list_is_the_same_with_and_without_the_feature(self) -> None:
+        ids = header_required_ids()
+        self.assertGreater(len(ids), 19)
+        self.assertEqual(len(set(ids)), len(ids))
+        self.assertEqual([l[len("item "):] for l in self.lines if l.startswith("item ")], ids)   # contents and order
+        self.assertIn(f"items {len(ids)} optional 1", self.lines)
+        self.assertEqual([l for l in self.lines if l.startswith("optional ")], ["optional storage_image_array_indexing"])
+        self.assertNotIn("storage_image_array_indexing", ids)
+        self.assertEqual([l for l in self.lines if l.startswith("present: lacks")], [])   # the feature changes no item
+
+
 class RequiredListTest(unittest.TestCase):
     """The capabilities and extensions the required list gives (oot2/vk_caps.h)."""
 
@@ -750,6 +788,18 @@ class RequiredListTest(unittest.TestCase):
         self.assertEqual(self.check(vertex_module((1,), ("SPV_KHR_foo",)))[0],
                          "bad: extension SPV_KHR_foo is not in the device's required list")
         self.assertIn("capability 9999 is not in", self.check(vertex_module((9999,)))[0])
+
+    def test_non_uniform_indexing_of_storage_image_arrays_is_refused_without_the_feature(self) -> None:
+        # No item asks for it, and a device without the optional feature refuses a module that declares it, by name;
+        # the sampled image arrays' is in the list (the pool's).
+        self.assertEqual(self.check(vertex_module((5309,)))[0],
+                         "bad: capability StorageImageArrayNonUniformIndexing (5309) is not in the device's required list")
+        self.assertEqual(self.check(vertex_module((5307,)))[0], "ok")
+
+    def test_non_uniform_indexing_of_storage_image_arrays_is_allowed_with_the_feature(self) -> None:
+        # A shader pack prepared before the translator stopped declaring it still has the capability in many modules.
+        self.assertEqual(self.check(vertex_module((5309,)), "storage-image-indexing")[0], "ok")
+        self.assertEqual(self.check(vertex_module((5307, 5309)), "storage-image-indexing")[0], "ok")
 
     def test_a_capability_removed_from_the_list_is_caught(self) -> None:
         mod = vertex_module((10,))

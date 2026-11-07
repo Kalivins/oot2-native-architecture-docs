@@ -50,6 +50,32 @@ def stg(address: int, value: int, offset: int = 0) -> bytes:
     return scheduled(ampere(0x386, ra=address, rb=value, rc=0, low_bits=offset << 40, high_bits=bit(72) | bit(73, B32)))
 
 
+def ldg(rd: int, ra: int) -> bytes:
+    """LDG.E Rd, [R<ra>.64], 32 bits (0x381)."""
+    return scheduled(ampere(0x381, rd=rd, ra=ra, rb=255, rc=0, high_bits=bit(72) | bit(73, B32)))
+
+
+def tex_register(rd: int, handle: int) -> bytes:
+    """TEX Rd with its handle in register `handle` (0x361: the first register of the second source block), 2D at
+    coordinates RZ, level zero, four components, no residency predicate."""
+    return scheduled(ampere(0x361, rd=rd, ra=255, rb=handle, low_bits=(1 << 59) | (1 << 61),
+                            high_bits=bit(72, 0xF) | bit(81, 7) | bit(87, 1)))
+
+
+def declared_capabilities(spirv: bytes) -> set[int]:
+    """The numbers of the OpCapability instructions at the head of a module."""
+    words = struct.unpack(f"<{len(spirv) // 4}I", spirv)
+    found, i = set(), 5
+    while i < len(words) and words[i] & 0xFFFF == 17:
+        found.add(words[i + 1])
+        i += words[i] >> 16
+    return found
+
+
+CAP_SAMPLED_IMAGE_ARRAY_NON_UNIFORM = 5307
+CAP_STORAGE_IMAGE_ARRAY_NON_UNIFORM = 5309
+
+
 def buffers_program(banks: list[int], storage: int) -> bytes:
     """Stores to `storage` storage buffers (a zero to each), then one word of each constant bank in `banks`
     into the first of them; a module of it reads c[0] for the buffer addresses too."""
@@ -191,6 +217,25 @@ class UniPlacesTest(Harness):
         self.assertGreaterEqual(n, 1)
         self.assertEqual(self.bindings(res["cbufs"], 1), list(range(1, 9)) + list(range(32, 32 + n)))
         self.assert_overflow(res, "uniform", 8, n)
+
+    def test_the_texture_pool_arrays_are_not_storage_image_arrays(self):
+        # A handle loaded from a storage buffer is a texture of the pool: the translator declares the arrays of sampled
+        # images non-uniformly indexed (the generator's declaration, in 9,533 modules of the corpus) and does not
+        # declare StorageImageArrayNonUniformIndexing, which no module needs.
+        code = [mov_cbuf(2, 0, SB_BASE), mov_cbuf(3, 0, SB_BASE + 4), ldg(4, 2), tex_register(0, 4),
+                stg(2, 0, 8), stg(2, 1, 12)]
+        code_file = self.dir / "pool.bin"
+        header = bytearray(0x80)
+        struct.pack_into("<I", header, 0, (1 << 10) | 3)
+        code_file.write_bytes(bytes(header) + b"".join(code) + EXIT)
+        res = self.translate({"key": "pool", "stage": "vs", "arch": "sm86", "code": str(code_file), "c1": ""})
+        self.assertEqual([(t["via"], t["array_length"]) for t in res["textures"]], [("pool", 33025), ("pool", 4096)])
+        declared = declared_capabilities((self.out / "pool.spv").read_bytes())
+        self.assertIn(CAP_SAMPLED_IMAGE_ARRAY_NON_UNIFORM, declared)
+        self.assertNotIn(CAP_STORAGE_IMAGE_ARRAY_NON_UNIFORM, declared)
+        for field in ("capabilities", "capabilities_added"):   # the description says the same
+            self.assertNotIn("StorageImageArrayNonUniformIndexing", [n.removesuffix("EXT") for n in res[field]])
+        self.assertIn("SampledImageArrayNonUniformIndexing", [n.removesuffix("EXT") for n in res["capabilities"]])
 
     def test_task_storage_past_set_2(self):
         res = self.translate(self.job("ts9", "ts", [3], 9))

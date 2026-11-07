@@ -154,3 +154,13 @@ Changes of this project:
   (MIT; its patch carries no licence header and quotes a game program's
   identifier). Hookshot's shader path is a C++ recompiler without this
   optimizer, under no stated licence.
+- `CodeGen/Spirv/Instructions.cs`, `MarkNonUniform`: the first non-uniform
+  access no longer declares `StorageImageArrayNonUniformIndexing` next to
+  `SampledImageArrayNonUniformIndexing`. The generator marks every indexed
+  access non-uniform and no module of the corpus indexes an array of storage
+  images, so the declaration only asked the device for a feature nothing used
+  (9,533 of the 55,527 modules the corpus split translates, and 22 of its 854
+  mesh programs re-run with a synthesized interface; the only difference in
+  any module is that one declaration, 8 bytes). The host's post-pass
+  (`xlate/host/SpirvFixup.cs`) declares it where a storage image array is
+  indexed with a non-uniform index.
