@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 The oot2-native contributors
+#
+# CodeRabbit reviews pull requests here as advice. Nothing in this file makes a CodeRabbit check required and it
+# approves nothing: a pull request merges when its review conversations are resolved, the guard and build-and-test
+# checks (the jobs of the content-guard and windows-build workflows) pass, and the maintainer approves it.
+# CONTRIBUTING.md describes the process.
+language: en-US
+early_access: false
+
+reviews:
+  profile: chill
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+  # Keep CodeRabbit to comments: it does not write docstrings or tests into a pull request.
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+  path_instructions:
+    - path: "**"
+      instructions: |
+        This repository holds tools and a runtime and nothing that came out of the game. Flag any address,
+        offset, program key, module hash, build id, patch word or file path taken from a game dump, in code,
+        comments, tests, fixtures and documentation, and any game file, shader, texture, model, audio, movie,
+        font, capture, screenshot, frame dump or recompiled or generated game code. Evidence belongs in the text
+        of an issue or a pull request, never in a committed file. A game-specific fix is written as a structural
+        match over the lifted code, not as a table of addresses.
+    - path: "tools/**"
+      instructions: |
+        Any change to tools/ needs a careful look, because the content check and the pre-push guard live here.
+        Check that a changed or new rule has a test with a case that must be caught and a clean case that must
+        pass, built from synthetic data only; that an entry in an allowlist (ALLOW_BINARY, ALLOW_BLOBS) states
+        its reason; and that no rule was loosened without saying why in the description.
+    - path: ".githooks/**"
+      instructions: |
+        The hooks enforce the content check and the identity rule. Flag any change that lets a commit or a
+        push skip a check, and any change to which identity is accepted.
+    - path: ".github/**"
+      instructions: |
+        Any change to a workflow or to CODEOWNERS needs a careful look. Flag a changed trigger, a wider
+        permission, an action that is no longer pinned to a commit, a step that uploads or publishes build
+        output, and any change to the names of the content-guard and windows-build workflows or of their jobs
+        (guard and build-and-test), because the protection of main requires those two checks.

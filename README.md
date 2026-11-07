@@ -9,10 +9,21 @@
 
 ## Status
 
-Developer preview. The game is not playable yet. `oot2 prepare` builds the program from a dump, and the program runs the game's start-up and its first frames on a null graphics back end, with no window and no picture. The Vulkan back end, which shows the title screen with its movie at 60 fps, is the first public milestone and is under construction.
-<!-- WAITING-FOR-M1: rewrite the status paragraph with what runs on the day of publication. -->
+Developer preview. The game is not playable yet, and there is no release yet. `oot2 prepare` builds the program from a dump. The program runs the game's start-up, decodes its start-up movies and reaches the title menu's draws on a null graphics back end, which has no window and shows no picture. The Vulkan back end is built in parts (device, pipelines, the replay of the game's draws and dispatches, texture upload) and tested on a GPU, but it has no window yet and does not draw task and mesh programs or compressed textures, so nothing is shown. The first milestone is the title screen with its movie on the Vulkan back end at 60 fps.
+
+A release follows when the prebuilt bundle described under Planned exists. Until then the game is prepared from source, as described below.
 
 Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Help wanted
+
+Open work that nobody has taken. Say in an issue that you are taking an item before you start, so that nobody does it twice. Every item needs your own dump to test against, and none of them needs a game file in a commit.
+
+- Audio: serve the console's audio services with a mixer and a platform output stream, in place of the silent stand-in the game starts with today
+- Shader translator: the console's NaN rules for min, max, clamp, saturate and float-to-integer conversion
+- `oot2 prepare`: return each shader translation over the translator's line protocol, so that the translate step writes no loose file (a real-time antivirus scanner slows every file that is reopened)
+- Vulkan back end: draw task and mesh programs, direct and indirect (needs a GPU with `VK_EXT_mesh_shader`)
+- Vulkan back end: fit the bindless tables to the game: custom border colours, the highest texture ID it registers, and two pools in one submission
 
 ## Features
 

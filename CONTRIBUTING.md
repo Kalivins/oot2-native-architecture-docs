@@ -124,13 +124,27 @@ it, learn from it, write your own.
 
 ## Review
 
-<!-- WAITING-FOR-96: who reviews outside pull requests, how fast, and how they meet the maintainer's own work plan is
-     the author's open answer; replace this section with it before the repository is made public. -->
-The maintainer, RealZotto, reads every pull request and issue. How review is
-organised and how quickly to expect an answer is not settled yet; this section is
-written when it is. Changes to `tools/`, `tests/`, `.githooks/`, `.github/`, the
-licence files and the allowlists are always reviewed by a code owner
-(`.github/CODEOWNERS`).
+The maintainer, RealZotto, reads every pull request and issue, decides what is
+merged, and is the only person who approves and merges. There is no promised
+response time.
+
+- CodeRabbit reviews pull requests, and its comments are advice. While the
+  repository has fewer than 10 stars its review does not start by itself: comment
+  `@coderabbitai review` on your pull request to ask for one. A review conversation
+  that is still open blocks the merge, so answer each one, or resolve it with a
+  reason.
+- The maintainer merges with GitHub's "Squash and merge", so the commit on `main`
+  keeps you as its author. `main` is protected: the checks `guard` (workflow
+  `content-guard`) and `build-and-test` (workflow `windows-build`) must pass, the
+  history stays linear and every conversation must be resolved before a merge.
+- The maintainer sorts every issue and pull request, and accepted work goes on the
+  maintainer's own work plan. A pull request that touches files which a piece of
+  work in progress is changing may wait until that work lands, unless the
+  maintainer asks the person doing it to build on yours. The "Help wanted" list in
+  the [README](README.md) names open work that nobody has taken.
+- Changes to `tools/`, `tests/`, `.githooks/`, `.github/`, the licence files and
+  the allowlists are always reviewed by a code owner (`.github/CODEOWNERS`) with
+  extra care.
 
 ## Reporting content that should not be here
 
