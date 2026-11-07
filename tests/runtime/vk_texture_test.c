@@ -27,8 +27,13 @@
 //   caps_full  (fatal) the same until the arena is full, which stops by name
 //   churn      ninety textures of 64 MiB registered one after another at one ID: the arena's extent of each goes back when the
 //              next replaces it, so the arena never holds more than a few (it would stop at its cap after fifty-odd otherwise)
-//   astc_stop  (fatal) an ASTC texture the CPU wrote stops by name at the first submission that binds it (the transcode is
-//              ticket 66's); a depth texture the CPU wrote does too
+//   astc       ASTC textures the CPU wrote (six block sizes, LDR and sRGB, mips, layers, a size that is not a whole number of
+//              blocks) make no image when registered, are decoded on the device at the first submission that binds them into
+//              RGBA8 images of the arena that read back as the CPU reference's texels, and a block the CPU rewrites is decoded
+//              again, only in the regions over its page
+//   rawview    the images of BC textures (BC1, BC4, BC5, BC7) can be viewed as the 64 or 128-bit integer format of their
+//              block, with storage usage on the view, with the validation layer clean
+//   depth_stop (fatal) a depth texture the CPU wrote stops by name at the first submission that binds it
 // Every device case ends with the validation layer's counts (the driver sets synchronization validation): 0 and 0.
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,8 +55,11 @@
 #include "oot2/vk_image.h"
 #include "oot2/vk_texture.h"
 #include "plat.h"
+#include "astc_blocks.h"
 #include "untile_table.h"
 #include "vk_draw.h"
+
+#include "astc_ref.c"   // the CPU reference, in this translation unit (the build links one source)
 
 typedef unsigned long long ull;
 #define KiB (1ull << 10)
@@ -627,9 +635,190 @@ static void case_churn(void) {
     finish("churn");
 }
 
+// ---------- ASTC textures decoded to RGBA8 at the first bind
+
+typedef struct AstcRegion {
+    unsigned level, layer, w, h;
+    uint8_t *want;   // the reference's RGBA8 texels of the level, tight rows
+} AstcRegion;
+
+// The reference's texels of a level whose blocks are `blocks` (rows of g->row_bytes / 16 blocks), clipped to the level.
+static void astc_expect(const UntileGeom *g, const uint8_t *blocks, bool srgb, uint8_t *want) {
+    uint32_t bx = g->row_bytes / 16, bw = g->bw, bh = g->bh;
+    uint8_t tmp[12 * 12 * 4];
+    for (uint32_t j = 0; j < g->rows; j++)
+        for (uint32_t i = 0; i < bx; i++) {
+            CHECK(astc_ref_block(blocks + 16 * ((size_t)j * bx + i), bw, bh, srgb, 1, tmp) == ASTC_REF_OK);
+            for (uint32_t y = 0; y < bh && j * bh + y < g->height; y++)
+                for (uint32_t x = 0; x < bw && i * bw + x < g->width; x++)
+                    memcpy(want + (((size_t)(j * bh + y)) * g->width + i * bw + x) * 4, tmp + (y * bw + x) * 4, 4);
+        }
+}
+
+// Put one block into the texture's storage in guest memory, the CPU's way (a store through the guest address).
+static void astc_store_block(const UntileGeom *g, uint64_t storage, uint32_t i, uint32_t j, const uint8_t blk[16]) {
+    for (uint32_t k = 0; k < 16; k++)
+        ((uint8_t *)(uintptr_t)(storage + g->base))[untile_offset(g, UNTILE_ORDER_S2, i * 16 + k, j, 0)] = blk[k];
+}
+
+static void case_astc(void) {
+    setup(64 * MiB, 1024 * MiB);
+    static const Spec specs[] = {
+        {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA_ASTC_4x4, 0, 100, 37, 1, 7, 0},
+        {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA_ASTC_8x8_SRGB, 0, 130, 66, 1, 5, 0},
+        {NVN_TEXTURE_TARGET_2D_ARRAY, NVN_FORMAT_RGBA_ASTC_6x5, 0, 40, 24, 3, 4, 0},
+        {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA_ASTC_12x12, 0, 200, 150, 1, 4, 0},
+        {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA_ASTC_10x5_SRGB, 0, 64, 64, 1, 3, 0},
+        {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA_ASTC_5x5, 0, 77, 51, 1, 1, 0},
+    };
+    enum { N = sizeof specs / sizeof specs[0] };
+    tex_t texs[N];
+    uint64_t storages[N];
+    AstcRegion regs[N][3 * 8];
+    unsigned nreg[N];
+    uint64_t at = g_heap + 4 * MiB;
+    astc_seed(0x0125);
+    for (unsigned k = 0; k < N; k++) {
+        storages[k] = (at + 0xFFFF) & ~0xFFFFull;
+        texs[k] = tex_of(storages[k], &specs[k]);
+        at = storages[k] + texs[k].L.size + 0x10000;
+        const bool srgb = (vkf_row(specs[k].format)->flags & VKF_SRGB) != 0;
+        nreg[k] = 0;
+        for (unsigned layer = 0; layer < texs[k].L.layers; layer++)
+            for (unsigned level = 0; level < specs[k].levels; level++) {
+                UntileGeom g;
+                const char *why;
+                CHECK(untile_geom(&texs[k].d, level, layer, &g, &why));
+                uint32_t bx = g.row_bytes / 16;
+                uint8_t *blocks = malloc((size_t)bx * g.rows * 16);
+                AstcRegion *r = &regs[k][nreg[k]++];
+                r->level = level, r->layer = layer, r->w = g.width, r->h = g.height;
+                r->want = malloc((size_t)g.width * g.height * 4);
+                CHECK(blocks && r->want);
+                for (uint32_t j = 0; j < g.rows; j++)
+                    for (uint32_t i = 0; i < bx; i++) {
+                        uint8_t *b = blocks + 16 * ((size_t)j * bx + i);
+                        if (astc_rnd() % 11 == 0) astc_void_block(b);
+                        else CHECK(astc_draw_block(g.bw, g.bh, b, NULL, NULL));
+                        astc_store_block(&g, storages[k], i, j, b);
+                    }
+                astc_expect(&g, blocks, srgb, r->want);
+                free(blocks);
+            }
+        dpool_ref pool = k_pool;
+        bindless_texture_register(&pool, (int)k + 1, &texs[k], NULL);
+    }
+    VktStats vs;
+    VkbImageStats is;
+    vkt_stats(&vs);
+    vkb_image_stats(&is);
+    printf("%u ASTC textures registered: %llu images made, %llu regions decoded\n", (unsigned)N, (ull)is.arena, (ull)vs.astc_regions);
+    CHECK(is.arena == 0 && vs.astc_regions == 0);   // registering decodes nothing and makes no image
+    unsigned total = 0;
+    for (unsigned k = 0; k < N; k++) {
+        VktStats a, b;
+        vkt_stats(&a);
+        bind_once(k + 1);
+        vkt_stats(&b);
+        CHECK(b.astc_regions - a.astc_regions == nreg[k] && b.uploads == a.uploads + 1);
+        VkbImage *img = vkb_image_demand(&texs[k]);
+        CHECK(img && vkb_image_format(img) == VK_FORMAT_R8G8B8A8_UNORM);
+        for (unsigned q = 0; q < nreg[k]; q++) {
+            const AstcRegion *r = &regs[k][q];
+            UntileGeom g = {.width = r->w, .height = r->h, .depth = 1, .row_bytes = r->w * 4, .rows = r->h, .slices = 1};
+            uint8_t *got = readback(&texs[k], r->level, r->layer, &g);
+            for (size_t o = 0; o < (size_t)r->w * r->h * 4; o++)
+                if (got[o] != r->want[o]) {
+                    fprintf(stderr, "spec %u level %u layer %u: texel byte %zu is %02x, the reference's %02x\n", k, r->level, r->layer, o, got[o],
+                            r->want[o]);
+                    exit(1);
+                }
+            free(got);
+        }
+        total += nreg[k];
+        printf("spec %u: NVN format %#x %ux%u, %u levels, %u layers: %u regions decoded at the first bind, equal to the reference\n", k,
+               specs[k].format, specs[k].w, specs[k].h, specs[k].levels, (unsigned)texs[k].L.layers, nreg[k]);
+    }
+    vkt_stats(&vs);
+    printf("decoded %llu regions, %llu blocks, %llu RGBA8 bytes\n", (ull)vs.astc_regions, (ull)vs.astc_blocks, (ull)vs.astc_bytes);
+    CHECK(vs.astc_regions == total);
+    // a block the CPU rewrites: only the regions over its page are decoded again, and the image shows the new block
+    UntileGeom g0;
+    const char *why;
+    CHECK(untile_geom(&texs[0].d, 0, 0, &g0, &why));
+    uint8_t nb[16];
+    CHECK(astc_draw_block(g0.bw, g0.bh, nb, NULL, NULL));
+    astc_store_block(&g0, storages[0], 3, 2, nb);
+    uint64_t wr = storages[0] + g0.base + untile_offset(&g0, UNTILE_ORDER_S2, 3 * 16, 2, 0);
+    unsigned stale = regions_over(&texs[0], storages[0], wr & ~(PG - 1), (wr & ~(PG - 1)) + PG);
+    uint8_t *blocks = malloc((size_t)(g0.row_bytes / 16) * g0.rows * 16);
+    CHECK(blocks);
+    for (uint32_t j = 0; j < g0.rows; j++)
+        for (uint32_t i = 0; i < g0.row_bytes / 16; i++)
+            for (uint32_t kb = 0; kb < 16; kb++)
+                blocks[((size_t)j * (g0.row_bytes / 16) + i) * 16 + kb] =
+                    ((const uint8_t *)(uintptr_t)(storages[0] + g0.base))[untile_offset(&g0, UNTILE_ORDER_S2, i * 16 + kb, j, 0)];
+    astc_expect(&g0, blocks, false, regs[0][0].want);
+    free(blocks);
+    VktStats a, b;
+    vkt_stats(&a);
+    bind_once(1);
+    vkt_stats(&b);
+    printf("one block rewritten: %llu regions decoded again, %u lie over its page\n", (ull)(b.astc_regions - a.astc_regions), stale);
+    CHECK(b.astc_regions - a.astc_regions == stale && stale >= 1);
+    UntileGeom gr = {.width = regs[0][0].w, .height = regs[0][0].h, .depth = 1, .row_bytes = regs[0][0].w * 4, .rows = regs[0][0].h, .slices = 1};
+    uint8_t *got = readback(&texs[0], 0, 0, &gr);
+    CHECK(!memcmp(got, regs[0][0].want, (size_t)gr.row_bytes * gr.rows));
+    free(got);
+    for (unsigned k = 0; k < N; k++)
+        for (unsigned q = 0; q < nreg[k]; q++) free(regs[k][q].want);
+    finish("astc");
+}
+
+// ---------- raw views of the images of BC textures
+
+static void case_rawview(void) {
+    setup(64 * MiB, 1024 * MiB);
+    static const struct {
+        int format;
+        VkFormat view;
+        const char *name;
+    } k_cases[] = {
+        {NVN_FORMAT_RGBA_DXT1, VK_FORMAT_R32G32_UINT, "BC1"},
+        {NVN_FORMAT_RGTC1_UNORM, VK_FORMAT_R32G32_UINT, "BC4"},
+        {NVN_FORMAT_RGTC2_UNORM, VK_FORMAT_R32G32B32A32_UINT, "BC5"},
+        {NVN_FORMAT_BPTC_UNORM, VK_FORMAT_R32G32B32A32_UINT, "BC7"},
+    };
+    uint64_t at = g_heap + 4 * MiB;
+    for (unsigned k = 0; k < sizeof k_cases / sizeof k_cases[0]; k++) {
+        Spec s = {NVN_TEXTURE_TARGET_2D, k_cases[k].format, 0, 64, 64, 1, 4, 0};
+        uint64_t storage = (at + 0xFFFF) & ~0xFFFFull;
+        tex_t t = tex_of(storage, &s);
+        at = storage + t.L.size + 0x10000;
+        write_storage(&t, storage);
+        dpool_ref pool = k_pool;
+        bindless_texture_register(&pool, (int)k + 1, &t, NULL);
+        bind_once(k + 1);
+        VkbImage *img = vkb_image_demand(&t);
+        CHECK(img);
+        VkImageViewUsageCreateInfo ui = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+                                         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT};
+        VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = &ui, .image = vkb_image_handle(img),
+                                    .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = k_cases[k].view,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 1, 1, 0, 1}};
+        VkImageView view;
+        VkResult r = vkCreateImageView(gpu_vk.device, &vi, NULL, &view);
+        CHECK(r == VK_SUCCESS);
+        vkDestroyImageView(gpu_vk.device, view, NULL);
+        printf("%s image: a raw view as format %d of mip level 1 with sampled and storage usage was made\n", k_cases[k].name, (int)k_cases[k].view);
+    }
+    finish("rawview");
+}
+
 static void case_stop(int depth) {
     setup(64 * MiB, 1024 * MiB);
-    Spec s = {NVN_TEXTURE_TARGET_2D, depth ? NVN_FORMAT_DEPTH24_STENCIL8 : NVN_FORMAT_RGBA_ASTC_5x5, 0, 64, 64, 1, 1, 0};
+    Spec s = {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_DEPTH24_STENCIL8, 0, 64, 64, 1, 1, 0};
+    (void)depth;
     uint64_t storage = (g_heap + 4 * MiB + 0xFFFF) & ~0xFFFFull;
     tex_t t = tex_of(storage, &s);
     memset((void *)(uintptr_t)storage, 0x5A, (size_t)t.L.size);
@@ -657,7 +846,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "churn")) case_churn();
     else if (!strcmp(argv[1], "ring")) ring_run(5, 6);
     else if (!strcmp(argv[1], "ring_full")) ring_run(6, 1);
-    else if (!strcmp(argv[1], "astc_stop")) case_stop(0);
+    else if (!strcmp(argv[1], "astc")) case_astc();
+    else if (!strcmp(argv[1], "rawview")) case_rawview();
     else if (!strcmp(argv[1], "depth_stop")) case_stop(1);
     else {
         fprintf(stderr, "unknown case %s\n", argv[1]);

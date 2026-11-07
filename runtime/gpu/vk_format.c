@@ -40,8 +40,11 @@
 #define P(nvn, f, fl, c0, c1, c2, c3, altf, a0, a1, a2, a3)                                                          \
     [nvn] = {f, U, altf, {c0, c1, c2, c3}, {a0, a1, a2, a3}, fl, 1, 1, 2,                                             \
              "16-bit packed format, NVN names the components from the least significant bit"}
-// ASTC: the Vulkan format is the game's own; whether the device samples it is the transcode's question.
-#define A(nvn, w, h, f, fl) [nvn] = {f, U, U, {0}, {0}, VKF_BLOCK | VKF_ASTC | (fl), w, h, 16, NULL}
+// ASTC: the Vulkan format is the game's own. A device that does not sample it (desktop NVIDIA and AMD) takes alt, the RGBA8
+// (or sRGB) image of the decoded texels, which the upload makes with runtime/gpu/shaders/astc_decode.comp: not the same
+// bytes per block as vk, and no storage of the game's lies in such an image.
+#define A(nvn, w, h, f, fl)                                                                                          \
+    [nvn] = {f, U, (fl) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM, {0}, {0}, VKF_BLOCK | VKF_ASTC | (fl), w, h, 16, NULL}
 
 #define UI2F "integer storage sampled as float (UI2F, I2F): Vulkan has no such format, it needs a shader-side conversion"
 

@@ -37,9 +37,12 @@ int vkt_is_open(void);
 // Make the image of texture d (storage at `storage` in guest memory) current for the submission `value` that is being
 // recorded, on its thread: query, copy the stale regions into the ring, record their untiling and copies in the
 // prologue. image is bound to memory and in no layout yet on the first call (it is transitioned here). A texture this
-// layer does not upload stops by name.
+// layer does not upload stops by name. astc_decode: the texture is ASTC and the image is the RGBA8 (or sRGB) image of its
+// decoded texels, not ASTC (the device does not sample ASTC): each region is untiled into rows of blocks, decoded by
+// runtime/gpu/shaders/astc_decode.comp into RGBA8 texels in the scratch buffer, and copied from there into the image. The
+// decode happens here, at the first bind and again for a rewritten region, never at registration.
 void vkt_upload(const nvn_texdesc *d, uint64_t storage, VkImage image, VkImageAspectFlags aspect, VktState *st,
-                uint64_t value);
+                uint64_t value, int astc_decode);
 
 // The compute pass alone, on a device, for the checks: the region g's span bytes at src untiled in the given order into
 // dst (pitch bytes a row, at least row_bytes rounded up to 16), through the ring, in an internal submission that is
@@ -51,5 +54,6 @@ typedef struct VktStats {
     uint64_t regions, raw_bytes, linear_bytes;   // regions untiled and copied, the bytes read from guest memory and written
     uint64_t dispatches, copies, zero_regions;
     uint64_t scratch_resets, scratch_grown;
+    uint64_t astc_regions, astc_blocks, astc_bytes;   // regions decoded from ASTC, their blocks, and the RGBA8 bytes written for them
 } VktStats;
 void vkt_stats(VktStats *out);

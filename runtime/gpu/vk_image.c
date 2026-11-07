@@ -40,6 +40,7 @@ struct VkbImage {
     uint64_t size;                // the game's storage bytes
     int placed, doomed, refs, pending;
     int arena;                    // its memory is an extent of the texture arena: the CPU writes its texels (vk_texture.c)
+    int decoded;                  // an ASTC texture the device does not sample: this image holds its decoded RGBA8 texels
     TexExtent ext;
     nvn_texdesc desc;             // the texture it was made for (an arena image uploads by it)
     VktState up;
@@ -157,16 +158,39 @@ static VkImageUsageFlags arena_usage(VkFormat f) {
     return u;
 }
 
+// Block-compressed images (BC, and ASTC where the device samples it) can be viewed as the uncompressed format of their block
+// size, a texel of the view being a block (the transcode writes BC blocks through such a view). A view's usage must be a
+// subset of the image's, and the extended-usage flag only lets the image carry usage its own format does not support (a
+// block-compressed format has no storage), so the image asks for storage usage where the device grants it; a device that
+// does not keeps the raw views without it, and one that grants neither keeps the image. Without the flags a raw view has no
+// usage at all.
+#define RAW_VIEW_FLAGS (VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT)
+
 static VkbImage *image_make(const tex_t *t, const VkfRow *row, VkFormat vk, const ImgKey *key, const Shape *sh, int arena) {
     VkFormat fmt = vkf_linear_twin(vk);
     VkImageUsageFlags usage = arena ? arena_usage(fmt) : usage_of(fmt);
     VkImageCreateFlags flags = sh->flags | (arena ? 0 : VK_IMAGE_CREATE_ALIAS_BIT);
     if (!(row->flags & (VKF_DEPTH | VKF_STENCIL))) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    const int compressed = vkf_class(fmt) >= 2001 && vkf_class(fmt) < 4000;   // the BC and ASTC families
+    const int decoded = (row->flags & VKF_ASTC) && !compressed;
+    int raw_storage = 0;
+    if (compressed && (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {
+        flags |= RAW_VIEW_FLAGS;
+        usage |= VK_IMAGE_USAGE_STORAGE_BIT, raw_storage = 1;
+    }
     VkImageFormatProperties fp;
     VkResult r;
     for (;;) {
         r = vkGetPhysicalDeviceImageFormatProperties(gpu_vk.phys, fmt, sh->type, VK_IMAGE_TILING_OPTIMAL, usage, flags, &fp);
         if (r == VK_SUCCESS) break;
+        if (raw_storage) {   // raw views without storage usage
+            usage &= ~(VkImageUsageFlags)VK_IMAGE_USAGE_STORAGE_BIT, raw_storage = 0;
+            continue;
+        }
+        if (flags & RAW_VIEW_FLAGS) {   // a device that takes no raw views of this image still takes the image
+            flags &= ~(VkImageCreateFlags)RAW_VIEW_FLAGS;
+            continue;
+        }
         if (arena) break;
         if (usage & VK_IMAGE_USAGE_STORAGE_BIT) usage &= ~(VkImageUsageFlags)VK_IMAGE_USAGE_STORAGE_BIT;
         else if (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) usage &= ~(VkImageUsageFlags)VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -237,7 +261,7 @@ static VkbImage *image_make(const tex_t *t, const VkfRow *row, VkFormat vk, cons
                                                                                               : VK_IMAGE_ASPECT_COLOR_BIT;
     i->all_aspects = i->aspect | ((row->flags & (VKF_DEPTH | VKF_STENCIL)) == (VKF_DEPTH | VKF_STENCIL) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
     i->size = L.size, i->placed = placed;
-    if (arena) i->arena = 1, i->ext = ext, i->desc = t->d;
+    if (arena) i->arena = 1, i->ext = ext, i->desc = t->d, i->decoded = decoded;
     g_st.made++, g_st.live++;
     if (placed) g_st.placed++;
     if (arena) g_st.arena++;
@@ -253,8 +277,7 @@ static VkbImage *image_get(const tex_t *t, int demand) {
     uint64_t storage = (uint64_t)(uintptr_t)t->mem;
     int cpu_written = !gfx_gpu_only(storage);
     if (demand && cpu_written && row) {
-        const char *what = (row->flags & VKF_ASTC) ? "an ASTC texture, which the transcode to BC brings (ticket 66)"
-                           : (row->flags & (VKF_DEPTH | VKF_STENCIL)) ? "a depth or stencil texture"
+        const char *what = (row->flags & (VKF_DEPTH | VKF_STENCIL)) ? "a depth or stencil texture"
                            : (row->flags & VKF_EXPAND_RGB) ? "a three-component texture, which an upload would expand to four" : NULL;
         if (what)
             rt_fatal("gfx: vulkan: the texture at %#llx (target %d, NVN format %#x, %ux%u) is written by the CPU and is %s; the "
@@ -266,8 +289,8 @@ static VkbImage *image_get(const tex_t *t, int demand) {
     if (vk == VK_FORMAT_UNDEFINED || (row->flags & VKF_EXPAND_RGB)) {
         plat_mutex_lock(&g_mu);
         g_st.skipped_format++;
-        log_skip(d->format, row && (row->flags & VKF_ASTC) ? "ASTC, which the transcode brings (ticket 66)" : "the format table",
-                 row && (row->flags & VKF_EXPAND_RGB) ? "three components need the upload's expansion (ticket 65)" : why);
+        log_skip(d->format, "the format table",
+                 row && (row->flags & VKF_EXPAND_RGB) ? "three components need the upload's expansion" : why);
         plat_mutex_unlock(&g_mu);
         return NULL;
     }
@@ -595,7 +618,7 @@ void vkb_view_use(void *view, uint64_t value) {
     uint64_t seen = __atomic_load_n(&img->up.current_for, __ATOMIC_ACQUIRE);
     if (seen == value) return;
     __atomic_store_n(&img->up.current_for, value, __ATOMIC_RELEASE);
-    vkt_upload(&img->desc, img->key.storage, img->image, img->aspect, &img->up, value);
+    vkt_upload(&img->desc, img->key.storage, img->image, img->aspect, &img->up, value, img->decoded);
 }
 
 VkImageView vkb_view_handle(const void *view) { return ((const Vw *)view)->view; }

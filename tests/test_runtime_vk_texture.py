@@ -15,6 +15,9 @@ On a device with every item of oot2/vk_required.h (the desktop; the device is th
 - textures the CPU wrote (2D, mips, block-compressed, arrays, 3D, cube, packaged block heights, linear) become images of the
   arena at the first submission that binds them and copy back as written;
 - a texture the CPU rewrites is uploaded again, only the regions over the written page, and the next submission reads it;
+- ASTC textures the CPU wrote are decoded to RGBA8 on the device at the first submission that binds them (never at
+  registration), equal to the CPU reference, and decoded again where the CPU rewrote them; the images of BC textures take
+  raw views of their blocks;
 - 64 MiB textures through the staging ring: the ring and the arena never pass their caps; to the end, the arena's own cap
   stops the run by name.
 
@@ -103,6 +106,20 @@ class DeviceTest(unittest.TestCase):
         self.assertIsNotNone(m, done.stdout)
         self.assertLessEqual(int(m.group(1)), 384)
 
+    def test_astc_textures_are_decoded_to_rgba8_at_the_first_bind_and_again_when_rewritten(self) -> None:
+        done = self.passing("astc")
+        self.assertIn("6 ASTC textures registered: 0 images made, 0 regions decoded", done.stdout)
+        self.assertEqual(len(re.findall(r"^spec \d+: .*regions decoded at the first bind, equal to the reference$", done.stdout, re.M)), 6)
+        m = re.search(r"decoded (\d+) regions, (\d+) blocks, (\d+) RGBA8 bytes", done.stdout)
+        self.assertIsNotNone(m, done.stdout)
+        self.assertGreater(int(m.group(1)), 20)
+        self.assertRegex(done.stdout, r"one block rewritten: [1-9]\d* regions decoded again, [1-9]\d* lie over its page")
+
+    def test_the_images_of_bc_textures_take_raw_views_of_their_blocks(self) -> None:
+        done = self.passing("rawview")
+        self.assertEqual(len(re.findall(r"^BC\d image: a raw view as format \d+ of mip level 1 with sampled and storage usage was made$",
+                                         done.stdout, re.M)), 4)
+
     def test_the_arena_gets_its_memory_back_when_textures_are_replaced(self) -> None:
         done = self.passing("churn")
         self.assertRegex(done.stdout, r"90 textures registered one after another at one ID: 90 images made, \d+ destroyed, arena peak \d+ MiB, \d+ MiB in use now")
@@ -131,8 +148,7 @@ class DeviceTest(unittest.TestCase):
         self.assertLessEqual(int(m.group(1)), 384)
 
     def test_what_the_upload_does_not_serve_yet_stops_by_name_at_the_first_bind(self) -> None:
-        for case, text in (("astc_stop", "an ASTC texture, which the transcode to BC brings (ticket 66)"),
-                           ("depth_stop", "a depth or stencil texture")):
+        for case, text in (("depth_stop", "a depth or stencil texture"),):
             with self.subTest(case=case):
                 done = self.device(case)
                 self.assertEqual(done.returncode, EXIT_FATAL, done.stdout + done.stderr[-3000:])

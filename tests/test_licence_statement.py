@@ -35,6 +35,14 @@ EXEMPT_PREFIXES = {
 }
 EXEMPT_FILES = {
     "runtime/include/oot2/nvn.h": "kept verbatim from upstream, whose MIT header it carries (THIRD_PARTY_NOTICES.md)",
+    "runtime/gpu/shaders/astc_decode.comp": "Eden's ASTC decoder with its two upstream SPDX headers kept, GPL-3.0-or-later and "
+                                            "GPL-2.0-or-later (THIRD_PARTY_NOTICES.md)",
+    "tests/runtime/astc_ref.c": "LAS Recomp's ASTC decoder under its MIT licence, named in the file's header (THIRD_PARTY_NOTICES.md)",
+}
+# The SPDX identifiers a taken file must keep in its header (nvn.h carries a plain MIT notice, not an SPDX line).
+TAKEN_UNDER = {
+    "runtime/gpu/shaders/astc_decode.comp": ("GPL-3.0-or-later", "GPL-2.0-or-later"),
+    "tests/runtime/astc_ref.c": ("MIT",),
 }
 DOCUMENTS = ("README.md", "CONTRIBUTING.md", "THIRD_PARTY_NOTICES.md", ".github/PULL_REQUEST_TEMPLATE.md")
 
@@ -91,7 +99,14 @@ class LicenceStatement(unittest.TestCase):
         files = set(tracked())
         for path in EXEMPT_FILES:
             self.assertIn(path, files, f"exempt file {path} is gone: drop its entry")
-            self.assertNotIn(SPDX, head(path), f"{path} now carries the project header: drop its exemption")
+            top = head(path)
+            # Needed while the file lacks the project header, or while it names a licence besides the project's (a file taken
+            # under two licences keeps both SPDX lines, one of them the project's).
+            foreign = re.search(r"SPDX-License-Identifier:\s*(?!GPL-3\.0-or-later)\S", top)
+            self.assertTrue(SPDX not in top or foreign, f"{path} now carries the project header: drop its exemption")
+            # And the file keeps the licence identifiers it was taken under.
+            for ident in TAKEN_UNDER.get(path, ()):
+                self.assertIn(f"SPDX-License-Identifier: {ident}", top, f"{path} lost the {ident} line of its upstream header")
         for prefix in EXEMPT_PREFIXES:
             self.assertTrue(any(p.startswith(prefix) for p in files), f"exempt folder {prefix} is empty")
 
