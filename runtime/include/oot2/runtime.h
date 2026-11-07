@@ -177,6 +177,25 @@ uint64_t rt_census_frames(void);   // N, or 0 for no limit
 // census.c sets it; nvn_census.c calls rt_census_flush every 600 presents.
 void rt_census_set_flush(void (*flush)(void));
 void rt_census_flush(void);
+// The census timer (setting census_timer, OOT2_CENSUS_TIMER; honoured only in census mode, never a default
+// run): every host function call is timed by the calling thread's own CPU time (plat_thread_cpu_ns, so a call that gives
+// its core up is not charged for the wait), minus the host calls and guest callbacks (rt_call) nested in it, minus a
+// calibrated cost of the timer per nested call. A guest callback's own time is a bucket of its own, "guest". Fibres are not
+// followed: SwitchToFiber returns on another host stack, so a switch's frame takes the time of the fibre it switched to.
+// Read once at rt_dispatch_init; when it is off hostfn_entry keeps its tail call and writes nothing.
+enum { RT_TIMER_NVN, RT_TIMER_SUBMIT, RT_TIMER_OTHER, RT_TIMER_GUEST, RT_TIMER_CLASSES };
+typedef struct RtTimerThread {
+    uint32_t id, handle;                 // creation order of the thread's table; its guest thread handle (0: a host thread)
+    uint64_t calls[RT_TIMER_CLASSES];    // timed calls and their exclusive ns, by class: NVN2 entry points other than
+    uint64_t ns[RT_TIMER_CLASSES];       // QueueSubmitCommands, QueueSubmitCommands, every other host function, guest callbacks
+} RtTimerThread;
+int rt_timer_on(void);
+uint64_t rt_timer_overhead_ns(void);     // the calibrated cost of the timer per nested call, subtracted from the parent
+uint64_t rt_timer_floor_ns(void);        // and the cost inside an empty call's own reading, subtracted from every call
+uint64_t rt_timer_overflows(void);       // calls past the depth the timer keeps: passed untimed
+int rt_timer_threads(RtTimerThread *out, int max);   // totals so far, one per thread that made a timed call
+// Calls and exclusive ns of host function slot i summed over the threads, i in [0, n); out[n] is the guest callbacks.
+void rt_timer_slots(uint64_t *calls, uint64_t *ns, int n);
 // Run the stop hooks (census.tsv, the ledger) and end the process with code; line is the stop row's text.
 __attribute__((noreturn)) void rt_census_end(int code, const char *line);
 // The index-th HOST_OVERRIDE that no import or definition of the loaded modules named (rt_hostfn_bind never registered

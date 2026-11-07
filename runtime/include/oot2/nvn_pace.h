@@ -58,6 +58,9 @@ typedef struct NvnPresentRecord {
 #define NVN_PRESENT_RING 512   // records kept: the newest this many presents
 
 uint64_t nvn_present_count(void);   // presents so far
+// Census mode's other files (nvn_census.c), written beside census-nvn.tsv at each flush and at the end: the
+// exclusive timer's rows (census-time.tsv, with census_timer) and the D11 probe's hits (census-probe.tsv, with census_probe).
+void nvn_census_extra(const char *folder);
 // The record of present `seq` into *out: 1, or 0 when seq is 0, not yet made, or older than the ring. A shown tick not
 // known yet is asked of the back end (GfxBackend.present_shown, which never blocks) on each read until it answers.
 int nvn_present_record(uint64_t seq, NvnPresentRecord *out);

@@ -16,8 +16,10 @@
 
 #include "layout.h"
 #include "endmark.h"
+#include "nvn_cmd.h"
 #include "oot2/gfx.h"
 #include "oot2/memory.h"
+#include "oot2/nvn_pace.h"
 #include "oot2/nvn_program.h"
 #include "oot2/nvn_tex.h"
 #include "plat.h"
@@ -688,6 +690,202 @@ static void case_loop(int frames) {
     printf("ok loop\n");
 }
 
+// ---- the D11 probe (census mode with census_probe). The driver sets the environment. Each case records through
+// the entry points only (the front end writes nothing into command memory) and the harness plays the game's stores: a word
+// written into command memory, or through a handle, after the range was added.
+#define PROBE_RANGE 0x10000ull
+static uint64_t probe_range_at(uint64_t pool_mem, uint64_t off) { return pool_mem + off; }
+static uint64_t probe_cb(uint64_t pool, uint64_t off) {   // a command buffer that adds [pool, off, PROBE_RANGE)
+    uint64_t o = galloc(0xC0, 16);
+    CHECK((NVN(nvnCommandBufferInitialize, o, g_dev) & 0xff) == 1);
+    NVN(nvnCommandBufferSetMemoryCallback, o, CALLBACK_FN);
+    NVN(nvnCommandBufferSetMemoryCallbackData, o, CALLBACK_DATA);
+    NVN(nvnCommandBufferAddCommandMemory, o, pool, off, PROBE_RANGE);
+    NVN(nvnCommandBufferAddControlMemory, o, galloc(4096, 16), 4096);
+    return o;
+}
+static void store32(uint64_t addr, uint32_t v) { memcpy((void *)(uintptr_t)addr, &v, 4); }
+static void probe_setup(void) {
+    setup();
+    g_dev = device();
+    g_pool = memory_pool(POOL_SIZE);
+    g_print_ops = 0;
+    gfx_null_log_ops(op_log, NULL);
+}
+static void probe_report(const char *name) {
+    nvn_census_stats(print_stat, NULL);
+    printf("ok %s\n", name);
+}
+static void probe_files(const char *dir) {
+    if (dir) nvn_census_extra(dir);
+}
+// A store at base + Used + 0x10 after GetCommandMemoryUsed answered, before EndRecording: the Luigi's Mansion 3 shape.
+static void case_probe_used(const char *dir) {
+    probe_setup();
+    uint64_t base = probe_range_at(g_pool_mem, 0);
+    uint64_t o = probe_cb(g_pool, 0);
+    CHECK(inline_begin(o) == 1);
+    NVN(nvnCommandBufferDrawArrays, o, 4, 0, 3);
+    uint64_t used = NVN(nvnCommandBufferGetCommandMemoryUsed, o);
+    store32(base + used + 0x10, 0xC0DEC0DE);
+    uint64_t h = NVN(nvnCommandBufferEndRecording, o);
+    CHECK(submit(&h, 1) == 1);
+    probe_files(dir);
+    probe_report("probe_used");
+}
+// A store at the last word added: a probe that stops one word short does not see it.
+static void case_probe_last_word(const char *dir) {
+    probe_setup();
+    uint64_t base = probe_range_at(g_pool_mem, 0);
+    uint64_t o = probe_cb(g_pool, 0);
+    CHECK(inline_begin(o) == 1);
+    NVN(nvnCommandBufferDrawArrays, o, 4, 0, 3);
+    store32(base + PROBE_RANGE - 8, 1);
+    uint64_t h = NVN(nvnCommandBufferEndRecording, o);
+    CHECK(submit(&h, 1) == 1);
+    probe_files(dir);
+    probe_report("probe_last_word");
+}
+// A store through a handle's copy after EndRecording, before submit.
+static void case_probe_handle(const char *dir) {
+    probe_setup();
+    uint64_t o = probe_cb(g_pool, 0);
+    CHECK(inline_begin(o) == 1);
+    NVN(nvnCommandBufferDrawArrays, o, 4, 0, 3);
+    uint64_t h = NVN(nvnCommandBufferEndRecording, o);
+    store32(h + 0x14, 0x77);   // inside the DRAW record's payload, not a header: the back end still walks it whole
+    CHECK(submit(&h, 1) == 1);
+    probe_files(dir);
+    probe_report("probe_handle");
+}
+// Two command buffers, two recordings: a store on the first one's range after both ended, found when both handles are
+// submitted, is a hit that names recording 1 (the one whose copy holds the range), not 2 (the newest in the process).
+static void case_probe_which_recording(const char *dir) {
+    probe_setup();
+    uint64_t base = probe_range_at(g_pool_mem, 0);
+    uint64_t o1 = probe_cb(g_pool, 0), o2 = probe_cb(g_pool, PROBE_RANGE);
+    CHECK(inline_begin(o1) == 1);
+    NVN(nvnCommandBufferDrawArrays, o1, 4, 0, 3);
+    uint64_t h[2];
+    h[0] = NVN(nvnCommandBufferEndRecording, o1);
+    CHECK(inline_begin(o2) == 1);
+    NVN(nvnCommandBufferDrawArrays, o2, 4, 1, 3);
+    h[1] = NVN(nvnCommandBufferEndRecording, o2);
+    store32(base + 0x100, 5);
+    CHECK(submit(h, 2) == 1);
+    probe_files(dir);
+    probe_report("probe_which_recording");
+}
+// A store on the range after EndRecording (a hit at submit), and another after submit before Finalize (a hit at Finalize).
+static void case_probe_after_end(const char *dir) {
+    probe_setup();
+    uint64_t base = probe_range_at(g_pool_mem, 0);
+    uint64_t o = probe_cb(g_pool, 0);
+    CHECK(inline_begin(o) == 1);
+    NVN(nvnCommandBufferDrawArrays, o, 4, 0, 3);
+    uint64_t h = NVN(nvnCommandBufferEndRecording, o);
+    store32(base + 0x100, 5);
+    CHECK(submit(&h, 1) == 1);
+    store32(base + 0x200, 6);
+    NVN(nvnCommandBufferFinalize, o);
+    probe_files(dir);
+    probe_report("probe_after_end");
+}
+// Recordings the front end wrote alone, over several command buffers and recordings, a range added again, a copy called
+// from another recording: no hit, and the report says "not seen over N recordings".
+static void case_probe_quiet(const char *dir) {
+    probe_setup();
+    for (int k = 0; k < 4; k++) {
+        uint64_t o = probe_cb(g_pool, (uint64_t)k * PROBE_RANGE);
+        uint64_t hs[3];
+        for (int r = 0; r < 3; r++) {
+            CHECK(inline_begin(o) == 1);
+            NVN(nvnCommandBufferBindUniformBuffer, o, 1, 0, 0x5000, 0x100);
+            NVN(nvnCommandBufferDrawElementsInstanced, o, 4, 2, 6, 0x8000, 0, 0, 1);
+            NVN(nvnCommandBufferGetCommandMemoryUsed, o);
+            hs[r] = NVN(nvnCommandBufferEndRecording, o);
+            if (r == 1) NVN(nvnCommandBufferAddCommandMemory, o, g_pool, (uint64_t)k * PROBE_RANGE, PROBE_RANGE);   // added again
+        }
+        submit(hs, 3);
+        NVN(nvnCommandBufferFinalize, o);
+    }
+    probe_files(dir);
+    probe_report("probe_quiet");
+}
+// Command memory that is not committed: the probe never reads it, so the commit counts do not move; a page that holds a
+// word by the next check is a hit (the store here commits it).
+static void case_probe_uncommitted(const char *dir) {
+    probe_setup();
+    uint64_t raw = (heap + HEAP - 8 * MiB) & ~0xFFFFull;   // far from everything galloc touched
+    uint64_t b = galloc(0x40, 16), pool = galloc(0x100, 16);
+    NVN(nvnMemoryPoolBuilderSetDefaults, b);
+    NVN(nvnMemoryPoolBuilderSetStorage, b, raw, 4 * MiB);
+    NVN(nvnMemoryPoolBuilderSetFlags, b, CPU_UNCACHED | GPU_CACHED);
+    CHECK((NVN(nvnMemoryPoolInitialize, pool, b) & 0xff) == 1);
+    int committed = 1;
+    CHECK(rt_mem_commit_run(raw, PROBE_RANGE, &committed) >= PROBE_RANGE && !committed);
+    RtMemStats m0, m1;
+    rt_mem_measure(&m0);
+    uint64_t o = probe_cb(pool, 0);
+    CHECK(inline_begin(o) == 1);
+    NVN(nvnCommandBufferDrawArrays, o, 4, 0, 3);
+    uint64_t h = NVN(nvnCommandBufferEndRecording, o);
+    CHECK(submit(&h, 1) == 1);
+    NVN(nvnCommandBufferFinalize, o);
+    rt_mem_measure(&m1);
+    CHECK(rt_mem_commit_run(raw, PROBE_RANGE, &committed) >= PROBE_RANGE && !committed);
+    printf("touch_commits %llu %llu committed %llu %llu\n", (ull)m0.r[RT_MEM_HEAP].touch_commits,
+           (ull)m1.r[RT_MEM_HEAP].touch_commits, (ull)m0.r[RT_MEM_HEAP].committed, (ull)m1.r[RT_MEM_HEAP].committed);
+    CHECK(m0.r[RT_MEM_HEAP].touch_commits == m1.r[RT_MEM_HEAP].touch_commits);
+    CHECK(m0.r[RT_MEM_HEAP].committed == m1.r[RT_MEM_HEAP].committed);
+    nvn_census_stats(print_stat, NULL);   // no hit so far
+    uint64_t p = probe_cb(pool, 0x20000);   // a second range: the game stores into it, which commits the page
+    CHECK(inline_begin(p) == 1);
+    NVN(nvnCommandBufferDrawArrays, p, 4, 0, 3);
+    store32(raw + 0x20000 + 0x40, 9);
+    uint64_t hp = NVN(nvnCommandBufferEndRecording, p);
+    CHECK(submit(&hp, 1) == 2);
+    probe_files(dir);
+    probe_report("probe_uncommitted");
+}
+// The same stores with no probe (a default run, or census mode without the key): no state, no row, no file.
+static void case_probe_default(const char *dir) {
+    probe_setup();
+    CHECK(!nvn_probe_on());
+    uint64_t base = probe_range_at(g_pool_mem, 0);
+    uint64_t o = probe_cb(g_pool, 0);
+    CHECK(inline_begin(o) == 1);
+    NVN(nvnCommandBufferDrawArrays, o, 4, 0, 3);
+    uint64_t used = NVN(nvnCommandBufferGetCommandMemoryUsed, o);
+    store32(base + used + 0x10, 0xC0DEC0DE);
+    uint64_t h = NVN(nvnCommandBufferEndRecording, o);
+    store32(h + 0x14, 0x77);
+    CHECK(submit(&h, 1) == 1);
+    NVN(nvnCommandBufferFinalize, o);
+    NvnProbeStats s;
+    nvn_probe_stats(&s);
+    CHECK(!s.buffers && !s.ranges && !s.hits && !s.bytes_hashed);
+    probe_files(dir);
+    probe_report("probe_default");
+}
+
+// ---- the census timer's rows (nvn_census.c, with the timer on): calls of NVN2 entry points are timed on this thread, and the
+// present writes one row for the thread. Without the flag nothing is written.
+static void case_time_rows(const char *dir) {
+    probe_setup();
+    uint64_t o = probe_cb(g_pool, 0);
+    for (uint64_t seq = 1; seq <= 3; seq++) {
+        CHECK(inline_begin(o) == 1);
+        for (int i = 0; i < 5; i++) NVN(nvnCommandBufferDrawArrays, o, 4, 0, 3);
+        uint64_t h = NVN(nvnCommandBufferEndRecording, o);
+        CHECK(submit(&h, 1) == seq);
+        nvn_census_present(seq);
+    }
+    printf("timer %d\n", rt_timer_on());
+    probe_files(dir);
+    printf("ok time_rows\n");
+}
+
 // ---- failing cases: each ends in one named fatal
 static uint64_t begun(void) {
     setup();
@@ -758,6 +956,15 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "begin")) case_begin();
     else if (!strcmp(cs, "callbacks")) case_callbacks();
     else if (!strcmp(cs, "loop") && argc > 2) case_loop(atoi(argv[2]));
+    else if (!strcmp(cs, "probe_used")) case_probe_used(argc > 2 ? argv[2] : NULL);
+    else if (!strcmp(cs, "probe_last_word")) case_probe_last_word(argc > 2 ? argv[2] : NULL);
+    else if (!strcmp(cs, "probe_handle")) case_probe_handle(argc > 2 ? argv[2] : NULL);
+    else if (!strcmp(cs, "probe_after_end")) case_probe_after_end(argc > 2 ? argv[2] : NULL);
+    else if (!strcmp(cs, "probe_which_recording")) case_probe_which_recording(argc > 2 ? argv[2] : NULL);
+    else if (!strcmp(cs, "probe_quiet")) case_probe_quiet(argc > 2 ? argv[2] : NULL);
+    else if (!strcmp(cs, "probe_uncommitted")) case_probe_uncommitted(argc > 2 ? argv[2] : NULL);
+    else if (!strcmp(cs, "probe_default")) case_probe_default(argc > 2 ? argv[2] : NULL);
+    else if (!strcmp(cs, "time_rows")) case_time_rows(argc > 2 ? argv[2] : NULL);
     else if (!strcmp(cs, "inline_command_write")) case_inline_command_write();
     else if (!strcmp(cs, "control_moved")) case_control_moved();
     else if (!strcmp(cs, "ended_outside")) case_ended_outside();

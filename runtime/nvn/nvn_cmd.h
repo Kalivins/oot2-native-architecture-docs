@@ -5,8 +5,21 @@
 // command handles, submit) and nvn_cmd_ops.c (the commands).
 #pragma once
 #include <stddef.h>
+#include <stdio.h>
 
 #include "nvn_api.h"
+
+// The D11 probe (nvn_cmd.c; census mode, setting census_probe): the counts, and the file census-probe.tsv. A run
+// that is not in census mode with the key set has no probe: nvn_probe_on is 0, nothing is hashed, no file is written.
+#define NVN_PROBE_HIST 40   // size classes of the ranges added: 2^k to 2^(k+1) bytes
+typedef struct {
+    uint64_t bytes_read, bytes_zero;   // bytes of committed pages the probe read, and of uncommitted pages it did not read
+    uint64_t buffers, ranges, bytes_hashed, bytes_checked, unreadable, no_access, over_cap, unchecked_bytes, hits, recordings;
+    uint64_t hist[NVN_PROBE_HIST];
+} NvnProbeStats;
+int nvn_probe_on(void);
+void nvn_probe_stats(NvnProbeStats *out);
+void nvn_probe_write(FILE *f);
 
 // Room for one record in the command buffer of entry point c (its x0): the header written, the payload zeroed. A
 // recording the game began itself (its inline BeginRecording) is taken up first; a pointer the front end keeps that

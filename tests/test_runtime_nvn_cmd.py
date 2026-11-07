@@ -22,6 +22,11 @@ log walks at submit.
 - loop: 131 command buffers created, recorded, submitted and finalized each
   frame, as the NVN2 call census counts in the Forest, with no growth of the
   host memory they hold.
+- probe_*: the D11 probe (census mode with census_probe): a store at base + Used + 0x10 before EndRecording, at
+  the last added word, through a handle's copy, on the range after EndRecording and after submit, each a hit with its check
+  point; a recording only the front end wrote is "not seen over N recordings"; an uncommitted range is never committed by the
+  probe; with no probe there is no state, no row and no file.
+- time_rows: census-time.tsv has the thread's row for each present with the timer on, and no file without it.
 - failing cases: what the front end cannot honour stops by name.
 
 Needs clang for x86-64 (OOT2_CC, else clang on PATH). Without one the tests
@@ -280,6 +285,121 @@ class CommandBufferTest(unittest.TestCase):
             m = re.search(r"^private (\d+) (\d+)$", out, re.M)
             self.assertLess(int(m[2]) - int(m[1]), 2 << 20, m[0])
             self.assertIn(f"records {per_frame * FRAMES}\n", out)
+
+    # ---- the D11 probe and the timer's rows (census mode)
+    def run_census(self, level: str, case: str, tmp: str, **env: str) -> subprocess.CompletedProcess:
+        e = {k: v for k, v in os.environ.items() if not k.startswith("OOT2_CENSUS")}
+        e.update(env)
+        return subprocess.run([str(self.exes[level]), case, tmp], capture_output=True, text=True, timeout=300, env=e)
+
+    def probe(self, case: str, **env: str) -> list[tuple[subprocess.CompletedProcess, Path]]:
+        env = {"OOT2_CENSUS": "1", "OOT2_CENSUS_PROBE": "1", **env}
+        runs = []
+        for level in nvn.LEVELS:
+            with self.subTest(level=level, case=case), tempfile.TemporaryDirectory(
+                    prefix="oot2-probe-", ignore_cleanup_errors=True) as tmp:
+                done = self.run_census(level, case, tmp, **env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn(f"ok {case}\n", done.stdout)
+                self.assertNotIn("FATAL", done.stderr)
+                self.assertIn("OOT2_CENSUS_PROBE=1: the D11 probe", done.stderr)
+                path = Path(tmp) / "census-probe.tsv"
+                self.assertTrue(path.exists())
+                text = path.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("#census-mode OOT2_CENSUS=1 OOT2_CENSUS_PROBE=1: not a default run\n"))
+                runs.append((done, text))   # type: ignore[arg-type]
+        return runs   # type: ignore[return-value]
+
+    def hits_of(self, out: str) -> list[int]:
+        return [int(m[1]) for m in re.finditer(r"^stat\| probe (\d+) ", out, re.M)]
+
+    def test_a_store_at_base_plus_used_plus_0x10_is_a_hit_at_end_with_the_used_shape(self) -> None:
+        for done, text in self.probe("probe_used"):
+            self.assertEqual(self.hits_of(done.stdout), [1])
+            self.assertIn("check end, range ", done.stderr)
+            self.assertIn("base+Used+0x10 is in this block", done.stderr)
+            self.assertRegex(text, r"(?m)^\d+\tend\t0x[0-9a-f]+\t65536\t0\t64\t\d+\t0$")   # the first 64-byte block
+            self.assertIn("#size 2^16..2^17 bytes: 1 ranges\n", text)
+
+    def test_a_store_at_the_last_added_word_is_a_hit_in_the_last_block(self) -> None:
+        for done, text in self.probe("probe_last_word"):
+            self.assertEqual(self.hits_of(done.stdout), [1])
+            self.assertIn("check end, range ", done.stderr)
+            self.assertIn("(the last block)", done.stderr)
+            self.assertRegex(text, r"(?m)^\d+\tend\t0x[0-9a-f]+\t65536\t65472\t64\t-\t1$")
+
+    def test_a_store_through_a_handles_copy_is_a_hit_at_submit(self) -> None:
+        for done, text in self.probe("probe_handle"):
+            self.assertEqual(self.hits_of(done.stdout), [1])
+            self.assertIn("changed after EndRecording: check copy", done.stderr)
+            self.assertIn("\tcopy\t", text)
+
+    def test_a_store_after_end_is_a_hit_at_submit_and_one_after_submit_is_a_hit_at_finalize(self) -> None:
+        for done, text in self.probe("probe_after_end"):
+            self.assertEqual(self.hits_of(done.stdout), [2])
+            self.assertIn("check submit, range ", done.stderr)
+            self.assertIn("check finalize, range ", done.stderr)
+            self.assertRegex(text, r"(?m)^\d+\tsubmit\t0x[0-9a-f]+\t65536\t256\t")   # base + 0x100: the block at +0x100
+            self.assertRegex(text, r"(?m)^\d+\tfinalize\t0x[0-9a-f]+\t65536\t512\t")
+
+    def test_a_hit_names_the_recording_whose_copy_was_checked_not_the_newest_in_the_process(self) -> None:
+        for done, text in self.probe("probe_which_recording"):
+            self.assertEqual(self.hits_of(done.stdout), [1])
+            self.assertIn("recording 1, check submit, range ", done.stderr)
+            self.assertRegex(text, r"(?m)^1\tsubmit\t0x[0-9a-f]+\t65536\t256\t")
+            self.assertIn("recordings 2, hits 1\n", text)
+
+    def test_recordings_the_front_end_alone_wrote_are_not_seen_over_n_recordings(self) -> None:
+        for done, text in self.probe("probe_quiet"):
+            self.assertEqual(self.hits_of(done.stdout), [0])
+            self.assertIn("4 command buffers, 8 ranges added (0 CPU_NO_ACCESS, 0 unreadable, 0 over the per-buffer cap), "
+                          "524288 bytes hashed at add, ", done.stdout)
+            self.assertIn("not seen over 12 recordings\n", done.stdout)
+            self.assertNotIn("probe: a word", done.stderr)
+            self.assertIn("recordings 12, hits 0\n", text)
+
+    def test_the_probe_does_not_commit_an_uncommitted_range_and_sees_a_page_that_holds_a_word_by_the_next_check(self) -> None:
+        for done, text in self.probe("probe_uncommitted"):
+            m = re.search(r"^touch_commits (\d+) (\d+) committed (\d+) (\d+)$", done.stdout, re.M)
+            self.assertEqual(m[1], m[2])
+            self.assertEqual(m[3], m[4])
+            self.assertEqual(self.hits_of(done.stdout), [0, 1])
+            self.assertIn("not seen over 1 recordings\n", done.stdout)
+            self.assertIn("check end, range ", done.stderr)
+
+    def test_without_the_probe_there_is_no_state_no_row_and_no_file(self) -> None:
+        for env in ({}, {"OOT2_CENSUS": "1"}, {"OOT2_CENSUS_PROBE": "1"}):   # a default run; census mode; the key alone
+            for level in nvn.LEVELS:
+                with self.subTest(level=level, env=env), tempfile.TemporaryDirectory(
+                        prefix="oot2-probe-", ignore_cleanup_errors=True) as tmp:
+                    done = self.run_census(level, "probe_default", tmp, **env)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertIn("ok probe_default\n", done.stdout)
+                    self.assertNotIn("stat| probe", done.stdout)
+                    self.assertNotIn("D11 probe", done.stderr)
+                    self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), [])
+
+    def test_the_timer_writes_the_threads_row_for_each_present_and_nothing_without_the_flag(self) -> None:
+        for level in nvn.LEVELS:
+            with self.subTest(level=level), tempfile.TemporaryDirectory(prefix="oot2-time-", ignore_cleanup_errors=True) as tmp:
+                done = self.run_census(level, "time_rows", tmp, OOT2_CENSUS="1", OOT2_CENSUS_TIMER="1")
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn("timer 1\n", done.stdout)
+                text = (Path(tmp) / "census-time.tsv").read_text(encoding="utf-8")
+                self.assertTrue(text.startswith("#census-mode OOT2_CENSUS=1 OOT2_CENSUS_TIMER=1: not a default run\n"))
+                rows = [line.split("\t") for line in text.splitlines() if line.startswith("frame\t")]
+                self.assertEqual([r[1] for r in rows], ["1", "2", "3"])   # one row for each present, this thread's
+                for r in rows:
+                    self.assertGreater(int(r[8]), 5)    # the NVN2 calls timed since the last present: the draws and more
+                    self.assertEqual(int(r[9]), 0)      # no QueueSubmitCommands timed here: submit goes through the helper
+                self.assertRegex(text, r"(?m)^fn\t1\tnvnCommandBufferDrawArrays\tnvn\t")
+                self.assertFalse((Path(tmp) / "census-probe.tsv").exists())
+        for env in ({}, {"OOT2_CENSUS": "1"}, {"OOT2_CENSUS_TIMER": "1"}):
+            with self.subTest(env=env), tempfile.TemporaryDirectory(prefix="oot2-time-", ignore_cleanup_errors=True) as tmp:
+                done = self.run_census(nvn.LEVELS[0], "time_rows", tmp, **env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn("timer 0\n", done.stdout)
+                self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), [])
 
     def test_what_the_front_end_cannot_honour_stops_by_name(self) -> None:
         for case, code, text in FAILING:

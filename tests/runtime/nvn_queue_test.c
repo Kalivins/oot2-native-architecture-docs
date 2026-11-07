@@ -16,6 +16,7 @@
 
 #include "layout.h"
 #include "endmark.h"
+#include "nvn_api.h"
 #include "oot2/gfx.h"
 #include "oot2/kernel.h"
 #include "oot2/memory.h"
@@ -649,6 +650,96 @@ static void case_wait_events(void) {
     printf("ok wait_events\n");
 }
 
+// ---------- case wait_sites: WaitEvent counted per call site, by what satisfied it. A wait inside a recording that
+// is called twice counts at its own site twice (CallCommands copies the record, caller included); 70 more sites than the
+// table holds go to one bucket; the sites and the bucket sum to the totals and to the classes.
+static const char *site_name(uint64_t caller, char *buf, int size) { return rt_guest_name(caller, buf, size); }
+static void case_wait_sites(void) {
+    setup(0, NULL);
+    objects();
+    uint64_t q = queue(), cb = command_buffer(), cb2 = command_buffer(), ev = event_object(g_pool, RESULTS);
+    NVN(nvnCommandBufferBeginRecording, cb2);
+    NVN_AT(MB + 0x6000, nvnCommandBufferWaitEvent, cb2, ev, GEQUAL_WRAP, 0);   // satisfied by the word's own value, twice
+    NVN_AT(MB + 0x6000, nvnCommandBufferWaitEvent, cb2, ev, GEQUAL_WRAP, 0);   // per call of the recording
+    uint64_t called = NVN(nvnCommandBufferEndRecording, cb2), arr = galloc(8, 8);
+    wr64(arr, called);
+    NVN(nvnCommandBufferBeginRecording, cb);
+    NVN(nvnCommandBufferCallCommands, cb, 1, arr);
+    NVN(nvnCommandBufferCallCommands, cb, 1, arr);
+    NVN_AT(MB + 0x7000, nvnCommandBufferWaitEvent, cb, ev, EQUAL, 9);          // not satisfied, until the CPU signals
+    for (int i = 0; i < 70; i++) NVN_AT(MB + 0x100 + 0x10 * (uint64_t)i, nvnCommandBufferWaitEvent, cb, ev, GEQUAL_WRAP, 0);
+    submit(q, NVN(nvnCommandBufferEndRecording, cb));
+    NVN(nvnEventSignal, ev, WRITE, 9);
+    NVN(nvnCommandBufferBeginRecording, cb);
+    NVN(nvnCommandBufferDrawArrays, cb, 4, 0, 3);
+    submit(q, NVN(nvnCommandBufferEndRecording, cb));
+    uint64_t unsatisfied = 0, waits = gfx_null_wait_events(&unsatisfied);
+    GfxNullWaitClasses k;
+    gfx_null_wait_classes(&k);
+    NvnWaitSite sites[64], other;
+    int n = gfx_null_wait_sites(sites, 64, &other);
+    GfxNullWaitClasses sum = other.c;
+    uint64_t sum_waits = 0;
+    char name[96];
+    for (int i = 0; i < n; i++) {
+        const GfxNullWaitClasses *s = &sites[i].c;
+        sum.by_gpu += s->by_gpu, sum.by_cpu += s->by_cpu, sum.initial += s->initial, sum.unsatisfied += s->unsatisfied;
+        sum.later_gpu += s->later_gpu, sum.later_cpu += s->later_cpu, sum.dropped += s->dropped, sum.pending += s->pending;
+    }
+    sum_waits = sum.by_gpu + sum.by_cpu + sum.initial + sum.unsatisfied;
+    CHECK(n == 64 && waits == 4 + 1 + 70 && sum_waits == waits);
+    CHECK(sum.by_gpu == k.by_gpu && sum.by_cpu == k.by_cpu && sum.initial == k.initial && sum.unsatisfied == k.unsatisfied);
+    CHECK(sum.later_gpu == k.later_gpu && sum.later_cpu == k.later_cpu && sum.dropped == k.dropped && sum.pending == k.pending);
+    for (int i = 0; i < 2; i++) {
+        const GfxNullWaitClasses *s = &sites[i].c;
+        printf("site %s gpu %llu cpu %llu initial %llu unsatisfied %llu later_gpu %llu later_cpu %llu\n",
+               site_name(sites[i].caller, name, sizeof name), (ull)s->by_gpu, (ull)s->by_cpu, (ull)s->initial,
+               (ull)s->unsatisfied, (ull)s->later_gpu, (ull)s->later_cpu);
+    }
+    printf("other caller %llu initial %llu unsatisfied %llu\n", (ull)other.caller, (ull)other.c.initial,
+           (ull)other.c.unsatisfied);
+    printf("totals waits %llu unsatisfied %llu initial %llu later_cpu %llu\n", (ull)waits, (ull)unsatisfied,
+           (ull)k.initial, (ull)k.later_cpu);
+    nvn_census_stats(print_stat, NULL);
+    printf("ok wait_sites\n");
+}
+
+// Two pending waits at different sites, on words with different writers, satisfied in an order other than the one they were
+// submitted in: the first is satisfied by a GPU signal, which takes it off the pending list and moves the second into its
+// place; the second is then satisfied by a CPU signal. Each site must keep its own answer.
+static void case_wait_sites_order(void) {
+    setup(0, NULL);
+    objects();
+    uint64_t q = queue(), cb = command_buffer();
+    uint64_t evg = event_object(g_pool, RESULTS + 0x200), evc = event_object(g_pool, RESULTS + 0x240);
+    NVN(nvnCommandBufferBeginRecording, cb);
+    NVN_AT(MB + 0x8000, nvnCommandBufferWaitEvent, cb, evg, EQUAL, 3);
+    NVN_AT(MB + 0x9000, nvnCommandBufferWaitEvent, cb, evc, EQUAL, 4);
+    submit(q, NVN(nvnCommandBufferEndRecording, cb));
+    NVN(nvnCommandBufferBeginRecording, cb);
+    NVN(nvnCommandBufferSignalEvent, cb, evg, WRITE, 2, 0, 3);
+    submit(q, NVN(nvnCommandBufferEndRecording, cb));
+    NVN(nvnEventSignal, evc, WRITE, 4);
+    NVN(nvnCommandBufferBeginRecording, cb);
+    NVN(nvnCommandBufferDrawArrays, cb, 4, 0, 3);
+    submit(q, NVN(nvnCommandBufferEndRecording, cb));
+    NvnWaitSite sites[64], other;
+    int n = gfx_null_wait_sites(sites, 64, &other);
+    CHECK(n == 2);
+    char name[96];
+    for (int i = 0; i < n; i++) {
+        const GfxNullWaitClasses *s = &sites[i].c;
+        printf("site %s unsatisfied %llu later_gpu %llu later_cpu %llu pending %llu\n",
+               site_name(sites[i].caller, name, sizeof name), (ull)s->unsatisfied, (ull)s->later_gpu, (ull)s->later_cpu,
+               (ull)s->pending);
+    }
+    GfxNullWaitClasses k;
+    gfx_null_wait_classes(&k);
+    printf("totals unsatisfied %llu later_gpu %llu later_cpu %llu pending %llu\n", (ull)k.unsatisfied, (ull)k.later_gpu,
+           (ull)k.later_cpu, (ull)k.pending);
+    printf("ok wait_sites_order\n");
+}
+
 // ---------- case event_words: the writer of every event word is remembered (a game makes hundreds of events), and only a
 // 4-byte write by the CPU is an event signal
 static void case_event_words(void) {
@@ -718,13 +809,14 @@ static void case_report_no_pool(void) {
 
 // ---------- cases census_*: the per-present counters and census mode (the null back end boot)
 // n presents on a window of two textures at interval 0 (no wait on the clock), one empty recording each.
+static int g_presents_interval;   // the window's present interval for presents()
 static void presents(int n) {
     setup(0, NULL);
     objects();
     uint64_t q = queue(), cb = command_buffer(), s = sync_object();
     const uint64_t tex[2] = {texture(64, 64, 1), texture(64, 64, 2)};
     uint64_t w = window(2, tex);
-    NVN(nvnWindowSetPresentInterval, w, 0);
+    NVN(nvnWindowSetPresentInterval, w, g_presents_interval);
     for (int f = 0; f < n; f++) {
         if (f == 10) plat_sleep_ns(30000000);   // 30 ms between present 1 and present 60: the log line's seconds show it
         int i = acquire(w, s);
@@ -739,6 +831,13 @@ static void case_census_default(void) {
     presents(125);
     CHECK(gfx_null_presents() == 125);
     printf("ok census_default\n");
+}
+// One window of the clock's own interval, 1: the line is not marked.
+static void case_census_interval1(void) {
+    g_presents_interval = 1;
+    presents(61);
+    CHECK(gfx_null_presents() == 61);
+    printf("ok census_interval1\n");
 }
 static void case_census_gap_default(void) {
     setup(0, NULL);
@@ -862,10 +961,10 @@ int main(int argc, char **argv) {
     const char *cs = argv[1];
     static const struct { const char *name; void (*fn)(void); } cases[] = {
         {"fences", case_fences}, {"timestamps", case_timestamps}, {"render_cond", case_render_cond},
-        {"window", case_window}, {"syncwait", case_syncwait}, {"wait_events", case_wait_events},
+        {"window", case_window}, {"syncwait", case_syncwait}, {"wait_events", case_wait_events}, {"wait_sites", case_wait_sites}, {"wait_sites_order", case_wait_sites_order},
         {"event_cpu_invisible", case_event_cpu_invisible}, {"sync_uninitialised", case_sync_uninitialised},
         {"present_past_textures", case_present_past_textures}, {"window_five", case_window_five},
-        {"report_no_pool", case_report_no_pool}, {"census_default", case_census_default},
+        {"report_no_pool", case_report_no_pool}, {"census_default", case_census_default}, {"census_interval1", case_census_interval1},
         {"census_gap_default", case_census_gap_default}, {"census_mode", case_census_mode},
         {"census_cap", case_census_cap}, {"census_limit", case_census_limit}, {"census_flush", case_census_flush},
         {"census_boundary", case_census_boundary}, {"event_words", case_event_words},

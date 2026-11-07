@@ -44,6 +44,9 @@
 
 #include "nvn_cmd.h"
 #include "oot2/ledger.h"
+#include "oot2/memory.h"
+#include "oot2/nvn.h"
+#include "oot2/settings.h"
 #include "plat.h"
 
 typedef unsigned long long ull;
@@ -78,6 +81,9 @@ typedef struct nvn_cmd_host {
     int pending;                       // a record since the last segment entry: the console's next entry covers it
     int beginning;                     // BeginRecording runs the memory callback: its recording is not taken up yet
     int deferred;                      // the open recording holds a deferred bind or push
+    struct probe_range *pr[8];         // the D11 probe (census mode only): command memory added and not yet dropped
+    int npr;
+    uint64_t rec_n;                    // the probe's number of the newest recording this buffer ended (0: none yet)
 } nvn_cmd_host;
 
 static void reserve(nvn_cmd_host *h, size_t need) {
@@ -230,6 +236,271 @@ void *nvn_rec(Cpu *c, uint32_t op, size_t payload) {
 
 void nvn_rec_deferred(const Cpu *c) { ((cmd_t *)arg_p(c, 0))->host->deferred = 1; }
 
+// ---------- the D11 probe (census mode, setting census_probe)
+// The earlier static reading found no store through GetCommandMemoryUsed's answer in main and said "not seen": the front end writes
+// nothing into command memory, so a word a game patched there (Luigi's Mansion 3 stores at base + Used + 0x10) would be lost
+// silently. The probe keeps a hash of each added range, in blocks, and compares it at EndRecording, at submit and at
+// Finalize; the copy behind each handle is hashed at EndRecording and compared at submit (a patch through a handle). It
+// reads memory itself and takes no write watch; it walks rt_mem_commit_run and never reads a page that is not committed (a
+// read would commit it, and change the private-memory figure), so an uncommitted page hashes as zeros and a page that holds
+// words by the next check is a hit. A range added again is dropped without a check (the game reuses pool memory). A hit
+// re-bases the range, so a later store is its own hit. Ranges over a byte cap are counted as unchecked, never silently.
+// The hit's offset is the first changed block of the range (64 bytes up to a 64 KiB range, larger blocks beyond: the
+// range holds at most 1024 blocks). The hit's recording is the number of an EndRecording, counted over the process from 1: at
+// End the recording being closed, at submit and for the copy the recording whose handle is submitted, at Finalize the newest
+// recording of that command buffer (0 when none was ended). A range is compared and re-based under probe_lock, one thread at
+// a time, because a handle's copy and its command buffer share the range and can be checked by two threads at once.
+#define PROBE_RANGES 8                       // ranges kept per command buffer
+#define PROBE_BLOCKS 1024                    // hash blocks per range
+#define PROBE_BYTES_CAP (64ull << 30)        // bytes of committed pages read over the run; later ranges are unchecked
+#define PROBE_RANGE_CAP (16ull << 20)        // a range larger than this is unchecked
+#define PROBE_HITS 32                        // hits logged and written
+#define PROBE_HIST 40                        // size classes: 2^k
+_Static_assert(PROBE_RANGES == sizeof(((struct nvn_cmd_host *)0)->pr) / sizeof(((struct nvn_cmd_host *)0)->pr[0]),
+               "a command buffer keeps as many probe ranges as a copy takes");
+typedef struct probe_range {
+    uint32_t refs;
+    uint64_t base, size, blk, nblk, last_used;   // last_used: GetCommandMemoryUsed's newest answer + 1 (0: none asked)
+    uint64_t lines[PROBE_BLOCKS];
+} probe_range;
+typedef struct { uint64_t recording; const char *check; uint64_t range, size, off, blk, last_used, lw; } probe_hit;
+static int g_probe = -1;                              // -1: not read yet
+static PlatMutex probe_lock = PLAT_MUTEX_INIT;
+static uint64_t pb_read, pb_zero;                     // bytes of committed pages read, and of uncommitted pages not read
+static uint64_t pb_buffers, pb_ranges, pb_hashed, pb_checked, pb_unreadable, pb_no_access, pb_over_cap, pb_unchecked, pb_hits;
+static uint64_t pb_hist[PROBE_HIST];
+static probe_hit pb_hit[PROBE_HITS];
+static int pb_nhit;
+
+int nvn_probe_on(void) {
+    int v = __atomic_load_n(&g_probe, __ATOMIC_RELAXED);
+    if (v >= 0) return v;
+    v = rt_census_on() && rt_setting(RT_SET_census_probe) != 0;
+    int none = -1;
+    if (__atomic_compare_exchange_n(&g_probe, &none, v, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED) && v)
+        rt_log("OOT2_CENSUS_PROBE=1: the D11 probe hashes every range of command memory and compares it at EndRecording, "
+               "submit and Finalize; this is not a default run");
+    return v;
+}
+
+// A stream of 8-byte words in four lanes, finished block by block (a block is a multiple of 32 bytes).
+typedef struct { uint64_t h[4]; uint8_t st[32]; unsigned fill; uint64_t in_block, blk, idx, *lines; } phash;
+#define PM 0x9E3779B97F4A7C15ull
+static inline uint64_t pmix(uint64_t h, uint64_t w) {
+    h = (h ^ w) * PM;
+    return h ^ (h >> 29);
+}
+static void ph_block(phash *s, const uint8_t *p) {
+    for (int k = 0; k < 4; k++) {
+        uint64_t w;
+        if (p) memcpy(&w, p + 8 * k, 8);
+        else w = 0;
+        s->h[k] = pmix(s->h[k], w);
+    }
+}
+static void ph_finish(phash *s) {
+    uint64_t r = s->in_block * PM;
+    for (unsigned i = 0; i < s->fill; i++) r = pmix(r, s->st[i]);
+    for (int k = 0; k < 4; k++) r = pmix(r ^ (uint64_t)k, s->h[k]);
+    s->lines[s->idx++] = r;
+    for (int k = 0; k < 4; k++) s->h[k] = (uint64_t)k * PM + 1;
+    s->fill = 0, s->in_block = 0;
+}
+static void ph_bytes(phash *s, const uint8_t *p, uint64_t n) {   // p NULL: zeros
+    while (n) {
+        if (s->fill == 0 && n >= 32) {
+            uint64_t whole = n & ~31ull;
+            for (uint64_t i = 0; i < whole; i += 32) ph_block(s, p ? p + i : NULL);
+            if (p) p += whole;
+            s->in_block += whole, n -= whole;
+            continue;
+        }
+        unsigned take = (unsigned)(n < 32 - s->fill ? n : 32 - s->fill);
+        if (p) memcpy(s->st + s->fill, p, take), p += take;
+        else memset(s->st + s->fill, 0, take);
+        s->fill += take, s->in_block += take, n -= take;
+        if (s->fill == 32) ph_block(s, s->st), s->fill = 0;
+    }
+}
+static void ph_feed(phash *s, const uint8_t *p, uint64_t n) {   // across block ends
+    while (n) {
+        uint64_t room = s->blk - s->in_block, k = n < room ? n : room;
+        ph_bytes(s, p, k);
+        if (p) p += k;
+        n -= k;
+        if (s->in_block == s->blk) ph_finish(s);
+    }
+}
+// The block hashes of [base, base + size) into lines (nblk of them), reading only committed pages. Returns 0 when the
+// range lies in no region of guest memory (it cannot be walked).
+static uint64_t zero_line[PROBE_HIST];   // the hash of a block of zeros, by log2 of its size (the same value from any thread)
+static uint64_t probe_zero_line(uint64_t blk) {
+    unsigned k = 0;
+    while ((1ull << k) < blk) k++;
+    uint64_t known = __atomic_load_n(&zero_line[k], __ATOMIC_RELAXED);
+    if (!known) {
+        uint64_t one;
+        phash s = {.blk = blk, .lines = &one};
+        for (int i = 0; i < 4; i++) s.h[i] = (uint64_t)i * PM + 1;
+        ph_feed(&s, NULL, blk);
+        __atomic_store_n(&zero_line[k], one, __ATOMIC_RELAXED);
+        return one;
+    }
+    return known;
+}
+static int probe_hash(uint64_t base, uint64_t size, uint64_t blk, uint64_t nblk, uint64_t *lines) {
+    phash s = {.blk = blk, .lines = lines};
+    for (int k = 0; k < 4; k++) s.h[k] = (uint64_t)k * PM + 1;
+    for (uint64_t at = 0; at < size;) {
+        int committed = 0;
+        uint64_t run = rt_mem_commit_run(base + at, size - at, &committed);
+        if (run == UINT64_MAX) return 0;
+        if (!run) break;
+        if (committed) {
+            __atomic_fetch_add(&pb_read, run, __ATOMIC_RELAXED);
+        } else {
+            __atomic_fetch_add(&pb_zero, run, __ATOMIC_RELAXED);
+            if (!s.in_block && run >= blk && s.idx < nblk) {   // whole blocks of uncommitted pages: no compute either
+                uint64_t whole = run / blk;
+                if (s.idx + whole > nblk) whole = nblk - s.idx;
+                for (uint64_t i = 0; i < whole; i++) s.lines[s.idx++] = probe_zero_line(blk);
+                at += whole * blk;
+                continue;
+            }
+        }
+        ph_feed(&s, committed ? (const uint8_t *)(uintptr_t)(base + at) : NULL, run);
+        at += run;
+    }
+    if (s.in_block) ph_finish(&s);
+    while (s.idx < nblk) s.lines[s.idx++] = probe_zero_line(blk);   // a walk that ended early: no stale stack words to compare
+    return 1;
+}
+static void probe_geometry(uint64_t size, uint64_t *blk, uint64_t *nblk) {
+    uint64_t b = 64;
+    while (b * PROBE_BLOCKS < size) b *= 2;
+    *blk = b, *nblk = (size + b - 1) / b;
+}
+static const char *const probe_where[] = {"add", "end", "submit", "finalize", "copy"};
+enum { PW_ADD, PW_END, PW_SUBMIT, PW_FINALIZE, PW_COPY };
+
+static void probe_record(uint64_t recording, int where, const probe_range *r, uint64_t off, uint64_t blk) {
+    pb_hits++;
+    probe_hit h = {recording, probe_where[where], r->base, r->size, off, blk, r->last_used, off + blk >= r->size};
+    if (pb_nhit < PROBE_HITS) {
+        pb_hit[pb_nhit++] = h;
+        char used[96] = "no GetCommandMemoryUsed answer";
+        if (h.last_used)
+            snprintf(used, sizeof used, "Used answer %#llx: base+Used+0x10 is %s this block", (ull)(h.last_used - 1),
+                     off <= h.last_used - 1 + 0x10 && h.last_used - 1 + 0x10 < off + blk ? "in" : "not in");
+        rt_log("nvn: probe: a word of command memory changed after AddCommandMemory: recording %llu, check %s, range %#llx "
+               "(%llu bytes), in the block at +%#llx (%llu bytes)%s, %s", (ull)recording, probe_where[where],
+               (ull)r->base, (ull)r->size, (ull)off, (ull)blk, h.lw ? " (the last block)" : "", used);
+    }
+}
+
+// Compare r with what memory holds now, re-base it, and record a hit for the first changed block. One thread at a time: the
+// hash is taken inside the lock, so a thread that hashed before another one's store cannot compare against the re-based lines.
+static void probe_compare(probe_range *r, int where, uint64_t recording) {
+    uint64_t now[PROBE_BLOCKS];
+    plat_mutex_lock(&probe_lock);
+    if (probe_hash(r->base, r->size, r->blk, r->nblk, now)) {
+        __atomic_fetch_add(&pb_checked, r->size, __ATOMIC_RELAXED);
+        uint64_t first = r->nblk;
+        for (uint64_t i = 0; i < r->nblk; i++)
+            if (now[i] != r->lines[i]) {
+                first = first == r->nblk ? i : first;
+                r->lines[i] = now[i];
+            }
+        if (first != r->nblk) probe_record(recording, where, r, first * r->blk, r->blk);
+    }
+    plat_mutex_unlock(&probe_lock);
+}
+static void probe_unref(probe_range *r) {
+    if (__atomic_sub_fetch(&r->refs, 1, __ATOMIC_ACQ_REL) == 0) free(r);
+}
+// AddCommandMemory: the range [base, base + size) of a pool the CPU can read.
+static void probe_add(nvn_cmd_host *h, const pool_t *p, int64_t off, uint64_t size) {
+    unsigned k = 0;
+    while (k < 64 && (size >> k) > 1) k++;
+    __atomic_fetch_add(&pb_hist[k < PROBE_HIST ? k : PROBE_HIST - 1], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&pb_ranges, 1, __ATOMIC_RELAXED);
+    if (!p || !p->mem || (p->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) {   // the CPU cannot patch what it cannot see
+        __atomic_fetch_add(&pb_no_access, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    uint64_t base = (uintptr_t)p->mem + (uint64_t)off;
+    for (int i = 0; i < h->npr; i++)   // the same range added again: reuse of pool memory, dropped without a check
+        if (h->pr[i]->base == base) {
+            probe_unref(h->pr[i]);
+            h->pr[i] = h->pr[--h->npr];
+            break;
+        }
+    if (!size) return;
+    if (h->npr == PROBE_RANGES) {
+        __atomic_fetch_add(&pb_over_cap, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&pb_unchecked, size, __ATOMIC_RELAXED);
+        return;
+    }
+    if (size > PROBE_RANGE_CAP || __atomic_load_n(&pb_read, __ATOMIC_RELAXED) > PROBE_BYTES_CAP) {
+        __atomic_fetch_add(&pb_unchecked, size, __ATOMIC_RELAXED);
+        return;
+    }
+    probe_range *r = calloc(1, sizeof *r);
+    if (!r) rt_fatal("nvn: probe: a range of command memory");
+    r->refs = 1, r->base = base, r->size = size;
+    probe_geometry(size, &r->blk, &r->nblk);
+    if (!probe_hash(base, size, r->blk, r->nblk, r->lines)) {
+        free(r);
+        __atomic_fetch_add(&pb_unreadable, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    __atomic_fetch_add(&pb_hashed, size, __ATOMIC_RELAXED);
+    h->pr[h->npr++] = r;
+}
+static void probe_check_cb(nvn_cmd_host *h, int where) {
+    for (int i = 0; i < h->npr; i++) probe_compare(h->pr[i], where, h->rec_n);
+}
+static void probe_drop_cb(nvn_cmd_host *h) {
+    for (int i = 0; i < h->npr; i++) probe_unref(h->pr[i]);
+    h->npr = 0;
+}
+void nvn_probe_stats(NvnProbeStats *out) {
+    *out = (NvnProbeStats){.recordings = __atomic_load_n(&g_end_handle, __ATOMIC_RELAXED)};
+    out->buffers = __atomic_load_n(&pb_buffers, __ATOMIC_RELAXED), out->ranges = __atomic_load_n(&pb_ranges, __ATOMIC_RELAXED);
+    out->bytes_read = __atomic_load_n(&pb_read, __ATOMIC_RELAXED), out->bytes_zero = __atomic_load_n(&pb_zero, __ATOMIC_RELAXED);
+    out->bytes_hashed = __atomic_load_n(&pb_hashed, __ATOMIC_RELAXED), out->bytes_checked = __atomic_load_n(&pb_checked, __ATOMIC_RELAXED);
+    out->unreadable = __atomic_load_n(&pb_unreadable, __ATOMIC_RELAXED), out->no_access = __atomic_load_n(&pb_no_access, __ATOMIC_RELAXED);
+    out->over_cap = __atomic_load_n(&pb_over_cap, __ATOMIC_RELAXED), out->unchecked_bytes = __atomic_load_n(&pb_unchecked, __ATOMIC_RELAXED);
+    plat_mutex_lock(&probe_lock);
+    out->hits = pb_hits;
+    plat_mutex_unlock(&probe_lock);
+    for (int i = 0; i < PROBE_HIST && i < NVN_PROBE_HIST; i++) out->hist[i] = __atomic_load_n(&pb_hist[i], __ATOMIC_RELAXED);
+}
+void nvn_probe_write(FILE *f) {
+    NvnProbeStats s;
+    nvn_probe_stats(&s);
+    fprintf(f, "#census-mode OOT2_CENSUS=1 OOT2_CENSUS_PROBE=1: not a default run\n");
+    fprintf(f, "#command buffers %llu, ranges %llu, bytes hashed at add %llu, bytes checked %llu, bytes of committed pages read "
+               "%llu, bytes of uncommitted pages not read %llu, unreadable ranges %llu, "
+               "CPU_NO_ACCESS ranges %llu, ranges over the cap of %d per command buffer %llu, unchecked bytes %llu, "
+               "recordings %llu, hits %llu\n", (ull)s.buffers, (ull)s.ranges, (ull)s.bytes_hashed, (ull)s.bytes_checked,
+            (ull)s.bytes_read, (ull)s.bytes_zero,
+            (ull)s.unreadable, (ull)s.no_access, PROBE_RANGES, (ull)s.over_cap, (ull)s.unchecked_bytes, (ull)s.recordings,
+            (ull)s.hits);
+    for (int k = 0; k < NVN_PROBE_HIST; k++)
+        if (s.hist[k]) fprintf(f, "#size 2^%d..2^%d bytes: %llu ranges\n", k, k + 1, (ull)s.hist[k]);
+    fprintf(f, "recording\tcheck\trange\trange_bytes\tblock_offset\tblock_bytes\tused_answer\tlast_block\n");
+    plat_mutex_lock(&probe_lock);
+    for (int i = 0; i < pb_nhit; i++) {
+        const probe_hit *h = &pb_hit[i];
+        if (h->last_used) fprintf(f, "%llu\t%s\t%#llx\t%llu\t%llu\t%llu\t%llu\t%d\n", (ull)h->recording, h->check, (ull)h->range,
+                                  (ull)h->size, (ull)h->off, (ull)h->blk, (ull)(h->last_used - 1), (int)h->lw);
+        else fprintf(f, "%llu\t%s\t%#llx\t%llu\t%llu\t%llu\t-\t%d\n", (ull)h->recording, h->check, (ull)h->range,
+                     (ull)h->size, (ull)h->off, (ull)h->blk, (int)h->lw);
+    }
+    plat_mutex_unlock(&probe_lock);
+}
+
 // ---------- copies, the index behind command handles
 // A copy: this prefix, then its records from OP_BEGIN to OP_END. Its handle points just past the prefix.
 typedef struct nvn_copy {
@@ -238,6 +509,10 @@ typedef struct nvn_copy {
     uint64_t bytes, ctl_inner;         // its records' bytes; the control bytes of its entries, for a caller to inline
     uint32_t refs, retired;            // calls and submissions reading it now; out of the index, freed at the last one
     uint32_t deferred, pad;            // it holds a deferred bind or push
+    probe_range *pr[PROBE_RANGES];     // the probe (census mode): the ranges of the command buffer at EndRecording, and
+    int npr;                           // a hash of the copy's records, compared at submit
+    uint64_t probe_h;
+    uint64_t rec_n;                    // the probe's number of the recording this copy holds
 } nvn_copy;
 _Static_assert(sizeof(nvn_copy) % 8 == 0, "records stay 8-byte aligned");
 
@@ -300,7 +575,17 @@ static u64map by_handle, by_page;      // handle -> copy; header page + 1 -> its
 static uint64_t ncopies;
 
 static uint64_t handle_of(const nvn_copy *k) { return (uintptr_t)(k + 1); }
+// The probe's hash of a copy's records, as one block (the copy is host memory, all committed).
+static uint64_t probe_copy_hash(const nvn_copy *k) {
+    uint64_t one[1];
+    phash s = {.blk = (k->bytes + 31) & ~31ull, .lines = one};
+    for (int i = 0; i < 4; i++) s.h[i] = (uint64_t)i * PM + 1;
+    ph_feed(&s, (const uint8_t *)(k + 1), k->bytes);
+    if (s.in_block) ph_finish(&s);
+    return one[0];
+}
 static void copy_free(nvn_copy *k) {
+    for (int i = 0; i < k->npr; i++) probe_unref(k->pr[i]);
     host_bytes(-(int64_t)(sizeof *k + k->bytes));
     free(k);
 }
@@ -339,8 +624,13 @@ static uint64_t copy_publish(nvn_cmd_host *h) {
     size_t bytes = (size_t)(h->cur - h->buf);
     nvn_copy *k = malloc(sizeof *k + bytes);
     if (!k) rt_fatal("nvn: a command recording copy of %zu bytes", bytes);
-    *k = (nvn_copy){NULL, (uintptr_t)h->rec_ctl, bytes, h->ctl_inner, 0, 0, (uint32_t)h->deferred, 0};
+    *k = (nvn_copy){.key = (uintptr_t)h->rec_ctl, .bytes = bytes, .ctl_inner = h->ctl_inner, .deferred = (uint32_t)h->deferred};
     memcpy(k + 1, h->buf, bytes);
+    if (nvn_probe_on()) {   // the ranges as they stand (End has just compared them), and the copy's own hash
+        for (int i = 0; i < h->npr; i++) k->pr[k->npr++] = h->pr[i], __atomic_fetch_add(&h->pr[i]->refs, 1, __ATOMIC_RELAXED);
+        k->probe_h = probe_copy_hash(k);
+        k->rec_n = h->rec_n;
+    }
     host_bytes((int64_t)(sizeof *k + bytes));
     retire_copies(k->key, k->key + 1);
     uint64_t page = (k->key >> COPY_PAGE_SHIFT) + 1;
@@ -394,6 +684,7 @@ NVN_API(nvnCommandBufferInitialize) {
     nvn_cmd_host *h = calloc(1, sizeof *h);
     if (!h) rt_fatal("nvn: command buffer host state");
     host_bytes(sizeof *h);
+    if (nvn_probe_on()) __atomic_fetch_add(&pb_buffers, 1, __ATOMIC_RELAXED);
     memset(o, 0, sizeof *o);
     o->cmd_cur = CMD_NO_ROOM;
     o->cmd_cb_on = o->ctl_cb_on = 1;
@@ -406,6 +697,7 @@ NVN_API(nvnCommandBufferInitialize) {
 NVN_API(nvnCommandBufferFinalize) {
     cmd_t *o = cmd_sync(c, "CommandBufferFinalize");
     nvn_cmd_host *h = o->host;
+    if (h->npr) probe_check_cb(h, PW_FINALIZE), probe_drop_cb(h);
     host_bytes(-(int64_t)(h->end - h->buf) - (int64_t)sizeof *h);
     free(h->buf);
     free(h);
@@ -447,6 +739,7 @@ NVN_API(nvnCommandBufferAddCommandMemory) {
     if (o->host->pending) segment_entry(c, o, fn);
     o->host->cmd_given = size, o->host->cmd_used = 0;
     o->cmd_gpu = (p ? (uintptr_t)p->mem : 0) + (uint64_t)off;
+    if (nvn_probe_on()) probe_add(o->host, p, off, size);
 }
 // void nvnCommandBufferAddControlMemory(NVNcommandBuffer *cmd, void *memory, size_t size): the handles recorded in that
 // memory go; inside a recording the driver jumps to the new memory from the 16 bytes it kept back.
@@ -468,7 +761,12 @@ NVN_API(nvnCommandBufferAddControlMemory) {
 // added some, never more than it added.
 static uint64_t cmd_used(const nvn_cmd_host *h) { return h->cmd_used < h->cmd_given ? h->cmd_used : h->cmd_given; }
 NVN_API(nvnCommandBufferGetCommandMemorySize) { ret_x(c, cmd_host(c, "CommandBufferGetCommandMemorySize")->cmd_given); }
-NVN_API(nvnCommandBufferGetCommandMemoryUsed) { ret_x(c, cmd_used(cmd_host(c, "CommandBufferGetCommandMemoryUsed"))); }
+NVN_API(nvnCommandBufferGetCommandMemoryUsed) {
+    nvn_cmd_host *h = cmd_host(c, "CommandBufferGetCommandMemoryUsed");
+    uint64_t used = cmd_used(h);
+    if (h->npr) h->pr[h->npr - 1]->last_used = used + 1;   // Used is relative to the newest range the game added
+    ret_x(c, used);
+}
 NVN_API(nvnCommandBufferGetCommandMemoryFree) {
     const nvn_cmd_host *h = cmd_host(c, "CommandBufferGetCommandMemoryFree");
     ret_x(c, h->cmd_given - cmd_used(h));
@@ -512,12 +810,13 @@ NVN_API(nvnCommandBufferEndRecording) {
         ret_x(c, 0);
         return;
     }
-    __atomic_fetch_add(&g_end_handle, 1, __ATOMIC_RELAXED);
+    h->rec_n = __atomic_add_fetch(&g_end_handle, 1, __ATOMIC_RELAXED);
     if (h->pending) segment_entry(c, o, fn);
     if (o->ctl_cur == o->rec_ctl + CTL_HEADER) o->ctl_moved = 1, o->flags13 |= 1;
     else o->flags13 &= (uint8_t)~1u;
     ctl_take(c, o, CTL_END, CTL_END, fn);
     o->last_entry = 0;
+    if (h->npr) probe_check_cb(h, PW_END);
     uint64_t handle = copy_publish(h);
     o->recording = 0, o->ctl_moved = 0;
     o->rec_ctl = o->ctl_cur;
@@ -583,8 +882,28 @@ uint64_t nvn_submit_recordings(Cpu *c, const uint64_t *handles, int n) {
         rt_unimplemented(c, "nvn", "QueueSubmitCommands: %d handles at %p", n, (const void *)handles);
     nvn_copy *pins[SUBMIT_MAX];
     for (int i = 0; i < n; i++) pins[i] = copy_pin(c, handles[i], "QueueSubmitCommands");
+    if (nvn_probe_on())   // before anything reads the copies: a patch through a handle, and a range written since End
+        for (int i = 0; i < n; i++) {
+            nvn_copy *k = pins[i];
+            plat_mutex_lock(&probe_lock);
+            uint64_t now = probe_copy_hash(k);
+            if (now != k->probe_h) {
+                pb_hits++;
+                if (pb_nhit < PROBE_HITS) {
+                    pb_hit[pb_nhit++] = (probe_hit){k->rec_n, probe_where[PW_COPY], handle_of(k), k->bytes, 0, k->bytes, 0, 0};
+                    rt_log("nvn: probe: the records behind command handle %#llx (%llu bytes) changed after EndRecording: "
+                           "check copy, recording %llu", (ull)handle_of(k), (ull)k->bytes, (ull)k->rec_n);
+                }
+                k->probe_h = now;
+            }
+            plat_mutex_unlock(&probe_lock);
+            for (int j = 0; j < k->npr; j++) probe_compare(k->pr[j], PW_SUBMIT, k->rec_n);
+        }
     for (int i = 0; i < n; i++)
-        if (pins[i]->deferred) resolve_deferred(pins[i]);
+        if (pins[i]->deferred) {
+            resolve_deferred(pins[i]);
+            if (pins[i]->npr || nvn_probe_on()) pins[i]->probe_h = probe_copy_hash(pins[i]);   // the resolve is the front end's own write
+        }
     ledger_frame_enter();
     uint64_t fence = gfx_backend()->submit(handles, n);
     ledger_frame_leave();

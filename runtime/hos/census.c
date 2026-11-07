@@ -195,6 +195,7 @@ static int write_files(int code, const char *line) {
             bad |= ferror(f) | fclose(f);
             if (code >= 0) rt_log("census: calls per frame written to %s", path);
         }
+        nvn_census_extra(hos_game_folder());
     }
     return !bad;
 }

@@ -157,6 +157,41 @@ class QueueTest(unittest.TestCase):
         for done in self.assert_passes("syncwait"):
             self.assertIn("order 1 2 3 4 result 1\n", done.stdout)
 
+    def test_wait_events_are_counted_per_call_site_by_what_satisfied_them_and_the_sites_sum_to_the_totals(self) -> None:
+        for done in self.assert_passes("wait_sites"):
+            out = done.stdout
+            # the wait inside a recording called twice counts at its own site twice (its record, caller included, is
+            # copied by CallCommands), the unsatisfied one is satisfied later by the CPU's signal
+            self.assertRegex(out, r"(?m)^site 0x\w+ \(main\+0x6000\) gpu 0 cpu 0 initial 4 unsatisfied 0 later_gpu 0 later_cpu 0$")
+            self.assertRegex(out, r"(?m)^site 0x\w+ \(main\+0x7000\) gpu 0 cpu 0 initial 0 unsatisfied 1 later_gpu 0 later_cpu 1$")
+            # 72 sites met, 64 in the table: the other 8 (each wait satisfied by the word's own value) share a bucket
+            self.assertIn("other caller 0 initial 8 unsatisfied 0\n", out)
+            self.assertIn("totals waits 75 unsatisfied 1 initial 74 later_cpu 1\n", out)
+            self.assertRegex(out, r"(?m)^stat\| waitsite 0x\w+ \(main\+0x6000\) 4 by a GPU signal in order 0, by a CPU signal before 0, already satisfied 4,")
+            self.assertIn("stat| waitsite other sites 8 ", out)
+
+    def test_a_window_of_interval_1_with_no_hold_is_not_marked(self) -> None:
+        for done in self.assert_passes("census_interval1", OOT2_CENSUS="0"):
+            self.assertRegex(done.stderr, r"(?m)^\[rt\] nvn: present 60 intervals over 60 presents: requested 1 x60, "
+                                          r"held 0 x60$")
+            self.assertNotIn("NOT every interval 1", done.stderr)
+
+    def test_a_window_paced_by_a_frame_rate_target_names_the_target(self) -> None:
+        # the game's interval is ignored while a target is set, so an unmarked "requested 1" line alone would hide
+        # what paced the window
+        for done in self.assert_passes("census_interval1", OOT2_CENSUS="0", OOT2_FRAME_RATE_TARGET="120"):
+            self.assertRegex(done.stderr, r"(?m)^\[rt\] nvn: present 60 intervals over 60 presents: requested 1 x60, "
+                                          r"held 0 x60, frame rate target 120 a second on 60 \(the game's interval is "
+                                          r"ignored on those\)$")
+
+    def test_two_pending_waits_keep_their_own_site_when_the_first_is_satisfied_first(self) -> None:
+        for done in self.assert_passes("wait_sites_order"):
+            out = done.stdout
+            # the first site's own answer is the GPU's signal, the second's the CPU's (a site the layout does not name prints bare)
+            self.assertRegex(out, r"(?m)^site 0x\w*8000 unsatisfied 1 later_gpu 1 later_cpu 0 pending 0$")
+            self.assertRegex(out, r"(?m)^site 0x\w*9000 unsatisfied 1 later_gpu 0 later_cpu 1 pending 0$")
+            self.assertIn("totals unsatisfied 2 later_gpu 1 later_cpu 1 pending 0\n", out)
+
     def test_each_wait_event_site_is_logged_with_its_answer(self) -> None:
         for done in self.assert_passes("wait_events"):
             self.assertIn("waits 7 unsatisfied 3\n", done.stdout)
@@ -238,6 +273,11 @@ class QueueTest(unittest.TestCase):
             secs = r"(?:0\.(?:0[3-9]|[1-9]\d)|[1-4]\.\d\d)"
             self.assertRegex(done.stderr, rf"(?m)^\[rt\] nvn: present 60, {secs} s after the first; a present: 0\.0 SetRenderTargets, 0\.0 DispatchCompute, 0\.0 DrawElementsInstanced$")
             self.assertRegex(done.stderr, rf"(?m)^\[rt\] nvn: present 120, {secs} s after the first; a present: 0\.0 SetRenderTargets, 0\.0 DispatchCompute, 0\.0 DrawElementsInstanced$")
+            # the intervals the game asked for over each window: one line a window, marked when not 1 and no hold
+            # this case presents at interval 0, which is not 1, so every window is marked
+            for seq in ("60", "120"):
+                self.assertRegex(done.stderr, rf"(?m)^\[rt\] nvn: present {seq} intervals over 60 presents: requested 0 x60, "
+                                              r"held 0 x60 \(NOT every interval 1 with no hold\)$")
             self.assertNotIn("nvn: title:", done.stderr)   # no movie frame in this case
             self.assertNotIn("census mode", done.stderr)
         for level in nvn.LEVELS:
@@ -298,7 +338,7 @@ class QueueTest(unittest.TestCase):
                     table[(f[0], f[3])] = (int(f[1]), f[4], int(f[5]))
             # only NVN2 entry points, and only the ones called in the window: the case also calls a host function
             # that is none of them, and most NVN2 functions are not called in a given window
-            self.assertTrue(all(name.startswith("nvn") for _, name in table), sorted(table)[:5])
+            self.assertTrue(all(name.startswith(("nvn", "replay:")) for _, name in table), sorted(table)[:5])   # replay rows
             self.assertTrue(all(calls > 0 for _, _, calls in table.values()))
             self.assertNotIn(("tail", "census_test_other"), table)
             self.assertNotIn(("w002", "nvnQueueSetDebugLabel"), table)
@@ -312,15 +352,15 @@ class QueueTest(unittest.TestCase):
             # the front end's own counters, as census rows: 130 recordings begun through the entry point, 130 presents
             stats = [line[len("stat| "):] for line in done.stdout.splitlines() if line.startswith("stat| ")]
             self.assertEqual([x.split(" ", 2)[:2] for x in stats],
-                             [["recordings", "130"], ["callbacks", "0"], ["waitevents", "0"], ["waitclasses", "0"],
+                             [["recordings", "130"], ["callbacks", "0"], ["waitevents", "0"], ["waitclasses", "0"], ["waitqueues", "0"],
                               ["pools", "1"], ["pools-cpu", "1"], ["pools-cpu-no-access", "0"], ["pools-physical", "0"],
                               ["pools-virtual", "0"], ["presents", "130"]], stats)
             # the case's one memory pool, 4 MiB the CPU can see; no window range in use
-            self.assertEqual(stats[4], "pools 1 memory pools made 1, live 1 (most at once 1), 4194304 bytes live (most "
+            self.assertEqual(stats[5], "pools 1 memory pools made 1, live 1 (most at once 1), 4194304 bytes live (most "
                                        "4194304); made with GPU_NO_ACCESS 0; GPU address window in use 0 bytes (most 0 of "
                                        "68719476736)")
-            self.assertEqual(stats[5], "pools-cpu 1 made 1, live 1 (most at once 1), 4194304 bytes live (most 4194304)")
-            self.assertEqual(stats[8], "pools-virtual 0 made 0, live 0 (most at once 0), 0 bytes live (most 0)")
+            self.assertEqual(stats[6], "pools-cpu 1 made 1, live 1 (most at once 1), 4194304 bytes live (most 4194304)")
+            self.assertEqual(stats[9], "pools-virtual 0 made 0, live 0 (most at once 0), 0 bytes live (most 0)")
             self.assertIn("inline 0, slow 130, ended with a handle 130, ended empty 0", stats[0])
             # the table is read live: the two gap calls after the last present are in its tail and in the whole
             self.assertEqual(table[("tail", "nvnQueueSetDebugLabel")][2], 2)

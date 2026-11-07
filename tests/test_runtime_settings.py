@@ -50,7 +50,8 @@ GROUPS = {"graphics", "pacing", "display", "audio", "input", "enhancements", "de
 TOOL_VARIABLES = {"OOT2_CC", "OOT2_NINJA", "OOT2_CONFIG", "OOT2_VSYNC_P99_US"}
 # The variables the runtime read before the store, each now a key's environment name (the settings store).
 OLD_VARIABLES = {"OOT2_GFX": "gfx", "OOT2_HOLD_TICKS": "hold_ticks", "OOT2_PAGE_RELEASE": "page_release",
-                 "OOT2_CENSUS": "census", "OOT2_CENSUS_FRAMES": "census_frames"}
+                 "OOT2_CENSUS": "census", "OOT2_CENSUS_FRAMES": "census_frames",
+                 "OOT2_CENSUS_TIMER": "census_timer", "OOT2_CENSUS_PROBE": "census_probe"}
 # Keys whose default is an off value below their range (frame_rate_target: 0, or 20 to 120; the fixed frame rate gate).
 OFF_VALUE_KEYS = {"frame_rate_target"}
 
@@ -221,6 +222,21 @@ class SettingsTest(unittest.TestCase):
         for _, done in self.per_level("hold", "", OOT2_HOLD_TICKS="3"):   # the variable holds it over the file
             self.assertIn("bound: hold 3\nset 2: hold 3\nfile 7: hold 3\n", done.stdout)
             self.assertIn("held for 3 ticks, whatever the game asks for (OOT2_HOLD_TICKS)", done.stderr)
+
+    def test_the_run_header_names_the_placement_the_hold_and_the_frame_rate_target_in_every_run(self) -> None:
+        # one line per run, default or not, so a default run names what it ran with. The frame rate target is the
+        # step override: it replaces the game's own present interval, so a header that left it out would hide it.
+        for _, done in self.per_level("hold", ""):   # no layer holds anything: every value is the default
+            self.assertEqual(done.stderr.count("nvn: pacing: "), 1, done.stderr)
+            self.assertIn("nvn: pacing: placement sync (the default), E2 hold none (the default), "
+                          "frame rate target none (the default)\n", done.stderr)
+        for _, done in self.per_level("hold", "", OOT2_HOLD_TICKS="3", OOT2_HOLD_PLACEMENT="acquire",
+                                      OOT2_FRAME_RATE_TARGET="30"):
+            self.assertEqual(done.stderr.count("nvn: pacing: "), 1, done.stderr)
+            self.assertIn("nvn: pacing: placement acquire (OOT2_HOLD_PLACEMENT), E2 hold 3 ticks (OOT2_HOLD_TICKS), "
+                          "frame rate target 30 a second (OOT2_FRAME_RATE_TARGET)\n", done.stderr)
+        for path, done in self.per_level("hold", "[pacing]\nhold_ticks = 4\nframe_rate_target = 40\n"):
+            self.assertIn(f"E2 hold 4 ticks ({path}), frame rate target 40 a second ({path})\n", done.stderr)
 
     # ---- refusals
     def test_a_value_out_of_range_is_refused_by_name_with_exit_code_2_and_never_clamped(self) -> None:

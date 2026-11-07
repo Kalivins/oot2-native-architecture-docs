@@ -12,6 +12,8 @@
 #include <string.h>
 
 #include "nvn_api.h"
+#include "nvn_cmd.h"
+#include "oot2/memory.h"
 #include "oot2/nvn_pace.h"
 #include "plat.h"
 
@@ -22,17 +24,33 @@
 typedef struct {
     uint64_t present, ns;
     uint64_t *calls;
+    uint64_t ops[OP_COUNT_];   // records the null back end had replayed, by op (the second draw count)
+    NvnPoolStats pools;        // the pools at this snapshot (point 3)
+    uint64_t priv;             // the process's private memory at this snapshot, bytes
 } Snap;
 static Snap g_snap[MAX_SNAPS];
 static int g_nsnap, g_nslots, g_full_said;
 static PlatMutex g_lock = PLAT_MUTEX_INIT;
 static uint64_t g_first_ns;
 
+static uint64_t g_title_present;   // the present of the title line, 0 before it (census mode: its snapshot is taken at that present)
+
 static void take(uint64_t seq) {
     int n = rt_hostfn_count();
     uint64_t *calls = malloc((size_t)n * sizeof *calls);
     if (!calls) rt_fatal("nvn census: out of memory for a snapshot of %d slots", n);
     rt_hostfn_snapshot(calls, n);
+    static Snap tmp;   // one thread takes snapshots: the presenting thread
+    tmp = (Snap){0};
+    gfx_null_op_counts(tmp.ops);
+    nvn_pool_stats(&tmp.pools);
+    // rt_mem_measure walks the page map and takes tens of milliseconds: every fifth snapshot, and at the title line's window,
+    // so the frame it lands in does not stretch every window
+    if (g_nsnap % 5 == 0 || seq == g_title_present) {
+        RtMemStats ms;
+        rt_mem_measure(&ms);
+        tmp.priv = ms.process_private;
+    }
     plat_mutex_lock(&g_lock);
     if (g_nsnap == MAX_SNAPS) {
         int say = !g_full_said;
@@ -43,7 +61,8 @@ static void take(uint64_t seq) {
         return;
     }
     g_nslots = n;
-    g_snap[g_nsnap++] = (Snap){seq, plat_now_ns(), calls};
+    tmp.present = seq, tmp.ns = plat_now_ns(), tmp.calls = calls;
+    g_snap[g_nsnap++] = tmp;
     plat_mutex_unlock(&g_lock);
 }
 
@@ -60,6 +79,41 @@ static uint64_t g_prev_calls[3], g_prev_present;
 static int g_movie_windows, g_title_said;
 
 static uint64_t named_calls(const char *name) { return rt_hostfn_calls(nvn_proc_address(name)); }
+
+// The intervals the game asked for over the last window: the present-record ring keeps the newest 512 presents, so it is
+// read once a window. "requested 1 x60" is the normal window; any other interval, or a hold in effect, is marked. A
+// present made while a fixed frame rate target was set is paced by the target and not by the game's interval, so the
+// line names the target (the newest one met) and how many presents of the window it paced.
+static void interval_line(uint64_t seq) {
+    uint64_t first = seq > WINDOW ? seq - WINDOW + 1 : 1;
+    int req[8] = {0}, held[8] = {0}, odd_req = 0, odd_held = 0, n = 0, targeted = 0, target = 0;
+    for (uint64_t s = first; s <= seq; s++) {
+        NvnPresentRecord r;
+        if (!nvn_present_record(s, &r)) continue;
+        n++;
+        if (r.target) targeted++, target = r.target;
+        if (r.requested >= 0 && r.requested < 8) req[r.requested]++;
+        else odd_req++;
+        if (r.held >= 0 && r.held < 8) held[r.held]++;
+        else odd_held++;
+    }
+    char rq[160] = "", hd[160] = "";
+    int marked = odd_req != 0;
+    for (int i = 0; i < 8; i++) {
+        if (req[i]) snprintf(rq + strlen(rq), sizeof rq - strlen(rq), "%s%d x%d", *rq ? ", " : "", i, req[i]);
+        if (req[i] && i != 1) marked = 1;
+        if (held[i]) snprintf(hd + strlen(hd), sizeof hd - strlen(hd), "%s%d x%d", *hd ? ", " : "", i, held[i]);
+        if (held[i] && i != 0) marked = 1;
+    }
+    if (odd_req) snprintf(rq + strlen(rq), sizeof rq - strlen(rq), "%sother x%d", *rq ? ", " : "", odd_req);
+    if (odd_held) marked = 1;
+    char tg[96] = "";
+    if (targeted)
+        snprintf(tg, sizeof tg, ", frame rate target %d a second on %d (the game's interval is ignored on those)", target,
+                 targeted);
+    rt_log("nvn: present %llu intervals over %d presents: requested %s, held %s%s%s", (unsigned long long)seq, n,
+           *rq ? rq : "none", *hd ? hd : "none", tg, marked ? " (NOT every interval 1 with no hold)" : "");
+}
 
 // The calls a present of the last window, once per window, for the log line and the title.
 static void window_line(uint64_t seq, double secs) {
@@ -78,11 +132,150 @@ static void window_line(uint64_t seq, double secs) {
     memcpy(g_prev_calls, cur, sizeof cur);
     rt_log("nvn: present %llu, %.2f s after the first; a present: %.1f SetRenderTargets, %.1f DispatchCompute, %.1f DrawElementsInstanced",
            (unsigned long long)seq, secs, rt, dp, dr);
+    interval_line(seq);
     g_movie_windows = (rt >= TITLE_TARGETS && dp >= TITLE_DISPATCHES) ? g_movie_windows + 1 : 0;
     if (g_movie_windows >= 2 && !g_title_said) {
         g_title_said = 1;
+        g_title_present = seq;
         rt_log("nvn: title: the movie's frame (%d dispatches and %d SetRenderTargets a present) in two windows in a row, at "
                "present %llu", TITLE_DISPATCHES, TITLE_TARGETS, (unsigned long long)seq);
+    }
+}
+
+// ---- the census timer's rows (runtime.h, hostfn.c)
+// At each present the presenting thread notes, for every thread that made a timed NVN2 call since the last present, what its
+// calls cost in exclusive thread CPU time: NVN2 entry points apart from QueueSubmitCommands, QueueSubmitCommands (the null
+// back end completes the submission inside it, which is not the Vulkan replay), every other host function, and the guest
+// callbacks. At each window it notes every function's calls and exclusive time over the window. census-time.tsv is written by
+// nvn_census_extra at each flush and at the end; the capture's frame line, joined by seq, gives the thread's
+// whole CPU time per frame.
+#define TIME_THREADS 1024
+#define TIME_ROW_CAP 4000000
+typedef struct { uint64_t seq; uint32_t id, handle; uint64_t ns[RT_TIMER_CLASSES], calls[RT_TIMER_CLASSES]; } TimeRow;
+typedef struct { uint64_t seq, calls, ns; uint32_t slot; } FnRow;
+static TimeRow *g_trow;
+static FnRow *g_frow;
+static size_t g_ntrow, g_captrow, g_nfrow, g_capfrow;
+static RtTimerThread g_tprev[TIME_THREADS];
+static int g_thread_cap_said;
+static uint64_t *g_fprev;   // calls and ns of each slot at the last window: 2 * (n + 1)
+static int g_fprev_n, g_time_full_said;
+
+static void *grow(void *p, size_t *cap, size_t need, size_t elem) {
+    if (need <= *cap) return p;
+    size_t c = *cap ? 2 * *cap : 4096;
+    void *q = realloc(p, c * elem);
+    if (!q) rt_fatal("nvn census: out of memory for the timer rows");
+    *cap = c;
+    return q;
+}
+
+static void timer_present(uint64_t seq) {
+    RtTimerThread t[256];
+    int n = rt_timer_threads(t, 256);
+    int over = n > 256;
+    if (over) n = 256;
+    plat_mutex_lock(&g_lock);
+    for (int i = 0; i < n; i++) {
+        uint32_t id = t[i].id;
+        if (id >= TIME_THREADS) over = 1;
+        if (id >= TIME_THREADS) continue;
+        RtTimerThread *p = &g_tprev[id];
+        uint64_t dn = t[i].calls[RT_TIMER_NVN] - p->calls[RT_TIMER_NVN], ds = t[i].calls[RT_TIMER_SUBMIT] - p->calls[RT_TIMER_SUBMIT];
+        if ((dn || ds) && g_ntrow < TIME_ROW_CAP) {
+            g_trow = grow(g_trow, &g_captrow, g_ntrow + 1, sizeof *g_trow);
+            TimeRow *r = &g_trow[g_ntrow++];
+            r->seq = seq, r->id = id, r->handle = t[i].handle;
+            for (int k = 0; k < RT_TIMER_CLASSES; k++) r->ns[k] = t[i].ns[k] - p->ns[k], r->calls[k] = t[i].calls[k] - p->calls[k];
+        } else if ((dn || ds) && !g_time_full_said) {
+            g_time_full_said = 1;
+            rt_log("nvn census: %d timer rows kept; later frames are not recorded", TIME_ROW_CAP);
+        }
+        *p = t[i];
+    }
+    if (over && !g_thread_cap_said) {
+        g_thread_cap_said = 1;
+        rt_log("nvn census: the timer rows cover 256 threads with an id under %d; threads beyond that are not recorded", TIME_THREADS);
+    }
+    if (seq == 1 || seq % WINDOW == 0) {
+        int ns = rt_hostfn_count();
+        uint64_t *calls = malloc(2 * (size_t)(ns + 1) * sizeof *calls);
+        if (calls) {
+            uint64_t *tot = calls + (ns + 1);
+            rt_timer_slots(calls, tot, ns);
+            if (!g_fprev) g_fprev = calloc(2 * (size_t)(ns + 1), sizeof *g_fprev), g_fprev_n = ns;
+            if (g_fprev && g_fprev_n == ns)
+                for (int i = 0; i <= ns; i++) {
+                    uint64_t dc = calls[i] - g_fprev[i], dt = tot[i] - g_fprev[ns + 1 + i];
+                    g_fprev[i] = calls[i], g_fprev[ns + 1 + i] = tot[i];
+                    if ((!dc && !dt) || g_nfrow >= TIME_ROW_CAP) continue;
+                    g_frow = grow(g_frow, &g_capfrow, g_nfrow + 1, sizeof *g_frow);
+                    g_frow[g_nfrow++] = (FnRow){seq, dc, dt, (uint32_t)i};
+                }
+            free(calls);
+        }
+    }
+    plat_mutex_unlock(&g_lock);
+}
+
+static const char *fn_name(uint32_t slot, int *cls) {
+    int n = rt_hostfn_count();
+    if ((int)slot >= n) return *cls = RT_TIMER_GUEST, "<guest callback>";
+    const char *name = rt_hostfn_name(RT_HOSTFN_BASE + 16ull * slot);
+    if (!name) name = "?";
+    *cls = !strcmp(name, "nvnQueueSubmitCommands") ? RT_TIMER_SUBMIT : !strncmp(name, "nvn", 3) ? RT_TIMER_NVN : RT_TIMER_OTHER;
+    return name;
+}
+
+static void write_time(FILE *f) {
+    typedef unsigned long long ull;
+    fprintf(f, "#census-mode OOT2_CENSUS=1 OOT2_CENSUS_TIMER=1: not a default run\n");
+    fprintf(f, "#timer clock plat_thread_cpu_ns; nested-call cost subtracted from the parent %llu ns; cost inside a call's own "
+               "reading subtracted from every call %llu ns; calls past the depth kept (passed untimed) %llu\n",
+            (ull)rt_timer_overhead_ns(), (ull)rt_timer_floor_ns(), (ull)rt_timer_overflows());
+    fprintf(f, "#timer a call's time is its own: thread CPU time minus the host calls and guest callbacks nested in it, so a "
+               "blocked wait is not charged. Fibres are not followed: SwitchToFiber returns on another host stack, so a "
+               "switch's frame takes the time of the fibre it switched to; those names are not NVN2 and sit in the other class.\n");
+    fprintf(f, "#frame columns: seq thread_id thread_handle nvn_ns submit_ns other_ns guest_ns nvn_calls submit_calls "
+               "other_calls guest_calls (a thread that made a timed NVN2 call since the last present; join by seq with the "
+               "capture's frame line)\n");
+    fprintf(f, "#fn columns: window_end_seq function class calls exclusive_ns (over the window; class nvn, submit, other, guest)\n");
+    static const char *const cls_name[RT_TIMER_CLASSES] = {"nvn", "submit", "other", "guest"};
+    plat_mutex_lock(&g_lock);
+    for (size_t i = 0; i < g_ntrow; i++) {
+        const TimeRow *r = &g_trow[i];
+        fprintf(f, "frame\t%llu\t%u\t%u\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\n", (ull)r->seq, r->id, r->handle,
+                (ull)r->ns[0], (ull)r->ns[1], (ull)r->ns[2], (ull)r->ns[3], (ull)r->calls[0], (ull)r->calls[1],
+                (ull)r->calls[2], (ull)r->calls[3]);
+    }
+    for (size_t i = 0; i < g_nfrow; i++) {
+        int cls;
+        const char *name = fn_name(g_frow[i].slot, &cls);
+        fprintf(f, "fn\t%llu\t%s\t%s\t%llu\t%llu\n", (ull)g_frow[i].seq, name, cls_name[cls], (ull)g_frow[i].calls,
+                (ull)g_frow[i].ns);
+    }
+    plat_mutex_unlock(&g_lock);
+}
+
+// The other census-mode files, written beside census-nvn.tsv at each flush and at the end (census.c): the timer's rows
+// (census-time.tsv, only with the timer on) and the D11 probe's hits (census-probe.tsv, only with the probe on).
+void nvn_census_extra(const char *folder) {
+    char path[4200];
+    if (rt_timer_on()) {
+        snprintf(path, sizeof path, "%s/census-time.tsv", folder);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            write_time(f);
+            fclose(f);
+        }
+    }
+    if (nvn_probe_on()) {
+        snprintf(path, sizeof path, "%s/census-probe.tsv", folder);
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            nvn_probe_write(f);
+            fclose(f);
+        }
     }
 }
 
@@ -93,6 +286,7 @@ void nvn_census_present(uint64_t seq) {
     if (seq == 1 || seq % WINDOW == 0) window_line(seq, seq == 1 ? 0.0 : (double)(now - g_first_ns) / 1e9);
     if (!rt_census_on()) return;
     if (seq == 1 || seq % WINDOW == 0) take(seq);
+    if (rt_timer_on()) timer_present(seq);
     if (seq % FLUSH_EVERY == 0) rt_census_flush();
     uint64_t limit = rt_census_frames();
     if (limit && seq >= limit) {
@@ -126,6 +320,26 @@ void nvn_census_stats(NvnStatRow emit, void *ctx) {
              "full list %llu)", (ull)w.by_gpu, (ull)w.by_cpu, (ull)w.initial, (ull)w.unsatisfied, (ull)w.later_gpu,
              (ull)w.later_cpu, (ull)w.pending, (ull)w.dropped);
     emit(ctx, "waitclasses", w.by_gpu + w.by_cpu + w.initial + w.unsatisfied, why);
+    // WaitEvent per call site, the same classes: one row per site, then the bucket of the sites past the
+    // table's 64, so the rows sum to the row above. The site is the guest function the wait was recorded from.
+    {
+        static NvnWaitSite sites[64];
+        NvnWaitSite other;
+        int ns = gfx_null_wait_sites(sites, 64, &other);
+        for (int i = 0; i <= ns; i++) {
+            const NvnWaitSite *s = i < ns ? &sites[i] : &other;
+            if (i == ns && !s->c.by_gpu && !s->c.by_cpu && !s->c.initial && !s->c.unsatisfied) break;
+            char key[160], at[120];
+            if (i < ns) snprintf(key, sizeof key, "waitsite %s", rt_guest_name(s->caller, at, sizeof at));
+            else snprintf(key, sizeof key, "waitsite other sites");
+            snprintf(why, sizeof why, "by a GPU signal in order %llu, by a CPU signal before %llu, already satisfied %llu, "
+                     "unsatisfied %llu (later by GPU %llu, later by CPU %llu, not satisfied by the end %llu, dropped from "
+                     "the full list %llu)", (ull)s->c.by_gpu, (ull)s->c.by_cpu, (ull)s->c.initial, (ull)s->c.unsatisfied,
+                     (ull)s->c.later_gpu, (ull)s->c.later_cpu, (ull)s->c.pending, (ull)s->c.dropped);
+            emit(ctx, key, s->c.by_gpu + s->c.by_cpu + s->c.initial + s->c.unsatisfied, why);
+        }
+        emit(ctx, "waitqueues", 0, "not measured: the queue of a wait and of its signal is not recorded at submit (left to the replay work)");
+    }
     NvnPoolStats ps;
     nvn_pool_stats(&ps);
     snprintf(why, sizeof why, "memory pools made %llu, live %llu (most at once %llu), %llu bytes live (most %llu); made with "
@@ -141,6 +355,21 @@ void nvn_census_stats(NvnStatRow emit, void *ctx) {
                  (ull)k->live, (ull)k->peak, (ull)k->bytes, (ull)k->peak_bytes);
         emit(ctx, names[i], k->created, why);
     }
+    if (nvn_probe_on()) {   // census mode with census_probe: the D11 probe (nvn_cmd.c)
+        NvnProbeStats p;
+        nvn_probe_stats(&p);
+        char hits[96];
+        if (p.hits) snprintf(hits, sizeof hits, "%llu hits", (ull)p.hits);
+        else if (p.unchecked_bytes) snprintf(hits, sizeof hits, "not seen over %llu recordings in the ranges checked (%llu bytes "
+                                             "were not checked)", (ull)p.recordings, (ull)p.unchecked_bytes);
+        else snprintf(hits, sizeof hits, "not seen over %llu recordings", (ull)p.recordings);
+        snprintf(why, sizeof why, "D11 probe: %llu command buffers, %llu ranges added (%llu CPU_NO_ACCESS, %llu unreadable, %llu "
+                 "over the per-buffer cap), %llu bytes hashed at add, %llu bytes checked, %llu bytes of committed pages read, "
+                 "%llu bytes of uncommitted pages not read, %llu bytes unchecked; %s",
+                 (ull)p.buffers, (ull)p.ranges, (ull)p.no_access, (ull)p.unreadable, (ull)p.over_cap, (ull)p.bytes_hashed,
+                 (ull)p.bytes_checked, (ull)p.bytes_read, (ull)p.bytes_zero, (ull)p.unchecked_bytes, hits);
+        emit(ctx, "probe", p.hits, why);
+    }
     emit(ctx, "presents", nvn_present_count(), "nvnQueuePresentTexture calls that reached the back end");
 }
 
@@ -153,6 +382,16 @@ static void rows(FILE *f, const char *phase, uint64_t frames, const uint64_t *no
         if (frames) fprintf(f, "%s\t%llu\t\t%s\t%.3f\t%llu\n", phase, (unsigned long long)frames, name,
                             (double)d / (double)frames, (unsigned long long)d);
         else fprintf(f, "%s\t0\t\t%s\t%llu\t%llu\n", phase, name, (unsigned long long)d, (unsigned long long)d);
+    }
+}
+
+// The records the null back end replayed, by op, as rows "replay:<OP>" of the same table: the second draw count.
+static void op_rows(FILE *f, const char *phase, uint64_t frames, const uint64_t *now, const uint64_t *before) {
+    for (int i = 0; i < OP_COUNT_; i++) {
+        uint64_t d = now[i] - before[i];
+        if (!d || !frames) continue;
+        fprintf(f, "%s\t%llu\t\treplay:%s\t%.3f\t%llu\n", phase, (unsigned long long)frames, nvn_op_name((uint32_t)i),
+                (double)d / (double)frames, (unsigned long long)d);
     }
 }
 
@@ -171,6 +410,16 @@ void nvn_census_write(FILE *f) {
     if (g_nsnap && seq > g_snap[g_nsnap - 1].present)
         fprintf(f, "#window tail presents %llu-%llu seconds %.3f\n", (unsigned long long)g_snap[g_nsnap - 1].present,
                 (unsigned long long)seq, (double)(now_ns - g_snap[g_nsnap - 1].ns) / 1e9);
+    // the pools and the process's private memory at each snapshot (point 3), and where the title line fell
+    for (int k = 0; k < g_nsnap; k++) {
+        const Snap *s = &g_snap[k];
+        fprintf(f, "#pools %s%03d presents %llu live %llu most %llu bytes %llu most_bytes %llu window_bytes %llu window_most %llu "
+                   "private_bytes %llu (0: not measured at this snapshot)\n", k ? "w" : "boot", k, (unsigned long long)s->present, (unsigned long long)s->pools.all.live,
+                (unsigned long long)s->pools.all.peak, (unsigned long long)s->pools.all.bytes,
+                (unsigned long long)s->pools.all.peak_bytes, (unsigned long long)s->pools.window_bytes,
+                (unsigned long long)s->pools.window_peak, (unsigned long long)s->priv);
+    }
+    if (g_title_present) fprintf(f, "#title the title line was logged at present %llu\n", (unsigned long long)g_title_present);
     fprintf(f, "phase\tframes\tslot\tfunction\tcalls_per_frame\tcalls\n");
     if (!g_nsnap) {
         rows(f, "boot", 0, cur, NULL, n);
@@ -180,10 +429,16 @@ void nvn_census_write(FILE *f) {
         for (int k = 1; k < g_nsnap; k++) {
             snprintf(name, sizeof name, "w%03d", k);
             rows(f, name, g_snap[k].present - g_snap[k - 1].present, g_snap[k].calls, g_snap[k - 1].calls, g_nslots);
+            op_rows(f, name, g_snap[k].present - g_snap[k - 1].present, g_snap[k].ops, g_snap[k - 1].ops);
         }
         const Snap *last = &g_snap[g_nsnap - 1];
         if (seq > last->present) rows(f, "tail", seq - last->present, cur, last->calls, g_nslots);
         if (seq > 1) rows(f, "all", seq - 1, cur, g_snap[0].calls, g_nslots);
+        if (seq > 1) {
+            uint64_t now_ops[OP_COUNT_];
+            gfx_null_op_counts(now_ops);
+            op_rows(f, "all", seq - 1, now_ops, g_snap[0].ops);
+        }
     }
     plat_mutex_unlock(&g_lock);
     free(cur);

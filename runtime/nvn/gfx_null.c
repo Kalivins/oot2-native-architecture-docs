@@ -57,6 +57,7 @@ static PlatCond g_done_cond = PLAT_COND_INIT;
 static uint64_t g_submitted;                 // the newest fence value handed out (g_lock)
 static uint64_t g_done;                      // the newest fence value done (written under g_lock, read anywhere)
 static uint64_t g_presents, g_records;
+static uint64_t g_op_counts[OP_COUNT_];      // records replayed, by op (the second draw count)
 
 static int null_pool_init(pool_t *p) { (void)p; return 1; }
 static void null_pool_fini(pool_t *p) { (void)p; }
@@ -73,6 +74,9 @@ static void *g_log_ctx;
 
 void gfx_null_log_ops(GfxNullOpLog fn, void *ctx) { g_log = fn, g_log_ctx = ctx; }
 uint64_t gfx_null_records(void) { return __atomic_load_n(&g_records, __ATOMIC_RELAXED); }
+void gfx_null_op_counts(uint64_t *out) {
+    for (int i = 0; i < OP_COUNT_; i++) out[i] = __atomic_load_n(&g_op_counts[i], __ATOMIC_RELAXED);
+}
 
 // ---------- what a submission leaves to completion: copies of its records with CPU-visible results, in stream order
 typedef struct results {
@@ -161,6 +165,7 @@ static void walk(uint64_t fence, int index, uint64_t handle) {
             rt_fatal("gfx: null back end: recording %d of submission %llu is not whole at +%zu (op %u, %u bytes)", index,
                      (ull)fence, at, h.op, h.size);
         __atomic_fetch_add(&g_records, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_op_counts[h.op], 1, __ATOMIC_RELAXED);
         const op_hdr *r = (const op_hdr *)(const void *)(p + at);
         replay(fence, r);
         ledger_track_op(&g_track, r);
@@ -182,9 +187,12 @@ static void *cpu_addr(uint64_t addr, uint64_t size, const char *what) {
     return (void *)(uintptr_t)addr;
 }
 
-// WaitEvent call sites met, with what was logged for each.
+// WaitEvent call sites met, with what was logged for each and what each one's waits were satisfied by: the
+// same classes as the totals, kept per site, and one bucket for the sites past the table, so that the sites' counts always
+// sum to the totals. The site of a wait is the guest return address in its record, which CallCommands copies unchanged.
 #define WAIT_SITES 64
-static struct { uint64_t caller; int unsatisfied_logged; } g_sites[WAIT_SITES];
+static struct { uint64_t caller; int unsatisfied_logged; GfxNullWaitClasses c; } g_sites[WAIT_SITES];
+static GfxNullWaitClasses g_other_sites;
 static int g_nsites;
 static uint64_t g_waits, g_waits_unsatisfied;
 
@@ -210,6 +218,7 @@ typedef struct { const volatile uint32_t *val; int writer; } WordRec;   // val N
 static WordRec *g_words;                                                // open addressing, a power of two long
 static size_t g_word_cap, g_word_count;
 static p_wait_event g_wait_pending[PENDING_WAITS];
+static int g_wait_pending_site[PENDING_WAITS];   // the site of each pending wait: an index in g_sites, or -1 for the bucket
 static int g_nwait_pending;
 static GfxNullWaitClasses g_classes;
 
@@ -247,6 +256,24 @@ void gfx_null_wait_classes(GfxNullWaitClasses *out) {
     out->pending = (uint64_t)g_nwait_pending;
     plat_mutex_unlock(&g_lock);
 }
+static GfxNullWaitClasses *site_classes(int s) { return s >= 0 ? &g_sites[s].c : &g_other_sites; }
+
+// The sites in the order first met (at most WAIT_SITES, then the bucket for the rest), with their classes. out holds max
+// sites; *other is the bucket of the sites past the table (caller 0). Returns the sites listed.
+int gfx_null_wait_sites(NvnWaitSite *out, int max, NvnWaitSite *other) {
+    plat_mutex_lock(&g_lock);
+    int n = g_nsites < max ? g_nsites : max;
+    for (int i = 0; i < n; i++) out[i] = (NvnWaitSite){g_sites[i].caller, g_sites[i].c};
+    if (other) *other = (NvnWaitSite){0, g_other_sites};
+    for (int i = 0; i < g_nwait_pending; i++) {   // not satisfied yet: counted at the site that waits
+        int s = g_wait_pending_site[i];
+        if (s >= 0 && s < n) out[s].c.pending++;
+        else if (s < 0 && other) other->c.pending++;
+    }
+    plat_mutex_unlock(&g_lock);
+    return n;
+}
+
 // Called after each completion: an unsatisfied wait whose word has reached its value since is satisfied later, by the
 // writer that wrote the word last.
 static void recheck_pending(void) {
@@ -256,9 +283,11 @@ static void recheck_pending(void) {
             i++;
             continue;
         }
-        if (word_writer(g_wait_pending[i].val) == WRITER_CPU) g_classes.later_cpu++;
-        else g_classes.later_gpu++;
+        GfxNullWaitClasses *sc = site_classes(g_wait_pending_site[i]);
+        if (word_writer(g_wait_pending[i].val) == WRITER_CPU) g_classes.later_cpu++, sc->later_cpu++;
+        else g_classes.later_gpu++, sc->later_gpu++;
         g_wait_pending[i] = g_wait_pending[--g_nwait_pending];
+        g_wait_pending_site[i] = g_wait_pending_site[g_nwait_pending];
     }
 }
 
@@ -267,21 +296,26 @@ static void wait_event(const p_wait_event *p) {
     int ok = wait_ok(p, &w);
     g_waits++;
     if (!ok) g_waits_unsatisfied++;
-    if (ok) {
-        int who = word_writer(p->val);
-        if (who == WRITER_GPU) g_classes.by_gpu++;
-        else if (who == WRITER_CPU) g_classes.by_cpu++;
-        else g_classes.initial++;
-    } else {
-        g_classes.unsatisfied++;
-        if (g_nwait_pending < PENDING_WAITS) g_wait_pending[g_nwait_pending++] = *p;
-        else g_classes.dropped++;
-    }
     int s = 0;
     while (s < g_nsites && g_sites[s].caller != p->caller) s++;
     int first = s == g_nsites;
     if (first && g_nsites < WAIT_SITES) g_sites[g_nsites++].caller = p->caller;
-    else if (first) s = -1;   // past the table: such a site is not logged
+    else if (first) s = -1;   // past the table: such a site is not logged, and its waits go to the bucket
+    GfxNullWaitClasses *sc = site_classes(s);
+    if (ok) {
+        int who = word_writer(p->val);
+        if (who == WRITER_GPU) g_classes.by_gpu++, sc->by_gpu++;
+        else if (who == WRITER_CPU) g_classes.by_cpu++, sc->by_cpu++;
+        else g_classes.initial++, sc->initial++;
+    } else {
+        g_classes.unsatisfied++, sc->unsatisfied++;
+        if (g_nwait_pending < PENDING_WAITS) {
+            g_wait_pending_site[g_nwait_pending] = s;
+            g_wait_pending[g_nwait_pending++] = *p;
+        } else {
+            g_classes.dropped++, sc->dropped++;
+        }
+    }
     char where[96];
     if (s >= 0 && (first || (!ok && !g_sites[s].unsatisfied_logged))) {
         int who = word_writer(p->val);

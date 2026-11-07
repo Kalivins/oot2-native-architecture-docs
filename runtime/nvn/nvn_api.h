@@ -39,6 +39,15 @@ enum {
 
 static inline int nvn_arg_bool(const Cpu *c, int i) { return (int)(arg_x(c, i) & 0xff); }   // NVNboolean: low 8 bits
 
+// WaitEvent per call site (gfx_null.c), declared here and not in gfx.h: the null back end's own bookkeeping. Each
+// site's waits are split by the classes of GfxNullWaitClasses; the sites past the 64 the table holds share one bucket, so the
+// sums over the sites and the bucket are the totals. caller is the guest return address stored in the wait's record.
+typedef struct { uint64_t caller; GfxNullWaitClasses c; } NvnWaitSite;
+int gfx_null_wait_sites(NvnWaitSite *out, int max, NvnWaitSite *other);   // returns the sites listed, in the order first met
+
+// Records the null back end replayed, by op (OP_COUNT_ entries into out), since start-up: the census's second draw count.
+void gfx_null_op_counts(uint64_t *out);
+
 #define NVN_POOL_MAGIC MAGIC('P', 'O', 'O', 'L')   // pool_t.magic of an initialised pool (nvn_pool.c)
 
 // Buffers reference their pool and own no storage (nvn_buffer.c).

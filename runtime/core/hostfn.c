@@ -12,7 +12,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <stdlib.h>
+
 #include "core.h"
+#include "oot2/kernel.h"
 #include "oot2/settings.h"
 #include "plat.h"
 
@@ -165,7 +168,175 @@ const char *rt_hostfn_unbound(int index) {
     return NULL;
 }
 
-void hostfn_seal(void) { sealed = 1; }
+// ---- the census timer (runtime.h)
+// A frame is a nested call: its time in, taken from the thread's CPU clock on the way in, its children's sums in the
+// thread's table (not on the C stack, so a frame a longjmp or a fibre switch abandoned can never be written through).
+// On the way out a frame's own time is (out - in) - children - overhead * nchildren, it is a child of the frame below
+// it, and the depth goes back to where it was at the way in, so a frame skipped by a guest longjmp is dropped.
+#define TIMER_DEPTH 256
+#define TIMER_GUEST_CELL MAX_HOSTFN   // the cell after the last slot: guest callbacks
+typedef struct { uint64_t calls, ns; } TimerCell;
+typedef struct TimerThread {
+    struct TimerThread *next;
+    uint32_t id, handle, depth, pad;
+    uint64_t calls[RT_TIMER_CLASSES], ns[RT_TIMER_CLASSES];
+    uint64_t child[TIMER_DEPTH];
+    uint32_t nchild[TIMER_DEPTH];
+    TimerCell cell[MAX_HOSTFN + 1];
+} TimerThread;
+static int g_timer = -1;                    // -1: not read yet (rt_dispatch_init); 0: off; 1: on
+static uint64_t g_overhead, g_floor, g_overflows;   // calibrated: the timer's cost outside a child, and inside a frame
+static uint8_t g_cell_class[MAX_HOSTFN + 1];
+static TimerThread *g_timer_head;           // every thread's table, newest first; never freed
+static uint32_t g_timer_ids;
+static _Thread_local TimerThread *t_timer;
+
+int rt_timer_on(void) { return __atomic_load_n(&g_timer, __ATOMIC_RELAXED) > 0; }
+uint64_t rt_timer_overhead_ns(void) { return __atomic_load_n(&g_overhead, __ATOMIC_RELAXED); }
+uint64_t rt_timer_floor_ns(void) { return __atomic_load_n(&g_floor, __ATOMIC_RELAXED); }
+uint64_t rt_timer_overflows(void) { return __atomic_load_n(&g_overflows, __ATOMIC_RELAXED); }
+
+static TimerThread *timer_table(void) {
+    TimerThread *t = t_timer;
+    if (t) return t;
+    t = calloc(1, sizeof *t);
+    if (!t) rt_fatal("census timer: out of memory for a thread's table (%zu bytes)", sizeof *t);
+    t->id = __atomic_fetch_add(&g_timer_ids, 1, __ATOMIC_RELAXED);
+    t->handle = rt_kernel_current();
+    t->next = __atomic_load_n(&g_timer_head, __ATOMIC_RELAXED);
+    while (!__atomic_compare_exchange_n(&g_timer_head, &t->next, t, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
+    }
+    t_timer = t;
+    return t;
+}
+
+// The way out of the frame at depth d that began at t_in; cell and its class say where its own time goes.
+static void timer_pop(TimerThread *t, uint32_t d, int cell, uint64_t t_in, uint64_t t_out) {
+    uint64_t total = t_out - t_in, nested = t->child[d] + g_overhead * t->nchild[d] + g_floor;
+    uint64_t self = total > nested ? total - nested : 0;
+    t->depth = d;
+    if (d) {
+        t->child[d - 1] += total;
+        t->nchild[d - 1]++;
+    }
+    int cls = g_cell_class[cell];
+    __atomic_fetch_add(&t->cell[cell].calls, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&t->cell[cell].ns, self, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&t->calls[cls], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&t->ns[cls], self, __ATOMIC_RELAXED);
+}
+
+static int timer_push(TimerThread *t, uint32_t *d) {
+    *d = t->depth;
+    if (*d >= TIMER_DEPTH) {
+        __atomic_fetch_add(&g_overflows, 1, __ATOMIC_RELAXED);
+        return 0;
+    }
+    t->child[*d] = 0;
+    t->nchild[*d] = 0;
+    t->depth = *d + 1;
+    return 1;
+}
+
+__attribute__((noinline)) static void timed_call(Cpu *c, GuestFn fn, int slot) {
+    TimerThread *t = timer_table();
+    uint32_t d;
+    if (!timer_push(t, &d)) return fn(c);
+    uint64_t t_in = plat_thread_cpu_ns(NULL);
+    fn(c);
+    timer_pop(t, d, slot, t_in, plat_thread_cpu_ns(NULL));
+}
+
+// A guest callback inside a timed host function: its own time is the guest bucket, its whole time a child of the host
+// function that called it. A call with no timed frame below it (a thread's entry) is not timed.
+__attribute__((noinline)) static void timed_guest(Cpu *c) {
+    TimerThread *t = t_timer;
+    uint32_t d;
+    if (!t || !t->depth || !timer_push(t, &d)) return rt_dispatch(c);
+    uint64_t t_in = plat_thread_cpu_ns(NULL);
+    rt_dispatch(c);
+    timer_pop(t, d, TIMER_GUEST_CELL, t_in, plat_thread_cpu_ns(NULL));
+}
+
+int rt_timer_threads(RtTimerThread *out, int max) {
+    int n = 0;
+    for (TimerThread *t = __atomic_load_n(&g_timer_head, __ATOMIC_ACQUIRE); t; t = t->next, n++) {
+        if (n >= max) continue;
+        out[n] = (RtTimerThread){.id = t->id, .handle = t->handle};
+        for (int k = 0; k < RT_TIMER_CLASSES; k++) {
+            out[n].calls[k] = __atomic_load_n(&t->calls[k], __ATOMIC_RELAXED);
+            out[n].ns[k] = __atomic_load_n(&t->ns[k], __ATOMIC_RELAXED);
+        }
+    }
+    return n;
+}
+
+void rt_timer_slots(uint64_t *calls, uint64_t *ns, int n) {
+    for (int i = 0; i <= n; i++) calls[i] = ns[i] = 0;
+    for (TimerThread *t = __atomic_load_n(&g_timer_head, __ATOMIC_ACQUIRE); t; t = t->next)
+        for (int i = 0; i <= n; i++) {
+            int cell = i == n ? TIMER_GUEST_CELL : i;
+            calls[i] += __atomic_load_n(&t->cell[cell].calls, __ATOMIC_RELAXED);
+            ns[i] += __atomic_load_n(&t->cell[cell].ns, __ATOMIC_RELAXED);
+        }
+}
+
+// What the timer costs a parent per nested call: a frame, then N empty frames nested in it, popped at once, on a table of
+// its own that is dropped. The parent's whole time less its children's, per child, is the cost of a push and a pop that
+// falls outside the child's own reading, which is what timer_pop subtracts for every child.
+#define TIMER_CALIBRATE_N 2000
+static uint64_t timer_calibrate(uint64_t *floor) {
+    TimerThread *t = calloc(1, sizeof *t);
+    if (!t) rt_fatal("census timer: out of memory for the calibration");
+    uint64_t best = UINT64_MAX, least = UINT64_MAX;
+    for (int rep = 0; rep < 5; rep++) {
+        uint32_t d0, d1;
+        t->depth = 0;
+        timer_push(t, &d0);
+        uint64_t in0 = plat_thread_cpu_ns(NULL);
+        for (int k = 0; k < TIMER_CALIBRATE_N; k++) {
+            timer_push(t, &d1);
+            uint64_t in1 = plat_thread_cpu_ns(NULL);
+            timer_pop(t, d1, 0, in1, plat_thread_cpu_ns(NULL));
+        }
+        uint64_t out0 = plat_thread_cpu_ns(NULL), whole = out0 - in0, kids = t->child[d0];
+        uint64_t per = whole > kids ? (whole - kids) / TIMER_CALIBRATE_N : 0;
+        if (per < best) best = per;
+        if (kids / TIMER_CALIBRATE_N < least) least = kids / TIMER_CALIBRATE_N;   // an empty frame's own reading
+        timer_pop(t, d0, 0, in0, out0);
+    }
+    free(t);
+    *floor = least;
+    return best;
+}
+
+// Read at rt_dispatch_init, when every slot is registered: the timer is on only in census mode.
+static void timer_resolve(void) {
+    int want = rt_setting(RT_SET_census_timer) != 0, on = want && rt_census_on();
+    if (want && !on) rt_log("OOT2_CENSUS_TIMER is set without OOT2_CENSUS=1: the timer stays off");
+    if (on) {
+        for (int i = 0; i < nslots; i++) {
+            const char *n = slots[i].name;
+            g_cell_class[i] = !strcmp(n, "nvnQueueSubmitCommands") ? RT_TIMER_SUBMIT
+                              : !strncmp(n, "nvn", 3)             ? RT_TIMER_NVN
+                                                                  : RT_TIMER_OTHER;
+        }
+        g_cell_class[TIMER_GUEST_CELL] = RT_TIMER_GUEST;
+        uint64_t floor;
+        uint64_t overhead = timer_calibrate(&floor);
+        __atomic_store_n(&g_floor, floor, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_overhead, overhead, __ATOMIC_RELAXED);
+        rt_log("OOT2_CENSUS_TIMER=1: every host function call is timed by its thread's CPU time (%llu ns a nested call "
+               "subtracted from its parent, %llu ns from the call itself); this is not a default run",
+               (unsigned long long)g_overhead, (unsigned long long)g_floor);
+    }
+    __atomic_store_n(&g_timer, on, __ATOMIC_RELEASE);
+}
+
+void hostfn_seal(void) {
+    sealed = 1;
+    timer_resolve();
+}
 
 void rt_replaced(Cpu *c, const char *symbol) {
     GuestFn fn = override_of(symbol);
@@ -189,12 +360,14 @@ void hostfn_entry(Cpu *c) {
     }
     GuestFn fn = slots[i].fn;
     if (!fn) rt_unimplemented(c, "import", "%s", slots[i].name);
-    __attribute__((musttail)) return fn(c);
+    if (__builtin_expect(__atomic_load_n(&g_timer, __ATOMIC_RELAXED) <= 0, 1)) __attribute__((musttail)) return fn(c);
+    timed_call(c, fn, i);
 }
 
 void rt_call(Cpu *c, uint64_t addr) {
     c->x[30] = RT_RET_HOST;
     c->pc = addr;
     rt_fpcr_sync(c);
-    rt_dispatch(c);
+    if (__builtin_expect(__atomic_load_n(&g_timer, __ATOMIC_RELAXED) <= 0, 1)) rt_dispatch(c);
+    else timed_guest(c);
 }
