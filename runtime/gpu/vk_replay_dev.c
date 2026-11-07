@@ -105,6 +105,7 @@ static int dev_target(const nvn_tex_rec *t, int storage, uint64_t value, VkrTarg
 static int dev_image(const nvn_tex_rec *t, uint64_t value, VkrImage *out) {
     memset(out, 0, sizeof *out);
     VkbImage *img = vkb_image_get(&t->tex);
+    if (!img) img = vkb_image_demand_current(&t->tex, value);   // a texture the CPU writes: its arena image
     if (!img) return 0;
     vkb_image_use(img, value);
     VkbShape sh;

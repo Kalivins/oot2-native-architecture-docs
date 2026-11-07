@@ -58,6 +58,11 @@ void *vkb_view_make(const tex_t *t, const view_t *v, int type);
 void *vkb_view_demand(const tex_t *t, const view_t *v, int type);
 // The submission being recorded, `value`, reads the view (BindlessOps.view_use): an arena image is made current for it.
 void vkb_view_use(void *view, uint64_t value);
+// The image of a texture for a copy of a submission being recorded (value): vkb_image_get's, else the arena image of a
+// texture the CPU writes, made if need be and current for that submission as vkb_view_use makes it (its prologue
+// uploads what the CPU wrote, so the copy lands on the storage's content). NULL when the format has no image. A copy
+// into an arena image is newer than the guest storage, which keeps the CPU's bytes: the CPU does not see it.
+VkbImage *vkb_image_demand_current(const tex_t *t, uint64_t value);
 void vkb_view_free(void *view);
 VkImageView vkb_view_handle(const void *view);
 void vkb_image_release(const tex_t *t);       // BindlessOps.texture_release: the serial's image may go when nothing holds it

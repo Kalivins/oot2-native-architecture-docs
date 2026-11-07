@@ -44,6 +44,9 @@ int vkt_is_open(void);
 void vkt_upload(const nvn_texdesc *d, uint64_t storage, VkImage image, VkImageAspectFlags aspect, VktState *st,
                 uint64_t value, int astc_decode);
 
+// The bytes between rows of a linear texture's storage: its stride, else the width's blocks rounded as the upload rounds them.
+uint64_t vkt_linear_stride(const nvn_texdesc *d);
+
 // The compute pass alone, on a device, for the checks: the region g's span bytes at src untiled in the given order into
 // dst (pitch bytes a row, at least row_bytes rounded up to 16), through the ring, in an internal submission that is
 // waited for.

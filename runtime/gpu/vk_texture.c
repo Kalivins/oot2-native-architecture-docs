@@ -323,6 +323,12 @@ static uint64_t linear_stride(const nvn_texdesc *d, unsigned bpb, int bw) {
     return d->stride ? d->stride : ((uint64_t)bpb * blocks + align - 1) & ~(align - 1);
 }
 
+uint64_t vkt_linear_stride(const nvn_texdesc *d) {
+    int bw, bh;
+    unsigned bpb = (unsigned)nvn_fmt_bpb(d->format, &bw, &bh);
+    return linear_stride(d, bpb, bw);
+}
+
 void vkt_upload(const nvn_texdesc *d, uint64_t storage, VkImage image, VkImageAspectFlags aspect, VktState *st,
                 uint64_t value, int astc_decode) {
     if (!g.open) rt_fatal("gfx: vulkan: a texture upload before the texture memory is open");

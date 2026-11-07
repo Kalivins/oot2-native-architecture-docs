@@ -14,6 +14,9 @@
 //   upload     textures written into guest memory by the walk of the table (2D, mips, block-compressed, arrays, 3D, cube,
 //              packaged block heights, linear) are made images of the arena by the first submission that binds them and
 //              copy back, level by level and layer by layer, as the texels that were written
+//   texels     the texel calls on textures the CPU can see write and read their guest storage in its own layout: the
+//              arena's upload reads back what they wrote, level by level and layer by layer
+//   copy_into  a copy into a texture the CPU writes that nothing bound yet lands on the storage's content uploaded first
 //   scratch    one texture whose untiled rows are more than the scratch buffer holds (five layers of 2048 x 2048 RGBA8, 80 MiB
 //              against 64 MiB): the scratch is reused inside one prologue and every layer still reads back as written
 //   rewrite    a texture the CPU rewrites is uploaded again: a bind with no write uploads nothing, a write into one page
@@ -315,6 +318,119 @@ static void case_upload(void) {
            (ull)is.arena, (ull)vs.uploads, (ull)vs.regions, (ull)vs.dispatches, (ull)vs.copies, (ull)ms.ring_peak, (ull)ms.arena_used);
     CHECK(is.arena == sizeof specs / sizeof specs[0] && vs.uploads == is.arena);
     finish("upload");
+}
+
+// The texel calls (nvnTextureWriteTexels, ReadTexels) on textures the CPU can see go through their guest storage: every
+// level and layer written as tight rows by vkb_write_texels is what the arena's upload reads back at the first bind, and
+// vkb_read_texels returns the rows that were written.
+static void case_texels(void) {
+    setup(64 * MiB, 1024 * MiB);
+    static const Spec specs[] = {
+        {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 0, 100, 37, 1, 7, 0},
+        {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA_DXT1, 0, 130, 66, 1, 8, 0},
+        {NVN_TEXTURE_TARGET_2D_ARRAY, NVN_FORMAT_RGBA8, 0, 40, 24, 3, 6, 0},
+        {NVN_TEXTURE_TARGET_3D, NVN_FORMAT_RGBA8, 0, 17, 9, 5, 5, 0},
+        {NVN_TEXTURE_TARGET_1D, NVN_FORMAT_RGBA8, 0, 64, 1, 1, 1, 0},
+        {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, NVN_TEXTURE_FLAGS_LINEAR, 100, 50, 1, 1, 0},
+    };
+    uint64_t at = g_heap + 4 * MiB;
+    for (unsigned k = 0; k < sizeof specs / sizeof specs[0]; k++) {
+        uint64_t storage = (at + 0xFFFF) & ~0xFFFFull;
+        tex_t t = tex_of(storage, &specs[k]);
+        at = storage + t.L.size + 0x10000;
+        int linear = nvn_tex_is_linear(&t.d);
+        if (linear) t.d.stride = (uint32_t)((4ull * t.d.width + 31) & ~31ull);   // what write_storage and check_image read
+        unsigned layers = linear ? 1 : t.L.layers, levels = t.d.levels ? t.d.levels : 1;
+        int layered = specs[k].target == NVN_TEXTURE_TARGET_2D_ARRAY;
+        for (unsigned layer = 0; layer < layers; layer++)
+            for (unsigned level = 0; level < levels; level++) {
+                UntileGeom g;
+                const char *why;
+                if (linear) g = (UntileGeom){.width = t.d.width, .height = t.d.height, .depth = 1, .row_bytes = 4 * t.d.width,
+                                             .rows = t.d.height, .slices = 1};
+                else CHECK(untile_geom(&t.d, level, layer, &g, &why));
+                size_t bytes = (size_t)g.row_bytes * g.rows * g.slices;
+                uint8_t *rows = malloc(bytes), *back = malloc(bytes);
+                CHECK(rows && back);
+                for (uint32_t z = 0; z < g.slices; z++)
+                    for (uint32_t y = 0; y < g.rows; y++)
+                        for (uint32_t x = 0; x < g.row_bytes; x++)
+                            rows[((size_t)z * g.rows + y) * g.row_bytes + x] = value(level, layer, x, y, z);
+                view_t v;
+                memset(&v, 0, sizeof v);
+                v.set_levels = 1, v.base_level = (uint8_t)level, v.nlevels = 1;
+                NVNcopyRegion r = {.zoffset = layered ? (int)layer : 0, .width = (int)g.width, .height = (int)g.height,
+                                   .depth = specs[k].target == NVN_TEXTURE_TARGET_3D ? (int)g.depth : 1};
+                uint64_t img = (uint64_t)g.row_bytes * g.rows;
+                vkb_write_texels(&t, &v, &r, rows, g.row_bytes, img);
+                memset(back, 0xEE, bytes);
+                vkb_read_texels(&t, &v, &r, back, g.row_bytes, img);
+                CHECK(!memcmp(rows, back, bytes));
+                free(rows), free(back);
+            }
+        dpool_ref pool = k_pool;
+        bindless_texture_register(&pool, (int)k + 1, &t, NULL);
+        bind_once(k + 1);
+        char what[64];
+        snprintf(what, sizeof what, "texels spec %u (NVN format %#x)", k, specs[k].format);
+        check_image(&t, storage, what);
+        printf("texels spec %u: target %d format %#x: written through the texel calls, read back by them and by the arena "
+               "image\n", k, specs[k].target, specs[k].format);
+    }
+    VkbImageStats is;
+    vkb_image_stats(&is);
+    printf("texel writes %llu, reads %llu, arena images %llu\n", (ull)is.texel_writes, (ull)is.texel_reads, (ull)is.arena);
+    CHECK(is.arena == sizeof specs / sizeof specs[0]);
+    finish("texels");
+}
+
+// A copy into a texture the CPU writes that no submission bound yet (the title's first submission does this): the copy's
+// own submission demands the arena image and makes it current (vkb_image_demand_current), so its prologue uploads the
+// storage first and the copy lands on top: inside the copied rectangle the copy's bytes, outside it the storage's.
+static void case_copy_into(void) {
+    setup(64 * MiB, 1024 * MiB);
+    Spec s = {NVN_TEXTURE_TARGET_2D, NVN_FORMAT_RGBA8, 0, 64, 48, 1, 1, 0};
+    uint64_t storage = (g_heap + 4 * MiB + 0xFFFF) & ~0xFFFFull;
+    tex_t t = tex_of(storage, &s);
+    write_storage(&t, storage);
+    const uint32_t x0 = 8, y0 = 4, w = 16, h = 8;
+    DrawBuf src = draw_buffer(4ull * w * h, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, NULL, 0);
+    memset(src.map, 0xC3, 4ull * w * h);
+    uint64_t v = gpu_vk_begin(GPU_VK_INTERNAL);
+    VkbImage *img = vkb_image_demand_current(&t, v);
+    CHECK(img);
+    VkCommandBuffer cb = gpu_vk_cmd();
+    VkMemoryBarrier2 before = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                               .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &before};
+    vkCmdPipelineBarrier2(cb, &di);
+    VkBufferImageCopy c = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageOffset = {(int32_t)x0, (int32_t)y0, 0},
+                           .imageExtent = {w, h, 1}};
+    vkCmdCopyBufferToImage(cb, src.buf, vkb_image_handle(img), VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    gpu_vk_end(NULL, 0);
+    CHECK(gpu_sync_wait(v, 30ull * 1000 * 1000 * 1000));
+    UntileGeom g;
+    const char *why;
+    CHECK(untile_geom(&t.d, 0, 0, &g, &why));
+    uint8_t *got = readback(&t, 0, 0, &g);
+    uint64_t inside = 0, outside = 0;
+    for (uint32_t y = 0; y < g.rows; y++)
+        for (uint32_t x = 0; x < g.row_bytes; x++) {
+            int in = y >= y0 && y < y0 + h && x / 4 >= x0 && x / 4 < x0 + w;
+            uint8_t want = in ? 0xC3 : value(0, 0, x, y, 0);
+            if (got[(size_t)y * g.row_bytes + x] != want) {
+                fprintf(stderr, "copy_into: row %u byte %u: %02x, want %02x\n", y, x, got[(size_t)y * g.row_bytes + x], want);
+                exit(1);
+            }
+            inside += in, outside += !in;
+        }
+    printf("copy into an arena image no submission bound: %llu bytes copied, %llu bytes from the storage\n", (ull)inside,
+           (ull)outside);
+    free(got);
+    vkDestroyBuffer(gpu_vk.device, src.buf, NULL);
+    vkFreeMemory(gpu_vk.device, src.mem, NULL);
+    finish("copy_into");
 }
 
 // The regions of t whose bytes lie over any page of [lo, hi): what a write there makes stale.
@@ -839,6 +955,8 @@ int main(int argc, char **argv) {
     if (!strcmp(argv[1], "untile")) case_untile();
     else if (!strcmp(argv[1], "anchor")) case_anchor();
     else if (!strcmp(argv[1], "upload")) case_upload();
+    else if (!strcmp(argv[1], "texels")) case_texels();
+    else if (!strcmp(argv[1], "copy_into")) case_copy_into();
     else if (!strcmp(argv[1], "scratch")) case_scratch();
     else if (!strcmp(argv[1], "rewrite")) case_rewrite();
     else if (!strcmp(argv[1], "caps")) caps(0);

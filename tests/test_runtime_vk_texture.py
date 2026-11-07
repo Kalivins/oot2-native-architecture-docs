@@ -100,6 +100,15 @@ class DeviceTest(unittest.TestCase):
         self.assertEqual(len(re.findall(r"^spec \d+: .*every level and layer reads back as written$", done.stdout, re.M)), 12)
         self.assertRegex(done.stdout, r"arena images 12, uploads 12,")
 
+    def test_the_texel_calls_on_textures_the_cpu_can_see_go_through_their_storage(self) -> None:
+        done = self.passing("texels")
+        self.assertEqual(len(re.findall(r"^texels spec \d+: .*read back by them and by the arena image$", done.stdout, re.M)), 6)
+        self.assertRegex(done.stdout, r"texel writes \d+, reads \d+, arena images 6")
+
+    def test_a_copy_into_a_texture_the_cpu_writes_lands_on_its_uploaded_storage(self) -> None:
+        done = self.passing("copy_into")
+        self.assertIn("copy into an arena image no submission bound: 512 bytes copied, 11776 bytes from the storage", done.stdout)
+
     def test_submissions_beyond_the_ring_wait_for_the_earlier_ones(self) -> None:
         done = self.passing("ring")
         m = re.search(r"6 submissions of 5 textures of 64 MiB: ring peak (\d+) MiB of 384, ring waits (\d+), (\d+) MiB read from storage", done.stdout)

@@ -16,6 +16,7 @@
 #include "oot2/nvn_tex.h"
 #include "oot2/runtime.h"
 #include "oot2/texmem.h"
+#include "oot2/untile.h"
 #include "oot2/vk_format.h"
 #include "oot2/vk_image.h"
 #include "oot2/vk_texture.h"
@@ -611,14 +612,21 @@ void *vkb_view_demand(const tex_t *t, const view_t *v, int type) { return view_m
 // A submission that is being recorded reads this view: the image of a texture the CPU writes is made current for it
 // (queried and uploaded again if the CPU rewrote it, in the submission's prologue), once a submission however many slots
 // of it bind the image.
-void vkb_view_use(void *view, uint64_t value) {
-    VkbImage *img = ((Vw *)view)->img;
+static void make_current(VkbImage *img, uint64_t value) {
     if (!img->arena) return;
     vkb_image_use(img, value);
     uint64_t seen = __atomic_load_n(&img->up.current_for, __ATOMIC_ACQUIRE);
     if (seen == value) return;
     __atomic_store_n(&img->up.current_for, value, __ATOMIC_RELEASE);
     vkt_upload(&img->desc, img->key.storage, img->image, img->aspect, &img->up, value, img->decoded);
+}
+
+void vkb_view_use(void *view, uint64_t value) { make_current(((Vw *)view)->img, value); }
+
+VkbImage *vkb_image_demand_current(const tex_t *t, uint64_t value) {
+    VkbImage *img = vkb_image_demand(t);
+    if (img) make_current(img, value);
+    return img;
 }
 
 VkImageView vkb_view_handle(const void *view) { return ((const Vw *)view)->view; }
@@ -719,7 +727,67 @@ static void xfer_run(const Xfer *x, int to_image) {
     gpu_sync_wait(value, UINT64_MAX);
 }
 
+// A texture whose storage the CPU can see keeps its texels in guest memory, which the arena's upload reads at the
+// next bind (the page generations show the write): the texel calls read and write that storage in its own layout, block
+// by block (a block is at most 16 bytes, so it never straddles a 16-byte piece of a GOB). 1 when the texture is one of
+// those; 0 leaves the copy to the image. A shape the layout cannot place stops by name.
+static int texels_guest(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *buf, uint64_t row,
+                        uint64_t img, int write) {
+    uint64_t storage = (uint64_t)(uintptr_t)t->mem;
+    if (gfx_gpu_only(storage)) return 0;
+    const nvn_texdesc *d = &t->d;
+    uint32_t level = v && v->set_levels ? v->base_level : 0, layer = v && v->set_layers ? v->min_layer : 0;
+    int layered = d->target == NVN_TEXTURE_TARGET_1D_ARRAY || d->target == NVN_TEXTURE_TARGET_2D_ARRAY ||
+                  d->target == NVN_TEXTURE_TARGET_CUBEMAP || d->target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
+    uint32_t depth = r->depth > 0 ? (uint32_t)r->depth : 1, rows = r->height > 0 ? (uint32_t)r->height : 1;
+    int bw, bh;
+    uint32_t bpb = (uint32_t)nvn_fmt_bpb(d->format, &bw, &bh);
+    if (!bpb || r->xoffset % bw || r->yoffset % bh)
+        rt_fatal("gfx: vulkan: a texel copy over the texture at %#llx (NVN format %#x) at %d,%d, not on its %dx%d blocks",
+                 (ull)storage, d->format, r->xoffset, r->yoffset, bw, bh);
+    uint32_t bx0 = (uint32_t)r->xoffset / (uint32_t)bw, by0 = (uint32_t)r->yoffset / (uint32_t)bh;
+    uint32_t nbx = ((uint32_t)r->width + (uint32_t)bw - 1) / (uint32_t)bw, nby = (rows + (uint32_t)bh - 1) / (uint32_t)bh;
+    for (uint32_t k = 0; k < depth; k++) {
+        uint8_t *plane = buf + (uint64_t)k * img;
+        if (nvn_tex_is_linear(d)) {   // rows as they are, d->stride apart: one level, one layer
+            if (level || layer || k || r->zoffset)
+                rt_fatal("gfx: vulkan: a texel copy over the linear texture at %#llx past its one level and layer",
+                         (ull)storage);
+            for (uint32_t y = 0; y < nby; y++) {
+                uint8_t *g = (uint8_t *)(uintptr_t)(storage + (uint64_t)(by0 + y) * vkt_linear_stride(d) +
+                                                    (uint64_t)bx0 * bpb);
+                if (write) memcpy(g, plane + y * row, (size_t)nbx * bpb);
+                else memcpy(plane + y * row, g, (size_t)nbx * bpb);
+            }
+            continue;
+        }
+        UntileGeom ug;
+        const char *why;
+        uint32_t lay = layered ? layer + (uint32_t)r->zoffset + k : layer;
+        uint32_t z = d->target == NVN_TEXTURE_TARGET_3D ? (uint32_t)r->zoffset + k : 0;
+        if (!untile_geom(d, level, lay, &ug, &why))
+            rt_fatal("gfx: vulkan: a texel copy over the texture at %#llx (NVN format %#x, target %d, level %u, layer %u): "
+                     "%s", (ull)storage, d->format, d->target, level, lay, why);
+        if (bx0 + nbx > (ug.row_bytes / ug.bpb) || by0 + nby > ug.rows || z >= ug.slices)
+            rt_fatal("gfx: vulkan: a texel copy region past level %u of the texture at %#llx", level, (ull)storage);
+        for (uint32_t y = 0; y < nby; y++)
+            for (uint32_t x = 0; x < nbx; x++) {
+                uint8_t *g = (uint8_t *)(uintptr_t)(storage + ug.base +
+                                                    untile_offset(&ug, UNTILE_GOB_ORDER, (bx0 + x) * bpb, by0 + y, z));
+                uint8_t *h = plane + y * row + (uint64_t)x * bpb;
+                if (write) memcpy(g, h, bpb);
+                else memcpy(h, g, bpb);
+            }
+    }
+    plat_mutex_lock(&g_mu);
+    if (write) g_st.texel_writes++;
+    else g_st.texel_reads++;
+    plat_mutex_unlock(&g_mu);
+    return 1;
+}
+
 void vkb_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row, uint64_t img) {
+    if (texels_guest(t, v, r, dst, row, img, 0)) return;
     plat_mutex_lock(&g_xfer_mu);
     Xfer x = xfer_of(t, v, r, row, img);
     stage_grow(x.bytes);
@@ -733,6 +801,7 @@ void vkb_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, ui
 
 void vkb_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, uint64_t row,
                       uint64_t img) {
+    if (texels_guest(t, v, r, (uint8_t *)src, row, img, 1)) return;
     plat_mutex_lock(&g_xfer_mu);
     Xfer x = xfer_of(t, v, r, row, img);
     stage_grow(x.bytes);
