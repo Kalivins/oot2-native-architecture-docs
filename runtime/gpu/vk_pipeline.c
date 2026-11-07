@@ -9,7 +9,7 @@
 //
 // Everything made is kept in one table under one lock, by a key text; a get that finds its object returns it, one that
 // finds it being made waits for the thread making it, and one that finds nothing makes it with the lock released, so
-// builds run in parallel. Objects are not evicted: what stays resident is what callers ask for (research 20, answer 5:
+// builds run in parallel. Objects are not evicted: what stays resident is what callers ask for (the pipeline cost study:
 // 20,000 resident pipelines held 7.6 GB), and vkp_release lets a stage's objects go.
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +43,7 @@
 #define BUCKETS 8192
 #define MAX_PADS 16
 // Libraries are made able to be linked with link-time optimisation, as S3 measured them (D12 keeps the fast link; an
-// optimised link would need the flag, and its absence would change the figures research 20 gives for warm builds).
+// optimised link would need the flag, and its absence would change the figures the pipeline cost study gives for warm builds).
 #define LIB_FLAGS (VK_PIPELINE_CREATE_LIBRARY_BIT_KHR | VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT)
 
 #define PART_VERTEX_INPUT VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT

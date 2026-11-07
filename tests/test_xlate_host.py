@@ -303,7 +303,7 @@ class ServeProtocolTest(Harness):
 
 
 class AmpereHandlersTest(Harness):
-    """Handlers the vendored decoder lacked at nxnative 865cc35 (ticket 22, items 1 to 3)."""
+    """Handlers the vendored decoder lacked at nxnative 865cc35 (the translator defect fixes)."""
 
     def program(self, name: str, *instructions: bytes) -> Path:
         path = self.dir / f"{name}.bin"
@@ -479,7 +479,7 @@ class TranslateTest(Harness):
 
 
 class UniLayoutTest(Harness):
-    """The layout `uni` (ticket 23): fixed slots per stage, textures through push constant slots, schema 2."""
+    """The layout `uni` (the stage bindings work): fixed slots per stage, textures through push constant slots, schema 2."""
 
     def vertex_job(self, key: str, *instructions: bytes) -> dict:
         header = bytearray(0x80)
@@ -620,8 +620,8 @@ class RejectedJobTest(Harness):
 
 
 class MeshOutputMapTest(Harness):
-    """The output map of a task or mesh job (ticket 44): validated, kept on the job and echoed into res.json. The mesh
-    emission (ticket 71) declares exactly these components; test_xlate_mesh checks that."""
+    """The output map of a task or mesh job (the mesh output maps): validated, kept on the job and echoed into res.json. The mesh
+    emission (the mesh emission) declares exactly these components; test_xlate_mesh checks that."""
 
     def stage_job(self, key: str, stage: str, **extra) -> dict:
         job = {"key": key, "stage": stage, "arch": "sm86", "code": str(self.exit_bin), "c1": "", **mesh_fields(stage)}
@@ -749,7 +749,7 @@ class CapabilityPostPassTest(Harness):
         self.check("up", shuffle_module("GroupNonUniformShuffleUp"), ["GroupNonUniformShuffleRelative"], invalid_before=True)
         self.check("down", shuffle_module("GroupNonUniformShuffleDown"), ["GroupNonUniformShuffleRelative"], invalid_before=True)
 
-    # Storage access (ticket 22, item 8): NonWritable where nothing writes, NonReadable where nothing reads.
+    # Storage access (the translator defect fixes): NonWritable where nothing writes, NonReadable where nothing reads.
     def test_a_read_only_storage_buffer_is_non_writable(self):
         self.check("sb_load", buffer_module("load"), ["NonWritable@0.32"])
 

@@ -128,7 +128,7 @@ NVN_API(nvnTextureBuilderGetStorageAlignment) {
 }
 // NVNstorageClass: the page kind a virtual pool maps for the texture (NVNmappingRequest.storageClass), which this
 // runtime's pools do not distinguish. oot-pc-recomp answers 1, 0 for a buffer texture; nxnative answers 0; neither
-// value is the console's (research 34).
+// value is the console's (the texture and sampler study).
 static uint64_t storage_class(const nvn_texdesc *d) { return d->target == NVN_TEXTURE_TARGET_BUFFER ? 0 : 1; }
 NVN_API(nvnTextureBuilderGetStorageClass) { ret_x(c, storage_class(&CTB(c)->d)); }
 // The size of a depth texture's ZCull save area, which the game allocates from its own pools. The console's formula

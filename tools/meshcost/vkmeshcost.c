@@ -21,7 +21,7 @@
 //
 // Params: `phases pre,frag,link` (the order the phases run, default pre; `link` needs `pre` and `frag` in the same run
 // because it links the libraries they built); `pin32 1|0` requires subgroup size 32 with full subgroups on the task and
-// mesh stages (default 1, as research 13 recommendation 5 asks); `format NAME` the colour format of the output libraries
+// mesh stages (default 1, as the mesh shader study asks); `format NAME` the colour format of the output libraries
 // (rgba8, rgba16f, r11g11b10f; default rgba16f); `pipeline_cache PATH` the application's VkPipelineCache, read when the
 // file exists and written at the end otherwise; `heartbeat_s N` a line on stderr every N seconds with the builds in
 // flight (default 30, 0 off); `counter nopush` leaves the push constants out of the layout, which validation must catch.

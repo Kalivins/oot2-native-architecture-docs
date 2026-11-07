@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Contract tests of the end marker of a module's lifted code (ticket 92), driven by tests/test_runtime_endmark.py:
+// Contract tests of the end marker of a module's lifted code (the lifted-code end marker), driven by tests/test_runtime_endmark.py:
 // `endmark_test <case>`. A passing case prints "ok <case>"; a refusal case must end in one named fatal.
 //
 // Two synthetic modules stand for lifted code. Their bytes are laid out by hand, in this order, with no padding, so the

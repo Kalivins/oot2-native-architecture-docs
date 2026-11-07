@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Contract tests of the configuration menu (runtime/ui, oot2/ui.h; research 93 and 106; ticket 126).
+"""Contract tests of the configuration menu (runtime/ui, oot2/ui.h; the menu survey and answers; the menu's first rows).
 
 Builds tests/runtime/menu_test.c with runtime/core and runtime/nvn (the real settings store) and the C++ menu, with the
 fetched Dear ImGui when the folder exists (tools/fetch_imgui.py), and runs each case in its own process over a settings
 file written here: synthetic text, nothing of the game. The menu draws with no window, no device and no back end, which
 is the headless frame these tests read.
 
-- the rows: every row research 106 names, each with its group, its state (live, restart, held, or greyed) and, when
+- the rows: every row the menu answers names, each with its group, its state (live, restart, held, or greyed) and, when
   greyed, its reason; every key of the store has a row; the greyed rows have no key yet
 - the frame (needs Dear ImGui): a closed menu builds nothing, an open one draws every row, and the overlay and the
   counters list draw on their own
@@ -54,7 +54,7 @@ EXE = ".exe" if os.name == "nt" else ""
 TIMEOUT = 120
 GROUPS = ["Graphics", "Frame rate and pacing", "Display", "Audio", "Input", "Enhancements", "Debug"]
 
-# research 106's rows: label -> (group, state, key). A greyed row has no key until the ticket that consumes it
+# the menu answers' rows: label -> (group, state, key). A greyed row has no key until the ticket that consumes it
 # registers one (the window's, the movie hold's), and then turns live by itself.
 ROWS = {
     "Graphics back end": ("Graphics", "restart", "gfx"),

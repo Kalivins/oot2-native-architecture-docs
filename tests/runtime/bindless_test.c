@@ -2,7 +2,7 @@
 // Copyright (C) 2026 The oot2-native contributors
 //
 // Tests of the format table (oot2/vk_format.h) and the bindless tables (oot2/bindless.h, oot2/vk_bindless.h,
-// oot2/vk_image.h, ticket 61), driven by tests/test_runtime_bindless.py: `bindless_test <case> [files]`, one case per
+// oot2/vk_image.h, the bindless tables), driven by tests/test_runtime_bindless.py: `bindless_test <case> [files]`, one case per
 // process.
 //
 // Without a device (continuous integration runs them):

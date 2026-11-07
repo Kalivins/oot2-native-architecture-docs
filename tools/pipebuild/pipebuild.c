@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// pipebuild: the program that prepare's pipeline step (tools/prepare/pipelines.py, ticket 81) runs to build pipelines.
+// pipebuild: the program that prepare's pipeline step (tools/prepare/pipelines.py, the pipeline step) runs to build pipelines.
 // It is linked with runtime/core, runtime/nvn and runtime/gpu and calls the very functions the Vulkan back end calls at
 // launch (oot2/vk_pipeline.h), so a pipeline built here is served from the cache to the game later, whatever the
 // compiler flags of the two programs.

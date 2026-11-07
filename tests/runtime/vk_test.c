@@ -15,7 +15,7 @@
 //   loss_submit      vkQueueSubmit2 answers VK_ERROR_DEVICE_LOST: the report is written to the folder, the run stops
 //   loss_completion  the completion thread's vkWaitSemaphores answers it: the same, from that thread
 //   refuse           OOT2_VK_DEVICE names no device: the start stops by name
-//   backing, backing_fini, backing_flat   the backing map's imports and extents (ticket 57)
+//   backing, backing_fini, backing_flat   the backing map's imports and extents (the backing map)
 //   mirror_upload    a CPU write into a mirrored range is read by the GPU in the next submission, three times, and
 //                    only the written page is copied
 //   mirror_writeback a GPU write into a mirrored range reaches guest memory after its fence and cpu_synced, never
@@ -393,7 +393,7 @@ static void case_backing(void) {
     touch_range(g_heap + 64 * MiB, 2 * MiB);
     touch_range(boundary - 1 * MiB, 2 * MiB);
 
-    // The premise of the commit query (research 14 F12, research 48 B1 and B7), on this device: an import over a page
+    // The premise of the commit query (the raw-address study, the write-watch study), on this device: an import over a page
     // that is not committed is refused, and a 4 KiB import of a committed page succeeds after it.
     BackingMem m;
     CHECK(!gpu_vk_backing_ops.import(g_heap + 16 * MiB, 2 * MiB, &m));
@@ -521,7 +521,7 @@ static void case_backing_flat(void) {
     static pool_t p[POOLS];
     guest_heap(512 * MiB);
     gpu_vk_open();
-    backing_set_mirror_hook(NULL);   // imports and extents, as ticket 57 measured them
+    backing_set_mirror_hook(NULL);   // imports and extents, as the backing map measured them
     touch_range(g_heap, HALF * 64 * KiB);
     uint64_t vram0 = 0, priv0 = 0;
     for (int round = 0; round < ROUNDS; round++) {

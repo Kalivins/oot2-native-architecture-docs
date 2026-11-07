@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""The pipelines step of `oot2 prepare` and its scheduling (tools/prepare/pipelines.py, pipesched.py; ticket 81), with
+"""The pipelines step of `oot2 prepare` and its scheduling (tools/prepare/pipelines.py, pipesched.py; the pipeline step), with
 no GPU: the builder is a stand-in script that speaks the real builder's line protocol (tools/pipebuild/pipebuild.c),
 builds nothing and records what it was asked in a log the tests read.
 
@@ -35,7 +35,7 @@ from prepare import check, pipelines, pipesched  # noqa: E402
 from prepare.pipelines import Pipelines  # noqa: E402
 from prepare.runner import Context, PrepareError, Reporter, Step, run_steps  # noqa: E402
 
-TRANSLATOR = hashlib.sha256(b"synthetic translator of ticket 81").hexdigest()
+TRANSLATOR = hashlib.sha256(b"synthetic translator of the pipeline step").hexdigest()
 
 STANDIN = r'''
 import json, os, sys, time
@@ -544,7 +544,7 @@ class StepTest(unittest.TestCase):
 
 class RecycleTest(unittest.TestCase):
     """The driver keeps the memory of its largest build for the life of the process; the governor counts only the items
-    running. A builder that holds a gigabyte is saved and replaced (ticket 81's sample: six workers held 4.8 GB and the
+    running. A builder that holds a gigabyte is saved and replaced (the pipeline step's sample: six workers held 4.8 GB and the
     free memory fell to 0.25 GB)."""
 
     def run_with_working_set(self, size: int) -> tuple[Env, Context]:
@@ -568,7 +568,7 @@ class RecycleTest(unittest.TestCase):
         self.assertEqual(ctx.state["steps"]["pipelines"]["recycled"], 0)
 
     def test_the_model_covers_every_build_measured_on_the_reference_pc(self) -> None:
-        # (module bytes, working set of the worker that built it alone), ticket 81's validation sample: the builds that
+        # (module bytes, working set of the worker that built it alone), the pipeline step's validation sample: the builds that
         # take seconds, where the working set is the build's own (a small build shows what its worker kept before it)
         measured = [(816 * 1024, 351 << 20), (1045 * 1024, 715 << 20), (1354 * 1024, 689 << 20),
                     (2648 * 1024, 988 << 20), (11620 * 1024, 2911 << 20), (597 * 1024, 427 << 20)]

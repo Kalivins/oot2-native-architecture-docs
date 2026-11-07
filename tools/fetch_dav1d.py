@@ -56,7 +56,7 @@ class Archive:
 DAV1D = Archive(f"https://downloads.videolan.org/pub/videolan/dav1d/{VERSION}/dav1d-{VERSION}.tar.xz",
                 "686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5")
 # NASM's release build for Windows. nasm.us publishes no checksum file: this digest is of the file downloaded on
-# 2026-11-07 from the address below (progress notes of ticket 98), and every later download is held to it.
+# 2026-11-07 from the address below (progress notes of the movie player), and every later download is held to it.
 NASM_VERSION = "2.16.03"
 NASM_WIN = Archive(f"https://www.nasm.us/pub/nasm/releasebuilds/{NASM_VERSION}/win64/nasm-{NASM_VERSION}-win64.zip",
                    "3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6")

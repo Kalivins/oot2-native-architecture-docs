@@ -11,8 +11,8 @@
 //   1. the settings (oot2/settings.h): --set KEY=VALUE (and --gfx NAME, the setting gfx), the OOT2_ variables, then the
 //      file: --config PATH, else the OOT2_CONFIG variable, else oot2.ini in the game folder. They are read before the
 //      first log line, because a log line reads census mode, which is a setting. An unknown key, or a value its key
-//      does not take, stops the start with exit code 2. Then the system timer resolution (rt_timer_hold_start, ticket
-//      116): 0.5 ms held until the process ends, unless timer_resolution is 0, before any thread starts. Then the
+//      does not take, stops the start with exit code 2. Then the system timer resolution (rt_timer_hold_start, the timer
+//      resolution hold): 0.5 ms held until the process ends, unless timer_resolution is 0, before any thread starts. Then the
 //      graphics back end the setting gfx names (null by default), installed by gfx_select (runtime/gpu/gpu.c) long
 //      before rt_dispatch_init, with the name of the layer that chose it; the Vulkan back end opens its device there, or
 //      stops the start by name (its settings:

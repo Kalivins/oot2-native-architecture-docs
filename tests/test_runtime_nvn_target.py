@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Contract tests of the fixed frame rate (ticket 111, architecture D22, research 94 F11): the
+"""Contract tests of the fixed frame rate (the fixed frame rate gate, architecture D22, the frame-rate study): the
 settings store's frame_rate_target N puts the acquire gate on a second schedule of N slots a
 second, anchored on the clock's origin, and the game's own interval is ignored while it is set.
 
@@ -148,7 +148,7 @@ class TargetTest(unittest.TestCase):
         before = self.digests(self.hour(40, 1, 1, PRESENT_WAIT, TEN_MINUTES, 40))
         self.assertEqual(after, before)
 
-    # ---- identity with ticket 88's gate where the target is a whole number of ticks
+    # ---- identity with the acquire gate where the target is a whole number of ticks
     def test_n60_is_ticket_88s_behaviour_tick_for_tick_at_interval_1(self) -> None:
         target = self.digests(self.hour(60, 1, 1, WAIT_PRESENT, TEN_MINUTES, 60))
         none = self.digests(self.hour(60, 1, 1, WAIT_PRESENT, TEN_MINUTES, None))

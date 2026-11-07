@@ -716,7 +716,7 @@ static void case_report_no_pool(void) {
     report_once(q, cb, TIMESTAMP, 0x1000);
 }
 
-// ---------- cases census_*: the per-present counters and census mode (ticket 38)
+// ---------- cases census_*: the per-present counters and census mode (the null back end boot)
 // n presents on a window of two textures at interval 0 (no wait on the clock), one empty recording each.
 static void presents(int n) {
     setup(0, NULL);
@@ -763,7 +763,7 @@ static void case_census_mode(void) {
     nvn_census_stats(print_stat, NULL);
     printf("ok census_mode\n");
 }
-// ---------- cases title_*: the title line of the movie's frame (ticket 98)
+// ---------- cases title_*: the title line of the movie's frame (the movie player)
 // n presents like presents(), but each frame's recording holds the calls shape() asks for: SetRenderTargets, DispatchCompute and
 // DrawElementsInstanced (a window's counts a present are the front end's own calls over its presents).
 typedef void (*Shape)(int f, int *rt, int *dp, int *dr);

@@ -8,7 +8,7 @@
 // through their synthetic addresses with the guest's arguments (acquire, present, SetPresentInterval), as generated code
 // does, and records the tick each acquire returned at and the record each present left. No game code, no dump.
 //
-// The clock is driven (rt_vsync_drive, ticket 55) and nothing binds a vsync event, so the clock thread never starts: the
+// The clock is driven (rt_vsync_drive, the vsync clock) and nothing binds a vsync event, so the clock thread never starts: the
 // gate reads rt_vsync_tick() and waits through rt_vsync_wait_tick, which follows the driver's time. A driver thread (a
 // plain host thread) moves the time. The hour cases move it tick by tick, each step only once the game has done what
 // the tick allows, so an hour runs in seconds with no wall-clock wait. The script cases check the model of oot2/nvn_pace.h

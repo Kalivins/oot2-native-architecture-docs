@@ -442,7 +442,7 @@ static void case_commitrun(void) {
 }
 
 // Watched reservations in pieces (Windows; plat.h, PLAT_PIECE): the alias region is made of allocations that start at
-// multiples of PLAT_PIECE, and host I/O, the write watch (with a buffer too small for both pages, research 48 B5) and
+// multiples of PLAT_PIECE, and host I/O, the write watch (with a buffer too small for both pages, the write-watch study) and
 // UnmapPhysicalMemory work across a piece boundary as across any other page. Elsewhere the case says it skipped.
 static void case_pieces(void) {
 #ifndef _WIN32

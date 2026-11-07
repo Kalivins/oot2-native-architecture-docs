@@ -14,7 +14,7 @@
 //     S2  offset = x5 << 8 | y2 << 7 | x4 << 6 | y1 << 5 | y0 << 4 | x & 15      (x, y: byte x and row in the GOB)
 //
 // The rule is on the byte offset, so it holds whatever the element size: a 16-byte piece holds a whole number of
-// texels or of blocks, and moves as one. Measured on the game's own textures (research 65): with the X1's order the
+// texels or of blocks, and moves as one. Measured on the game's own textures (the texture upload study): with the X1's order the
 // edges of 2-, 4- and 8-byte textures come out combed, with the Switch 2's they are clean, and Lichii's untiling shader
 // agrees with the Switch 2's on 2-, 4-, 8- and 16-byte formats; a 1-byte format follows from the same byte rule (the game
 // ships no 1-byte texture).

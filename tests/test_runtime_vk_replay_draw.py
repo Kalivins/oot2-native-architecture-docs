@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""The Vulkan back end's replay on the desktop (ticket 63): the draws of two spikes, recorded through the NVN2 entry
+"""The Vulkan back end's replay on the desktop (the Vulkan replay): the draws of two spikes, recorded through the NVN2 entry
 points by tests/runtime/vk_replay_draw.c and replayed on the device, against the CPU's evaluation of the same programs.
 
 Never in continuous integration: the programs, their keys, the banks and the textures are the game's and stay in the work
@@ -12,8 +12,8 @@ folder, which this test writes under OOT2_T63_WORK and nowhere else. It needs
                      the split's scanner, because the split keeps neither the control section (the job key hashes it) nor
                      the whole code area
   OOT2_T63_WORK      the folder this test writes: the programs read from the archives, the draw files, the images
-  OOT2_T63_S2_SPEC   spike S2's spec.json (research 19)
-  OOT2_T63_T23_SPEC  ticket 23's spec23.json (research 23); its spv_dir holds the schema 2 descriptions of both pairs
+  OOT2_T63_S2_SPEC   spike S2's spec.json (the first draw study)
+  OOT2_T63_T23_SPEC  the stage bindings work's spec23.json (the stage bindings study); its spv_dir holds the schema 2 descriptions of both pairs
 
 and nvdisasm (CUDA 11.8 or later, on PATH or under CUDA_PATH) for the reference. The checks that need a device skip without
 a usable one, unless OOT2_REQUIRE_GPU is set; the rest of the module (its helpers on synthetic data) runs everywhere.
@@ -21,16 +21,16 @@ a usable one, unless OOT2_REQUIRE_GPU is set; the rest of the module (its helper
 The checks, each run under core validation (OOT2_VK_VALIDATION=on) and under synchronization validation (sync), which must
 report nothing:
 
-- S2's three scenarios and ticket 23's two: the replayed image matches tools/firstdraw's own CPU evaluation on every
+- S2's three scenarios and the stage bindings work's two: the replayed image matches tools/firstdraw's own CPU evaluation on every
   compared pixel, at its tolerance and with its rule for edge pixels (first_draw.compare). The replay flips Y through a
   negative viewport height (its contract: clip y = +1 lands on memory row 0, and a pixel program that reads its window
   position reads the memory row), so the reference runs in that space: the clip y its vertex program writes is negated
   before the triangles are set up (render_in_replay_space). That is the Vulkan-convention image with its rows reversed
-  for a pair that never reads its window y, and the only right one for a pair that does (ticket 23's pixel program takes
+  for a pair that never reads its window y, and the only right one for a pair that does (the stage bindings work's pixel program takes
   an inverse screen size from a bank), which reversing the rows of S2's image would get wrong.
 - Counter-runs, each of which must fail the comparison: the uniform snapshot off (--no-snapshot) while the program writes
   the uniform buffers right after the submission (--rewrite-uniform; host imports, so that the snapshot is what keeps
-  the frame whole); S2's two (research 19 answer 4): texture coordinates swapped, perspective and screen-linear
+  the frame whole); S2's two (the first draw study): texture coordinates swapped, perspective and screen-linear
   interpolation swapped, in the reference; the origin flip removed (--no-flip).
 - The viewport test: S2's pair drawn with its vertices moved into the upper half of clip space, under NVN's defaults
   (NEAR_IS_MINUS_W, LOWER_LEFT) and a depth range of 0.25 to 0.75 with a depth target. The primitive must land in the
@@ -637,7 +637,7 @@ class DesktopTestCase(unittest.TestCase):
 
 
 class ReferenceTest(DesktopTestCase):
-    """The CPU side alone (no device): research 19's reference of S2's base scenario."""
+    """The CPU side alone (no device): the first draw study's reference of S2's base scenario."""
 
     def test_the_reference_of_s2s_base_scenario_is_research_19s(self) -> None:
         exp = reference_image(self.case(self.s2, "base"))
@@ -771,7 +771,7 @@ class T23Test(DeviceTestCase):
 
 
 class MissTest(DeviceTestCase):
-    """The first draw of a pair nobody built (ticket 64): the replay's miss path drains, builds and resumes."""
+    """The first draw of a pair nobody built (the pipeline miss path): the replay's miss path drains, builds and resumes."""
 
     def numbers(self, got: Replay) -> tuple[tuple[int, ...], tuple[int, ...]]:
         loss, miss = LOSS.search(got.done.stdout), MISS.search(got.done.stdout)

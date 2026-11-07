@@ -29,7 +29,7 @@
 // number and the tick it is due at: the tick in progress when the game presented (or, when it presented before its wait
 // on the acquire sync, the gate tick of that acquire, which can be a tick still to come), on the clock of oot2/vsync.h
 // (rt_vsync_due_ns turns it into host time), so the back end may show the frame at the first refresh it can from then
-// on and not before. With a fixed frame rate (ticket 111) the due instant is a slot of that rate's schedule and rarely a
+// on and not before. With a fixed frame rate (the fixed frame rate gate) the due instant is a slot of that rate's schedule and rarely a
 // tick: due_tick is then the tick it falls in, and due_count is the instant itself in system-counter counts from the
 // clock's origin (rt_vsync_counter_ns turns it into host time); due_count is the one a back end holds a frame to, and it
 // is the due count of due_tick when no rate is set. present_shown reports the

@@ -814,7 +814,7 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
         // oot2-native: the raw helpers' names end with this; the SPIR-V generator marks them DontInline (SpirvGenerator.Generate). nxnative bound the pool
         // table and the write log as storage buffers under the sentinel constant buffer slot 0xff and searched the table in 12 unrolled steps of two loads each:
         // the driver inlined that at every call site, and most raw-access programs call it 253 times, so each of them was about 240,000 instructions to compile
-        // and 7 to 10 s per module on the reference GPU (ticket 40). Here the table is D15's two-level page table, reached through its device address in the
+        // and 7 to 10 s per module on the reference GPU (the raw-access compile fix). Here the table is D15's two-level page table, reached through its device address in the
         // push constants (RawTableAbi, which documents the layout and is mirrored by runtime/include/oot2/raw_table.h), so a raw module declares no buffer
         public const string RawHelperSuffix = "Raw";
 

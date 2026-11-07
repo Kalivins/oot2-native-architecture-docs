@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The miss path of the Vulkan back end (architecture section 6.1, rule 3 of the build policy; research 16, D4): what the
+// The miss path of the Vulkan back end (architecture section 6.1, rule 3 of the build policy; the NVIDIA fault study): what the
 // replay does when a draw or dispatch asks for a pipeline that nothing built ahead (oot2/vk_pipeline.h), and what it does
 // when a program goes (gfx.h program_release). The replay's ops (oot2/vk_replay.h) point at vkm_graphics and
 // vkm_compute, so the replay itself only learns that a draw may be skipped.
@@ -14,13 +14,13 @@
 // stall are logged and counted, and the capture's counters take the miss (CAPTURE_PIPELINE_MISSES).
 //
 // The bound. A graphics build is made by a job thread, and the replay waits for it for at most the bound (2 s, as the
-// architecture proposes: a raw-access vertex module took 7 to 10 s on one thread before ticket 40's lowering, research
-// 20, and a cold mesh library 6 s at p99, research 74; a library built from the player's own cache takes a millisecond).
+// architecture proposes: a raw-access vertex module took 7 to 10 s on one thread before the raw-access lowering (the pipeline
+// cost study), and a cold mesh library 6 s at p99 (the mesh pipeline cost study); a library built from the player's own cache takes a millisecond).
 // Past the bound the draw is skipped, with a named line and a count (CAPTURE_SKIPPED_DRAWS); the build goes on in its
 // job and the draws after it that name the same pipeline are skipped at once until it is done. That is the one place
 // where a pipeline is created with work in flight: the job's flag (vkp_graphics_ex) tells the builder that the wait is
 // over, and `late_builds` counts them. A skip is allowed only where the draw's colour and depth targets hold the picture
-// of an earlier frame (research 124: a draw into a target this frame has not touched yet leaves last frame's picture, a
+// of an earlier frame (the Hookshot survey: a draw into a target this frame has not touched yet leaves last frame's picture, a
 // draw into a target this frame already wrote leaves a hole): the replay says so with may_skip, and a draw that may not
 // be skipped waits without a bound, counted apart (`waits_kept`). A dispatch is never skipped, a dropped dispatch is lost
 // work (compute and mesh misses wait without a bound, and `compute_misses` counts the dispatch waits); a stage with no

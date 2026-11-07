@@ -8,7 +8,7 @@ using System.Collections.Generic;
 namespace Oot2.Xlate;
 
 /// <summary>
-/// The descriptor layout `uni` (docs/architecture.md D13; spike S3, ticket 20; numbering by ticket 23). Every module of a
+/// The descriptor layout `uni` (docs/architecture.md D13; spike S3; numbering by the stage bindings work). Every module of a
 /// stage numbers its resources the same way, whatever program it is paired with, so that one pipeline layout serves every
 /// graphics pipeline and a vertex or pixel module is built once:
 ///
@@ -26,10 +26,10 @@ namespace Oot2.Xlate;
 ///          5..27, compute 0..27. Bound textures and texture arrays take one slot each; pool textures take none.
 ///          Bytes 24..35 (the vertex stage's slots 2..4, free in a mesh pipeline, which has no vertex stage) are kept for
 ///          the draw's first task, read by the task stage or, without one, the mesh stage; the mesh bindings ticket settles
-///          what they hold (ticket 59). A module reads them as words 6..8 of the block the slots are declared in.
+///          what they hold (the compute, task and mesh layout). A module reads them as words 6..8 of the block the slots are declared in.
 ///
-/// The slot counts are the corpus maxima of spike S3's census and of tickets 23 and 59 for compute, task and mesh (ticket
-/// 59 counted mesh programs at 2 textures at most, in the update's archives and in the base-only ones). A module that
+/// The slot counts are the corpus maxima of spike S3's census and of the stage bindings work for compute, task and mesh (the
+/// compute, task and mesh layout counted mesh programs at 2 textures at most, in the update's archives and in the base-only ones). A module that
 /// needs more than its stage has still translates: the resources past the range get bindings from 32 (slots from 28), and
 /// the description says it does not fit. Texel buffers and arrays of storage images have no slot and are handled the same.
 /// </summary>

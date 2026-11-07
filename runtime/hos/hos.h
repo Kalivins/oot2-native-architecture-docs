@@ -91,7 +91,7 @@ void hos_audio_renderer_open(Cpu *c, uint32_t event, uint64_t handle, uint64_t p
 // How many clock threads the stand-in has started: one for the life of the process, however many renderers are opened.
 int hos_audio_clock_threads(void);
 
-// ov_codec.c: the AV1 video decoder service under the SDK's movie library (ticket 98). Its submission-ready events are
+// ov_codec.c: the AV1 video decoder service under the SDK's movie library (the movie player). Its submission-ready events are
 // made with hos_bind_system_event; a test gives it a binder of its own (the synthetic module has no SDK to attach
 // through). NULL restores hos_bind_system_event.
 void hos_codec_set_event_binder(uint32_t (*bind)(Cpu *c, uint64_t ev, int autoclear));

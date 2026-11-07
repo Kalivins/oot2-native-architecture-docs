@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Checks of the CPU untiler (runtime/gpu/untile.c, runtime/include/oot2/untile.h; architecture D19, ticket 65) against
-the layout functions of the NVN2 front end (runtime/nvn/nvn_tex.c, ticket 34), without a device, through
+"""Checks of the CPU untiler (runtime/gpu/untile.c, runtime/include/oot2/untile.h; architecture D19, the texture upload) against
+the layout functions of the NVN2 front end (runtime/nvn/nvn_tex.c, the texture and sampler work), without a device, through
 tests/runtime/untile_test.c, built like tests/test_runtime_gpu.py's programs at -O1 and -O2:
 
 - the two GOB orders (the Tegra X1's and the Switch 2's, offset bits 5 and 6 exchanged) as literal tables read off

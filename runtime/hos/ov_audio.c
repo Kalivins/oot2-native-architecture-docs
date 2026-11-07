@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// A silent audio renderer at the nn::audio level (architecture D9, ticket 38). The game's audio client builds its
+// A silent audio renderer at the nn::audio level (architecture D9, the null back end boot). The game's audio client builds its
 // RequestUpdate blocks with the SDK's own code, which runs unchanged; the entry points that would open a session to
 // aud:u, audren:u, auddmg:u or audsmx:u are answered here without one: a renderer is a handle and a host thread that
 // signals the renderer's event once per rendered frame (sample count / sample rate seconds), and nothing is mixed or

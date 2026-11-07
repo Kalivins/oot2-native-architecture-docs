@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The replay of the Vulkan back end (architecture D11, D12, D17a, D18; ticket 63): GfxBackend.submit walks the host
+// The replay of the Vulkan back end (architecture D11, D12, D17a, D18; the Vulkan replay): GfxBackend.submit walks the host
 // recordings the front end hands it (nvn_obj.h, command records), on the submitting thread, and turns each record into
 // the recorder's packets (oot2/vk_rec.h) for one frame: the frame's value is the fence value submit returns.
 //
@@ -24,7 +24,7 @@
 //                the program's own constants c[1] (its code area), the root tables as bank 24, and the support buffer
 //                (viewport inverse and size, render scales 1.0), written into the frame's scratch memory
 //   storage      a storage buffer binds from the address and size words of its bank (address rounded down to 16 bytes,
-//                range the size plus what was rounded off: research 19 B5); one the module may write (no NonWritable,
+//                range the size plus what was rounded off: the first draw study); one the module may write (no NonWritable,
 //                the description's `write`) is declared to the backing map (backing_gpu_wrote) and listed for the copies
 //                ticket's write-back (vkr_writes)
 //   textures     each push constant slot the module reads takes the handle bound at its stage's c[2] slot: the
@@ -84,7 +84,7 @@ struct nvn_stage;
 // ---- the op list: replayed, or the ticket a stopped op waits for
 #define VKR_REPLAYED NULL
 // NULL for an op this replay makes packets of (or ignores by contract, as OP_HINT), else the name of what it waits for
-// ("task and mesh draws (ticket 73)", ...). Past OP_COUNT_: "unknown".
+// ("task and mesh draws (the mesh draws)", ...). Past OP_COUNT_: "unknown".
 const char *vkr_op_ticket(uint32_t op);
 
 // ---- what the replay needs of a device (the device's, or a test's stand-ins: continuous integration checks the
@@ -204,7 +204,7 @@ typedef struct VkrStats {
     uint64_t storage_writes;                        // storage ranges declared written
     uint64_t unregistered_textures;                 // slots whose texture ID had no entry (the placeholder is read)
     uint64_t scratch_bytes;
-    // Recorded against replayed (research 119, P3): the draw and dispatch records that reached the replay, those not made
+    // Recorded against replayed (the Hookshot survey): the draw and dispatch records that reached the replay, those not made
     // because the game had rendering off, and the graphics draws skipped for a pipeline not ready (oot2/vk_miss.h).
     // lost is what none of those accounts for: draw_ops less draws, dispatches, render_off and skipped (in either
     // direction), 0 by contract; read it before judging a picture.

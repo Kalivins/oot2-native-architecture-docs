@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
 """Checks of the staging ring and the texture arena (runtime/gpu/texmem.c, runtime/include/oot2/texmem.h; architecture
-D19 and section 8, ticket 65) without a device, through tests/runtime/texmem_test.c, built like
+D19 and section 8, the texture upload) without a device, through tests/runtime/texmem_test.c, built like
 tests/test_runtime_gpu.py's programs at -O1 and -O2, one case a process:
 
 - the ring: regions share chunks, never overlap, a chunk comes back once its submission is done, and at the 384 MiB cap

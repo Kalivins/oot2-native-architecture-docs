@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""The real pipeline builder (tools/pipebuild/pipebuild.c, ticket 81) on a device: a worker that builds a vertex library,
+"""The real pipeline builder (tools/pipebuild/pipebuild.c, the pipeline step) on a device: a worker that builds a vertex library,
 a fragment library and a compute pipeline of a synthetic pack, saves what it built as a segment, merges segments into
 one cache file, and a fresh process seeded with that file is served every one of them. Validation (with
 synchronization checks) is on and must stay clean. The cases that need no device are in test_prepare_pipelines.py, with

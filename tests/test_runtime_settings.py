@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Contract tests of the settings store (runtime/core/settings.c, oot2/settings.h; research 93 D1, D5; ticket 103).
+"""Contract tests of the settings store (runtime/core/settings.c, oot2/settings.h; the menu survey).
 
 Builds tests/runtime/settings_test.c with runtime/core and runtime/nvn at -O1 and -O2, as tests/test_runtime_nvn.py
 builds its harness, and runs each case in its own process with the environment and the settings files written here:
 synthetic text, nothing of the game.
 
-- the table: unique keys, OOT2_<KEY> names that are not the tools' variables, defaults in range, the marks ticket 103
+- the table: unique keys, OOT2_<KEY> names that are not the tools' variables, defaults in range, the marks the store
   gives, and the enum orders the consumers rely on (gpu.h's default back end, memory.h's page levels)
 - the four layers, command line over environment over file over default, for a key of each type, with the source
 - each variable the runtime read before the store as its key's environment name, loaded or not, and the E2 hold
@@ -48,10 +48,10 @@ EXIT_REFUSED = 2
 GROUPS = {"graphics", "pacing", "display", "audio", "input", "enhancements", "debug"}
 # Variables the tools and the tests read: a key must never take one of these names.
 TOOL_VARIABLES = {"OOT2_CC", "OOT2_NINJA", "OOT2_CONFIG", "OOT2_VSYNC_P99_US"}
-# The variables the runtime read before the store, each now a key's environment name (ticket 103).
+# The variables the runtime read before the store, each now a key's environment name (the settings store).
 OLD_VARIABLES = {"OOT2_GFX": "gfx", "OOT2_HOLD_TICKS": "hold_ticks", "OOT2_PAGE_RELEASE": "page_release",
                  "OOT2_CENSUS": "census", "OOT2_CENSUS_FRAMES": "census_frames"}
-# Keys whose default is an off value below their range (frame_rate_target: 0, or 20 to 120; ticket 111).
+# Keys whose default is an off value below their range (frame_rate_target: 0, or 20 to 120; the fixed frame rate gate).
 OFF_VALUE_KEYS = {"frame_rate_target"}
 
 
@@ -149,7 +149,7 @@ class SettingsTest(unittest.TestCase):
             self.assertIn(group, GROUPS)
             self.assertIn(apply, {"live", "restart", "prepare"})
             self.assertIn(kind, {"bool", "int", "enum"})
-            if key in OFF_VALUE_KEYS:   # the default is an off value outside the range (ticket 111)
+            if key in OFF_VALUE_KEYS:   # the default is an off value outside the range (the fixed frame rate gate)
                 self.assertGreater(int(low), int(default))
             else:
                 self.assertLessEqual(int(low), int(default))
@@ -161,7 +161,7 @@ class SettingsTest(unittest.TestCase):
             self.assertTrue(what)
         for var, key in OLD_VARIABLES.items():
             self.assertEqual(by_key[key][7], var)
-        # Ticket 103's marks: the E2 hold is live, the back end and the page lever are read at start-up.
+        # The settings store's marks: the E2 hold is live, the back end and the page lever are read at start-up.
         self.assertEqual(by_key["hold_ticks"][2], "live")
         self.assertEqual(by_key["gfx"][2], "restart")
         self.assertEqual(by_key["page_release"][2], "restart")
@@ -239,7 +239,7 @@ class SettingsTest(unittest.TestCase):
             self.assertEqual(done.stderr, "oot2: OOT2_PAGE_RELEASE=yes: page_release takes off, count or release\n")
 
     def test_the_target_rate_takes_0_or_20_to_120_and_nothing_between(self) -> None:
-        # ticket 111: the key's default, 0, is its off value and lies outside 20..120, so it is taken as well
+        # the fixed frame rate gate: the key's default, 0, is its off value and lies outside 20..120, so it is taken as well
         for value in ("0", "20", "40", "100", "120"):
             for done in self.passes("show", "--set", f"frame_rate_target={value}"):
                 self.assertEqual(keys_of(done.stdout)["frame_rate_target"], (value, "command line", "--set"))

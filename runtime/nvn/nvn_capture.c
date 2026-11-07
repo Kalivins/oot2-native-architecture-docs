@@ -23,7 +23,7 @@
 #include "plat.h"
 
 #define FORMAT 1
-#define TITLE_DEFAULT 1800ull        // presents from the first: research 54's menu at 1,459 and 1,531, plus a margin
+#define TITLE_DEFAULT 1800ull        // presents from the first: the title pass capture's menu at 1,459 and 1,531, plus a margin
 #define MAX_THREADS 512              // threads read per frame; a frame with more lists the first ones and is counted
 #define MAX_SEEN 2048                // threads described by a "thread" line
 #define SUBMITTERS 8                 // distinct submitting threads kept per frame

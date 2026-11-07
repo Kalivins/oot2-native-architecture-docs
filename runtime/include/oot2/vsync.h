@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The virtual 60 Hz display clock (architecture D22; research 15, D2 and D3). The docked console's display refreshes
+// The virtual 60 Hz display clock (architecture D22; the console frame rate study). The docked console's display refreshes
 // at 60 Hz, and the game paces itself on its vsync events and on the present interval it asks for. On the host that
 // display is a virtual clock taken from the host's monotonic clock through the guest system counter (rt_ticks, 31.25
-// MHz), never from the monitor, whose rate may be 100 Hz (research 15, F13): no present mode, swapchain or display
+// MHz), never from the monitor, whose rate may be 100 Hz (the console frame rate study): no present mode, swapchain or display
 // mode feeds it.
 //
 // Tick n is due when the system counter reaches ceil(n * 31,250,000 / 60). One tick is 520,833 1/3 counts, so every due
@@ -27,7 +27,7 @@ uint64_t rt_vsync_due_ns(uint64_t n);
 // The current tick: the n whose due time has come and whose successor's has not (0 before tick 1 is due).
 uint64_t rt_vsync_tick(void);
 
-// Other schedules on the same origin (ticket 111; architecture D22's fixed frame rate). A schedule of `hz` slots a second
+// Other schedules on the same origin (the fixed frame rate gate; architecture D22's fixed frame rate). A schedule of `hz` slots a second
 // has its slot m due when the system counter reaches ceil(m * 31,250,000 / hz), from the origin and m alone, never by
 // adding a rounded period, so an hour is exactly 3600 * hz slots whatever hz is. At RT_VSYNC_HZ its slots are the
 // clock's ticks, and at a divisor of it (30, 20) slot m is tick m * 60 / hz exactly. Nothing here moves the clock

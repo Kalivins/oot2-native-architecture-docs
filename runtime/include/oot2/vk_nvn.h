@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// From NVN's values to Vulkan's, and the constant banks a translated module reads (architecture D11, D12; ticket 63):
+// From NVN's values to Vulkan's, and the constant banks a translated module reads (architecture D11, D12; the Vulkan replay):
 // what the replay of the recorded commands needs and that has no device state, so that a test checks it without one.
 //
 // The converters. Each takes the NVN enumeration's value as the record holds it and answers 1 with *out set, or 0 for a

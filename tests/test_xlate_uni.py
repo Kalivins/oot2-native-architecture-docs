@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Tests for the places of compute, task and mesh modules in the layout `uni` (ticket 59).
+"""Tests for the places of compute, task and mesh modules in the layout `uni` (the compute, task and mesh layout).
 
 Compute has a layout of its own (uniform 1..8, storage 9..24, storage images 25..31, texture
 slots 0..27); a mesh module takes the vertex stage's buffer slots (uniform 1..8, storage 9..13)

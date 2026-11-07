@@ -4,11 +4,11 @@
 // The device side of the backing map (oot2/backing.h, architecture D14, D15): VRAM blocks and host imports, each with
 // one buffer over the whole allocation that every binding of the descriptor path can use (vertex, index, uniform,
 // storage, indirect, copies) and whose device address the raw path will use, so its memory is allocated with the
-// device-address flag and the buffer has the device-address usage (research 14 A2: neither of the bases did).
+// device-address flag and the buffer has the device-address usage (the raw-address study: neither of the bases did).
 //
 // A block takes a memory type that is device local and not host visible (the small host-visible VRAM heap is left to
 // the back end's own staging). An import takes a type both the host pointer and the buffer allow; the device refuses an
-// import over a page that is not committed (research 14 F12, research 48 B1), which comes back as 0 here, never as a
+// import over a page that is not committed (the raw-address study, the write-watch study), which comes back as 0 here, never as a
 // lost device: the map retries once and then stops by name.
 //
 // Mirrors (oot2/backing.h, Mirrors). The budget figures are VK_EXT_memory_budget's for the heap blocks come from. Uploads
@@ -257,7 +257,7 @@ const BackingOps gpu_vk_backing_ops = {.block_new = vk_block_new, .import = vk_i
                                        .vram = vk_vram, .upload = vk_upload, .readback = vk_readback,
                                        .close = vk_close};
 
-// Mirrors on a discrete device, where imported host memory is read across the bus (D14; research 14 A7: 22.9 times
+// Mirrors on a discrete device, where imported host memory is read across the bus (D14; the raw-address study: 22.9 times
 // slower than VRAM); imports on any other, where VRAM is host memory too.
 static int want_mirror(const BackingAsk *ask) {
     (void)ask;

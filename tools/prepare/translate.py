@@ -33,7 +33,7 @@ In order:
 
 Why one spill file. The translator writes each job as two loose files (its line protocol, xlate/host). On the desktop
 every loose file reopened later paid the antivirus scanner's check, and packing 56,381 such pairs took 680.8 s against
-19.2 s to read the same bytes back from one file (research 43). Here each pair is read once, by the thread that got
+19.2 s to read the same bytes back from one file (the shader cache pack study). Here each pair is read once, by the thread that got
 the answer, while the other children keep translating, and packing reads one large file.
 
 The failure rule. A job the translator refuses (a "fail" reply: an instruction it lacks, a program it cannot read) is
@@ -97,7 +97,7 @@ RESULT_FIELDS = ("key", "status", "micros", "wall_ms", "spv_bytes", "message", "
 SPLIT_FILES = ("programs.bin", "jobs.jsonl", "programs.tsv", "pairing.tsv", "summary.json")
 TIMEOUT = 300.0                 # seconds a child may take on one job; S1's slowest took 15.7 s
 RETRY_TIMEOUT = 1200.0          # for a job that got no answer, tried again alone
-# S1 (research 18 G): one child's working set reached 473 MB after the largest programs; twelve peaked at 2.97 GB.
+# S1 (the shader translation study): one child's working set reached 473 MB after the largest programs; twelve peaked at 2.97 GB.
 WORKER_MEM = 512 << 20
 MEM_SHARE = 0.8                 # of the free memory the children may take, as the compile step's jobs
 NAMED = 5                       # failures named one by one in the warning

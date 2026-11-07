@@ -51,7 +51,7 @@ static const VkmOps g_device = {
 typedef struct Job {
     struct Job *next;
     char key[KEY_MAX];
-    VkpStage vs, ps;        // the stage records are immortal (research 35), so the keys and shapes stay valid
+    VkpStage vs, ps;        // the stage records are immortal (the programs and state study), so the keys and shapes stay valid
     VkpFormats formats;
     const VkmOps *ops;
     int late;               // set (release) by the replay once it stopped waiting for this build

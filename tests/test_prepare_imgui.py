@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
 """What `oot2 prepare` does with Dear ImGui, the library the runtime's menu is built on (tools/prepare/program.py,
-tools/prepare/check.py, tools/fetch_imgui.py; ticket 126).
+tools/prepare/check.py, tools/fetch_imgui.py; the menu's first rows).
 
 Prepare takes the folder --imgui or OOT2_IMGUI names as it is, refuses one that is not exactly the pin by name, and
 otherwise lays out fetched/imgui itself when it is absent (git and network access: tests give it the real pin's files

@@ -5,7 +5,7 @@
 // rtld does on the console once the modules are linked: it calls the SDK's nn::init::Start with the main thread's
 // handle and three callbacks. Start initialises nn::os, calls the first callback, initialises the SDK module, runs the
 // game's nninitStartup (heap and allocators), calls the second callback, which runs each module's constructors, then
-// nnMain, and the third callback when nnMain returns (research 31-services-pack, section 2.1).
+// nnMain, and the third callback when nnMain returns (the services study).
 //
 // Adapted from oot-pc-recomp runtime/boot.c at 8e09aaa (GPL-3.0-or-later repository; adapted there from MacNativeGames
 // games/totk/runtime/loader.c and services.c at b75be8c, MIT, Copyright (c) 2026 MacNativeGames contributors, and LAS

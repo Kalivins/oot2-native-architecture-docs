@@ -11,13 +11,13 @@
 // interval is stored as the game writes it, with no clamping, and answered back.
 //
 // The acquire gate (D22; oot2/nvn_pace.h has the rule). The gate tick of an acquire is the previous present's due tick
-// plus the interval, read when it is called. By default (ticket 95, research 52 Q1) AcquireTexture, after choosing the
+// plus the interval, read when it is called. By default (the acquire sync hold, the logic step study) AcquireTexture, after choosing the
 // index, returns at once and hands the gate tick to the sync it returns (nvn_sync_acquire, nvn_queue.c): the sync is
 // signalled when the virtual 60 Hz clock (runtime/core/vsync.c) has reached it, and a guest thread that waits on it
 // (SyncWait) gives its virtual core up for the wait. A game that passes no sync is not held. Behind the setting
 // hold_placement = acquire (the store's key, OOT2_HOLD_PLACEMENT; nvn_acquire_wait overrides it) AcquireTexture blocks
 // until the gate tick instead, with the virtual core given up (rt_kernel_block_begin/end), and signals the sync at once:
-// ticket 88's placement. Either way the wait is never between the return of an acquire and the next present, and
+// the acquire gate's placement. Either way the wait is never between the return of an acquire and the next present, and
 // QueuePresentTexture never waits: it takes the tick in progress as its due tick (by default also the gate tick of its
 // acquire, when the clock has not reached it and the game presents before it waits on the sync), writes its record,
 // tells the back end (the optional present_pace of gfx.h) and returns at once. win_t.pace holds the window's last due tick. The vsync events belong to the clock thread (runtime/core);
@@ -25,12 +25,12 @@
 // on (oot2/capture.h), the present also marks the frame boundary and appends the frame's records to the capture's buffer
 // in memory; the capture measures what that costs.
 //
-// The fixed rate (ticket 111; research 94 F11). With the settings store's frame_rate_target N (20 to 120; 0, the default,
+// The fixed rate (the fixed frame rate gate; the frame-rate study). With the settings store's frame_rate_target N (20 to 120; 0, the default,
 // is off) the gate runs on a second schedule of N slots a second on the same origin (oot2/vsync.h, rt_sched_*): a present
 // takes the slot in progress, the next acquire is released at the slot after it, and the game's own interval is ignored
 // (the records keep it). The gate, the due instants and win_t.pace and target are counts of the system counter, so a
 // change of N, read at each acquire and present, moves the gate at once and compares on one scale; with no target every
-// count is the due count of a tick of the 60 Hz clock and the gate is ticket 88's, tick for tick. The vsync events stay on
+// count is the due count of a tick of the 60 Hz clock and the gate is the acquire gate's, tick for tick. The vsync events stay on
 // the clock thread's 60 Hz ticks whatever N is.
 //
 // Adapted from oot-pc-recomp runtime/nvn_api_obj.c at 8e09aaa (GPL-3.0-or-later), as DKB Recomp carries it at 9d8fa02,
@@ -126,7 +126,7 @@ static int64_t fixed_rate(void) { return rt_setting(RT_SET_frame_rate_target); }
 static uint32_t hz_of(int64_t rate) { return rate ? (uint32_t)rate : RT_VSYNC_HZ; }
 
 // The gate count `periods` slots after the slot that the instant `due` falls in, on the schedule of hz slots a second:
-// computed from the slot's index, never as due plus a period, so the grid is the schedule's own (research 55 D2) and an
+// computed from the slot's index, never as due plus a period, so the grid is the schedule's own (the vsync clock study) and an
 // hour never drifts.
 static uint64_t gate_of(uint64_t due, uint32_t hz, uint64_t periods) {
     return rt_sched_due_counter(rt_sched_slot_of(due, hz) + periods, hz);

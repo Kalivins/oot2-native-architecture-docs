@@ -9,7 +9,7 @@
 // census.tsv, which every run writes. Two more variables, read at the same time:
 //   OOT2_CAPTURE_TITLE=N    the title mark is present N, counted from the first present (default 1800). The runtime
 //                           does not know when the game shows its title, so the mark is a present count, the unit
-//                           D26's pad script is keyed to. The default comes from Lichii's runs of research 54, where the
+//                           D26's pad script is keyed to. The default comes from Lichii's runs of the title pass capture, where the
 //                           menu appeared over the title movie 1,459 and 1,531 presents after the first, plus about
 //                           five seconds of margin; nothing has measured it on this runtime yet.
 //   OOT2_CAPTURE_SECONDS=S  the run ends by itself at the first present S seconds or more after the mark (decimal

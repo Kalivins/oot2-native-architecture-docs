@@ -86,7 +86,7 @@ Changes of this project:
   `DeclareGlobalArray`;
   `CodeGen/Spirv/Instructions.cs`, `GenerateSampledImageLoad`,
   `GeneratePushSlotSampledImageLoad`, `LoadPushSlotSampler`, `LoadPushSlot`,
-  `PushSlotIndex`: the descriptor layout `uni` (architecture D13, ticket 23).
+  `PushSlotIndex`: the descriptor layout `uni` (architecture D13, the stage bindings work).
   The host names the support buffer's set, and a texture the host gives a
   binding in `PushTextureLayout.SlotSet` is read through a push constant slot
   instead of a descriptor of its own: the slot holds an NVN texture handle,

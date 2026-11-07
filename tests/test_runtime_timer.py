@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Contract tests of the system timer resolution (ticket 116): the request at start and its release on every exit path.
+"""Contract tests of the system timer resolution (the timer resolution hold): the request at start and its release on every exit path.
 
 Builds tests/runtime/timer_test.c with runtime/core against a synthetic layout, at -O1 and -O2 with -march=x86-64-v3,
 then runs each case in its own process. The machine-wide timer resolution is shared with every process (a browser, another

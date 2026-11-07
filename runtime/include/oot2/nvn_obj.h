@@ -131,7 +131,7 @@ _Static_assert(sizeof(prog_t) <= 0xa0, "NVN2 program allocation stride");
 // done once the back end's fence_done reaches it. A window's acquire (default placement, oot2/nvn_pace.h) also gives it
 // `ready`, a count of the system counter from the virtual clock's origin (oot2/vsync.h): the sync is done once the clock
 // has reached it as well (0: none). It is the due count of a tick of the 60 Hz clock, or of a slot of the fixed rate's
-// schedule when the game runs at one (ticket 111)
+// schedule when the game runs at one (the fixed frame rate gate)
 typedef struct { uint32_t magic, fenced; uint64_t fence, ready; } sync_t;                            FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
 typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
@@ -284,7 +284,7 @@ typedef struct { uint64_t addr, size; uint32_t value, pad; } p_clear_buf;
 // Push{Graphics,Compute}Constants: bytes at byte offset into root table `table` of the graphics (compute 0) or compute
 // (compute 1) pipeline, read as constant bank 24. src: a *Deferred push's data in game memory, read at submit into w.
 typedef struct { int32_t compute, table, offset, bytes; uint64_t src; uint32_t w[64]; } p_push_const;
-typedef struct { int32_t first, count; } p_draw_mesh;      // DrawMeshTasks: task groups first.. (research 13)
+typedef struct { int32_t first, count; } p_draw_mesh;      // DrawMeshTasks: task groups first.. (the mesh shader study)
 typedef struct { uint64_t ind; } p_draw_mesh_ind;          // DrawMeshTasksIndirect: GPU address of {count, first}
 typedef struct { int32_t enable; float min, max; } p_depth_bounds;
 typedef struct { int32_t which, value, extra; } p_conservative;   // which 0: SetConservativeRasterEnable; 1: ...Mode (value mode, extra the 4-bit field)

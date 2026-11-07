@@ -45,7 +45,7 @@ Layout, little-endian, every offset from the start of the file:
     index (128 bytes a row), sorted by the first 64 bytes of each row as unsigned bytes, each (key, digest) once, so a
     reader finds a row by binary search without reading any entry:
         0    key: the job key, 1 to 31 ASCII letters, digits, '.', '_' or '-', padded with NUL to 32 bytes (the front
-             end's "<key16>.<variant>", research 35, has 25)
+             end's "<key16>.<variant>", the programs and state study, has 25)
         32   answers digest, 32 bytes: zero for the default answers, else answers_digest of the job
         64   entry offset (u64): a multiple of 16, at or after the data offset
         72   module size (u32): bytes of SPIR-V, a positive multiple of 4; 0 in a failure record
@@ -127,7 +127,7 @@ class PackError(Exception):
 
 def answers_digest(job: dict) -> bytes:
     """The answers digest of a translator job: zero when the job sets none of ANSWER_FIELDS, else the SHA-256 of the
-    canonical JSON text (sorted keys, no spaces, ASCII) of the fields it sets, as research 35 builds a variant's text.
+    canonical JSON text (sorted keys, no spaces, ASCII) of the fields it sets, as the programs and state study builds a variant's text.
     The format takes any 32 bytes; the ledger's writer must compute the same digest for the same answers."""
     chosen = {name: job[name] for name in ANSWER_FIELDS if job.get(name)}
     if not chosen:

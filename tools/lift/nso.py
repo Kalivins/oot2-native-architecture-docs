@@ -7,7 +7,7 @@
 # instead of asserts.
 """NSO loader: decompress segments, build the memory image, parse MOD0/dynamic info.
 
-The generator reads plain modules (segments stored uncompressed), which ticket 25's decoding step writes. An NSO whose
+The generator reads plain modules (segments stored uncompressed), which the extract and decode step writes. An NSO whose
 segments are LZ4-compressed is also read, through the small decoder below (under a second for the sdk). A segment
 whose header flag asks for it is checked against its SHA-256. ZBIC-compressed modules are not read here (D2a).
 """

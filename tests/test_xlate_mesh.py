@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Tests for the task and mesh emission of the translator (ticket 71): a task or mesh program becomes a TaskEXT or
+"""Tests for the task and mesh emission of the translator (the mesh emission): a task or mesh program becomes a TaskEXT or
 MeshEXT module, not a compute shader.
 
 The programs are assembled here from a few instruction words, never read from game files, and the modules are checked by
@@ -391,7 +391,7 @@ class MeshLimitsTest(MeshHarness):
 
 class MeshDescriptionTest(MeshHarness):
     def test_the_description_of_the_worst_mesh_program_of_the_dump(self):
-        # 160 vertices, 128 primitives, the position and ten generic locations with 22 components: 26 lines. Research 13: 28,160 of
+        # 160 vertices, 128 primitives, the position and ten generic locations with 22 components: 26 lines. The mesh shader study: 28,160 of
         # 32,768 bytes of output by Vulkan's formula, 18,196 bytes of staging, with a payload of 128 bytes 28,288 of 48,128
         vertex = POSITION + [[n, c] for n in range(10) for c in range(3 if n >= 8 else 2)]
         _, res = self.translate(self.job("d1", "ms", [EXIT], max_vertices=160, max_primitives=128, vertex=vertex, payload=128))
@@ -425,7 +425,7 @@ MESH_NUMBER = [isberd(0x78, 4, 0), isbewr(0xF8, 0, 4), mov_cbuf(5, 3, 0x14), isb
 
 
 class FirstTaskTest(MeshHarness):
-    """The draw's first task (ticket 72): the word at the device address in push constant words 6 and 7, added to the workgroup number of a
+    """The draw's first task (the mesh bindings work): the word at the device address in push constant words 6 and 7, added to the workgroup number of a
     task, or of a mesh stage that has no task. One mechanism for the direct and the indirect draw: the module only knows an address."""
 
     def first_task(self, module: Module) -> tuple[int, list[int]]:

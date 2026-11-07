@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// vkmesh: one task, mesh and fragment draw through Vulkan, for ticket 72 (architecture D13 and D16).
+// vkmesh: one task, mesh and fragment draw through Vulkan, for the mesh bindings work (architecture D13 and D16).
 //
 //   vkmesh <draw.txt>
 //

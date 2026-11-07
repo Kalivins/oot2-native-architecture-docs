@@ -109,7 +109,7 @@ NVN_API(nvnDeviceGetTexelFetchHandle) {
     ret_x(c, nvn_handle_pack(id_arg(c, 1, TEXTURE_POOL_MAX, "nvnDeviceGetTexelFetchHandle"), 0));
 }
 // NVNimageHandle nvnDeviceGetImageHandle(const NVNdevice *d, int id): an image is read through the texture pool's
-// descriptor at its ID (the game registers no image descriptors of its own: research 34)
+// descriptor at its ID (the game registers no image descriptors of its own: the texture and sampler study)
 NVN_API(nvnDeviceGetImageHandle) {
     ret_x(c, nvn_handle_pack(id_arg(c, 1, TEXTURE_POOL_MAX, "nvnDeviceGetImageHandle"), 0));
 }

@@ -101,7 +101,7 @@ typedef struct Kernel {
 extern Kernel K;
 
 // Whether an interrupted host pc lies in lifted code (any module's [lowest function, end marker)), so it may be sent
-// to the preemption stub. The ranges are loaded by kern_load_code_ranges, which rt_kernel_run calls (ticket 92).
+// to the preemption stub. The ranges are loaded by kern_load_code_ranges, which rt_kernel_run calls (the lifted-code end marker).
 void kern_load_code_ranges(void);
 int kern_pc_lifted(uintptr_t pc);
 

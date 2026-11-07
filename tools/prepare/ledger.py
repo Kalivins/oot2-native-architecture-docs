@@ -12,7 +12,7 @@ digest) the ledger asks for that its module reads and the default translation di
 Without such a row the file is not written, and a stale one is deleted. The base pack is never written here: a variant
 goes into the variants pack only, and the runtime's reader takes it before the base pack's default row.
 
-What a row asks for. A ledger row holds what was bound to its stage when a draw ran (research 78), a superset of what
+What a row asks for. A ledger row holds what was bound to its stage when a draw ran (the ledger study), a superset of what
 the stage's module reads, so each row is cut down to the answers the module uses before it counts:
 
 - A texture answer for slot s counts when the translator asked for that slot's type: the description's "queries"

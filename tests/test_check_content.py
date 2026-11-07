@@ -218,7 +218,7 @@ class MagicRules(PathsCase):
         self.red({"blob.dat": b"abc\0def"}, "binary")
 
     def test_the_allowlist_holds_the_av1_test_clips_and_only_them(self):
-        """Ticket 98: three short AV1 clips of generated pictures (tests/fixtures/av1) are the allowlist's first entries.
+        """The movie player: three short AV1 clips of generated pictures (tests/fixtures/av1) are the allowlist's first entries.
         Each passes under its own name and is a binary file under any other; a game signature in a file of that name is
         still refused."""
         root = Path(__file__).resolve().parent.parent

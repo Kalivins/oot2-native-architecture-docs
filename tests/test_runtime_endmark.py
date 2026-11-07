@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Contract tests of the end marker of a module's lifted code (ticket 92): the address one byte past a module's last
+"""Contract tests of the end marker of a module's lifted code (the lifted-code end marker): the address one byte past a module's last
 lifted function is host code, and the last function's own last byte is guest code, in the three places that ask:
 
 - lookup: rt_host_pc_module, the lookup of a host address over the lifter's tables (runtime/core/dispatch.c);

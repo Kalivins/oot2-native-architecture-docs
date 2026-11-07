@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Contract test of the system timer resolution (ticket 116): rt_timer_hold_start (runtime/core/timer.c) and the platform
+// Contract test of the system timer resolution (the timer resolution hold): rt_timer_hold_start (runtime/core/timer.c) and the platform
 // layer's plat_timer_hold and plat_timer_release (runtime/core/plat.c), driven by tests/test_runtime_timer.py:
 // `timer_test <case>`, each case in its own process.
 //

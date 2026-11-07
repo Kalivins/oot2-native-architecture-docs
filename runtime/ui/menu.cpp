@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The configuration menu's rows, presets and open key (oot2/ui.h; research 93 D6 and D7, research 106). No Dear ImGui
+// The configuration menu's rows, presets and open key (oot2/ui.h; the menu survey, the menu answers). No Dear ImGui
 // in this file: it is the model, which the frame (menu_draw.cpp) draws and the tests read. Every row reads its value
 // from the settings store when it is built and writes through rt_settings_set, so a value the file's hot reload or the
 // command line changes shows in the menu with no step of its own, and nothing is kept here that the store does not hold
@@ -36,7 +36,7 @@ struct RowDef {
 
 constexpr const char *NO_WINDOW = "Greyed until the window exists: it needs the Vulkan present path.";
 
-// The first rows (research 106, Q5): pacing, display, overlay and counters; the rest greyed with their reason.
+// The first rows (the menu answers): pacing, display, overlay and counters; the rest greyed with their reason.
 const RowDef DEFS[] = {
     {RT_GROUP_GRAPHICS, "Graphics back end", "gfx", nullptr, nullptr, nullptr, false},
     {RT_GROUP_GRAPHICS, "Resolution regime", nullptr,
@@ -85,7 +85,7 @@ const RowDef DEFS[] = {
 void put(char *out, size_t size, const char *text) { std::snprintf(out, size, "%s", text ? text : ""); }
 
 // A rate other than 20, 30 and 60 does not divide the game's 60 steps a second into whole steps, or is above 60
-// (research 108, Q3): offered, and marked, never refused.
+// (the frame-rate answers): offered, and marked, never refused.
 bool experimental_rate(int64_t n) { return n != 0 && n != 20 && n != 30 && n != 60; }
 
 Row make(RtSettingGroup group, const char *label, const char *key, const char *help, const char *grey,

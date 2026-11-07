@@ -477,7 +477,7 @@ internal static class ResultWriter
     // without reading the module. payload_bytes is what the stage declares (the control section's payload, at least 8 for a task, 0
     // for a mesh program without a task); output_bytes is Vulkan's formula for the mesh outputs (every location four scalars, counts
     // rounded to 32); shared_bytes the staging in workgroup memory; the limits are those the program was checked against.
-    // requires_subgroup_32 is a pipeline creation flag the back end sets for these stages only (research 13 recommendation 5)
+    // requires_subgroup_32 is a pipeline creation flag the back end sets for these stages only (the mesh shader study)
     private static void WriteMeshStage(Utf8JsonWriter w, Job job, ShaderProgramInfo info)
     {
         if (job.MeshStage is not MeshStageInfo mesh)

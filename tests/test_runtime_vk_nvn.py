@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
 """Tests of the NVN to Vulkan tables and the constant bank fillers of the Vulkan back end (runtime/include/oot2/vk_nvn.h,
-runtime/gpu/vk_nvn.c; ticket 63), through tests/runtime/vk_nvn_test.c, built like tests/test_runtime_gpu.py's programs.
+runtime/gpu/vk_nvn.c; the Vulkan replay), through tests/runtime/vk_nvn_test.c, built like tests/test_runtime_gpu.py's programs.
 
 No device is needed (continuous integration runs these). Two groups:
 

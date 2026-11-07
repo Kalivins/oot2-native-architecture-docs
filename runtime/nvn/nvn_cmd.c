@@ -14,7 +14,7 @@
 //
 // How a recording starts. The game's NVN2 header inlines BeginRecording, at twelve sites of main: when 16 bytes of
 // control memory are left it writes the command buffer's recording fields and a 16-byte header itself, and calls
-// nvnCommandBufferBeginRecording only when they are not, which is why research 17's census counts one BeginRecording
+// nvnCommandBufferBeginRecording only when they are not, which is why the NVN2 call census counts one BeginRecording
 // a frame against 131 EndRecording. The console driver's own BeginRecording does the same after calling the memory
 // callback for control memory. So the object keeps the driver's layout (nvn_obj.h cmd_t), and the front end takes up
 // a recording the game began itself at the next call on that command buffer: +0x11 says one is open, +0x50 says where
@@ -101,7 +101,7 @@ static void put_record(nvn_cmd_host *h, uint32_t op, size_t size) {
 
 // A recording starts with its header at ctl. Records made since the last start (commands outside a recording, or a
 // recording begun again before it ended) are left out of every handle, as the console's driver leaves them out.
-// What the run did with recordings (ticket 38, research 17 Open): counters only, read by nvn_cmd_counts.
+// What the run did with recordings (the null back end boot, the NVN2 call census): counters only, read by nvn_cmd_counts.
 static uint64_t g_begin_inline, g_begin_slow, g_end_handle, g_end_empty, g_cb_control, g_cb_command, g_left_out;
 void nvn_cmd_counts(NvnCmdCounts *out) {
     *out = (NvnCmdCounts){__atomic_load_n(&g_begin_inline, __ATOMIC_RELAXED), __atomic_load_n(&g_begin_slow, __ATOMIC_RELAXED),

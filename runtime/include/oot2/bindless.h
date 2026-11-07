@@ -7,7 +7,7 @@
 // continuous integration without a device; runtime/gpu/vk_bindless.c gives it Vulkan objects through BindlessOps.
 //
 // The game registers one ID at a time (gfx.h texture_register, sampler_register), constantly (110 texture
-// registrations and 46 texture initialisations per Forest frame, research 17) while up to two frames are in flight, and
+// registrations and 46 texture initialisations per Forest frame, the NVN2 call census) while up to two frames are in flight, and
 // a program may read its handles from memory, so an array index must stay the game's own ID. The design:
 //
 //   Shadow tables. Each texture pool and each sampler pool (named by dpool_ref.addr) keeps what the game registered at
@@ -27,7 +27,7 @@
 //   the log reaches back far enough), between submissions. A copy shows one texture pool at a time.
 //
 //   Views. An entry holds the view its texture's own target asks for (a 2D texture a 2D view, a cube a cube view...)
-//   at its ID. A program declares one variable per image type at binding 0 (research 22, item 4) and a descriptor must
+//   at its ID. A program declares one variable per image type at binding 0 (the translator defects study) and a descriptor must
 //   have the view type of the variable that reads it, so a read as another type (a 2D array read of a 2D texture) takes a
 //   second slot, one of the last `second` slots of the array, which holds a view of that type over the same image
 //   (bindless_image_slot). The slot is allocated at the first such read, lives until the entry changes, and appears in
@@ -90,7 +90,7 @@ typedef struct BindlessOps {
     void (*write)(void *set, const BindlessWrite *w, int n);
     void (*texture_release)(const tex_t *t);          // optional: the serial's host objects may go
     // optional, together: a host view of a texture that view_make made none of because its texels are the CPU's (the
-    // texture arena of ticket 65: registering thousands of textures must take no memory), asked for at the moment the replay
+    // texture arena of the texture upload: registering thousands of textures must take no memory), asked for at the moment the replay
     // binds the texture (bindless_image_slot); and the submission being recorded, `value`, reads that view (any view the
     // replay binds), once per call of bindless_image_slot.
     void *(*view_demand)(const tex_t *t, const view_t *v, int type);

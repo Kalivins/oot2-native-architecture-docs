@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Tests for the mesh draw harness of ticket 72 (tools/firstdraw/mesh_programs.py, mesh_draw.py and vkmesh.c).
+"""Tests for the mesh draw harness of the mesh bindings work (tools/firstdraw/mesh_programs.py, mesh_draw.py and vkmesh.c).
 
 Three groups. The first needs nothing but Python: the instruction words, the float bit patterns the programs build positions from,
 the CPU reference, the comparison and its counter-runs, and the draw file written from descriptions. The second translates the

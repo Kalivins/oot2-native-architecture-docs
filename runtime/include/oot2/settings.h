@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The settings store (research 93 D1, D5; ticket 103): one table of every setting the runtime reads, four layers that
+// The settings store (the menu survey): one table of every setting the runtime reads, four layers that
 // give each key its value, a file beside the game that a person edits between runs or while the game runs, and the
 // hooks that apply a live key at once. Consumers read typed values with rt_setting and never parse a file or the
 // environment; later front ends (the menu, the capture header) edit and list this same table.
@@ -15,7 +15,7 @@
 // and never read as the default.
 //
 // The file. oot2.ini in the game folder, beside census.tsv and ledger.jsonl, unless `oot2 --config PATH` or the
-// OOT2_CONFIG variable names another (research 93 Q2's conservative default; oot2 prepare never writes or deletes it).
+// OOT2_CONFIG variable names another (the menu survey's conservative default; oot2 prepare never writes or deletes it).
 // Its lines:
 //   ; a comment, or # a comment       whole lines only; a value runs to the end of its line
 //   [pacing]                          a section: the key's group, for people; a key is found by its name in any section
@@ -51,7 +51,7 @@ extern "C" {   // the menu (runtime/ui) is the one C++ reader of the store
 
 typedef enum RtSettingType { RT_SETTING_BOOL, RT_SETTING_INT, RT_SETTING_ENUM } RtSettingType;
 typedef enum RtSettingApply { RT_APPLY_LIVE, RT_APPLY_RESTART, RT_APPLY_PREPARE } RtSettingApply;
-// Research 93 D6's groups, in menu order; each is the file's section of that name.
+// The menu survey's groups, in menu order; each is the file's section of that name.
 typedef enum RtSettingGroup {
     RT_GROUP_GRAPHICS,       // [graphics]
     RT_GROUP_PACING,         // [pacing]: frame rate and pacing
@@ -80,8 +80,8 @@ typedef enum RtSettingSource {
 //   default  a value of the key's type (for ENUM, an index into names); an INT default outside min..max is an off value
 //            that the key takes as well (frame_rate_target: 0, or 20 to 120)
 //   what     one line for the menu and the listing
-// A key whose consumer a later ticket builds is added by that ticket, with its consumer; research/103-settings-store.md
-// lists the keys tickets in flight are to register.
+// A key whose consumer later work builds is added by that work, with its consumer; the settings store study
+// lists the keys the work in flight is to register.
 #define RT_SETTINGS(X)                                                                                                 \
     X(gfx, GRAPHICS, ENUM, RESTART, 0, 0, 0, "null|vulkan",                                                            \
       "the graphics back end: null draws nothing and runs every test; vulkan draws on the GPU")                      \
@@ -158,7 +158,7 @@ int rt_setting_pending(RtSettingId id, int64_t *value);
 uint64_t rt_settings_changes(void);
 
 // Every key whose published value is not its default, with its value and source, in table order: fills at most max
-// entries and returns how many such keys there are (the capture header's list, research 93 D10).
+// entries and returns how many such keys there are (the capture header's list, the menu survey).
 typedef struct RtSettingNow {
     RtSettingId id;
     const char *key;

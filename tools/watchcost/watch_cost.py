@@ -37,7 +37,7 @@ from pathlib import Path
 MIB = 1 << 20
 MARGIN_MIB = 1536          # available RAM a cell needs beyond what it commits
 FRAME_MS = 1000.0 / 60.0   # architecture section 6.2
-SUBMITS_PER_FRAME = 6      # research 17: the game submits six times a frame in the Forest
+SUBMITS_PER_FRAME = 6      # the NVN2 call census: the game submits six times a frame in the Forest
 
 HEAVY = ("clang", "clang-cl", "ld.lld", "ninja", "vkpipecost", "vkcomputecost", "vkhmmacost", "vkdraw", "oot2",
          "oot2-xlate", "eden", "eden-cli", "lichii", "yuzu", "ryujinx", "cl", "link", "msbuild")

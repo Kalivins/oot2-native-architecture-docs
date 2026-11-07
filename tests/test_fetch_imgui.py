@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Tests of tools/fetch_imgui.py and of how Dear ImGui enters the build (research 107).
+"""Tests of tools/fetch_imgui.py and of how Dear ImGui enters the build (the ImGui fetch study).
 
 Dear ImGui is fetched at a pinned version and never committed. Without a network the tests use a pin over synthetic
 files (the real table is only checked for its shape) and a local git repository for the part that reads blobs from

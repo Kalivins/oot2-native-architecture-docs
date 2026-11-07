@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The stand-in that proves runtime/ui builds and links as C++ (oot2/ui.h, research 104). It uses what a menu library
+// The stand-in that proves runtime/ui builds and links as C++ (oot2/ui.h, the C++ build check). It uses what a menu library
 // leans on: a heap-allocating container, strings and an algorithm from the standard library, so the link needs the
 // library and not only its headers. It throws nothing and catches nothing: the build is without exceptions and without
 // run-time type information, and an allocation that fails ends the program, as it does in the C code.
@@ -15,7 +15,7 @@
 
 // Built with the fetched Dear ImGui (tools/build_game.py defines OOT2_WITH_IMGUI and puts its folder on the include
 // path), the stand-in includes its header and asks its core whether the two agree. That is all it does with it: no
-// context, no window, no device, no drawing (research 107).
+// context, no window, no device, no drawing (the ImGui fetch study).
 #ifdef OOT2_WITH_IMGUI
 #include "imgui.h"
 #endif

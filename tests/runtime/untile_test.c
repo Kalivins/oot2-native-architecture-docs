@@ -9,7 +9,7 @@
 //             exchanged, and each equals the literal tables below, which are not computed from the formula: they were
 //             read off Lichii's block_linear_unswizzle_2d.comp (src/video_core/host_shaders, GPL-2.0-or-later: its
 //             SwizzleTable gives the Tegra X1's order and its native_tiling swap the Switch 2's), run on a ramp
-//             (research 65)
+//             (the texture upload study)
 //   geometry  a table of formats, sizes, levels, layers and block heights: every region's base and span agree with the
 //             layout functions (levels follow each other with no gap and none overlap, a layer ends where the layout
 //             says), the storage walked block by block in storage order has as many bytes as the region's span, and the

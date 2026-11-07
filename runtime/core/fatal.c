@@ -82,11 +82,11 @@ static void begin_stop(int code) {
     }
 }
 
-// Every exit of the runtime gives the system timer's request back (ticket 116; plat.h): here, plat_exit and a normal
+// Every exit of the runtime gives the system timer's request back (the timer resolution hold; plat.h): here, plat_exit and a normal
 // return from main. plat_timer_release is lock-free and silent, so it stays out of the way of a fatal that hangs or
 // faults in a hook, and it is called before the hook for that reason; plat_exit is not used here because it flushes the
 // streams, which can deadlock inside a fatal. A new exit site that skips it costs nothing lasting (the system drops the
-// request when the process ends) but the tests of ticket 116 would not know it.
+// request when the process ends) but the tests of the timer resolution hold would not know it.
 __attribute__((noreturn)) static void end_stop(int code) {
     fflush(stderr);
     plat_timer_release();

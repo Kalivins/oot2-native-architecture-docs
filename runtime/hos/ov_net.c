@@ -4,7 +4,7 @@
 // Host overrides of the network calls the game reaches through public nn:: entry points: nn::socket, nn::nifm,
 // nn::ssl and nn::nsd, on a host with no network. They answer as a console with no network answers (the rule at the
 // top of hos.h), so the game's online library, a gRPC client, starts, finds nobody to talk to and goes on offline:
-//   - nn::socket::Initialize succeeds and keeps no state that another call depends on (research 31, trap T2); every
+//   - nn::socket::Initialize succeeds and keeps no state that another call depends on (the services study); every
 //     other socket call fails with -1 and ENETDOWN, a name lookup with EAI_FAIL or NULL;
 //   - event file descriptors (EventFd, EventFdRead, EventFdWrite) are counters in host memory, and Close, Fcntl, Poll
 //     and Select work on them, because gRPC and the SDK's movie library wake a waiting thread through one; Poll and
@@ -13,7 +13,7 @@
 //   - nn::nifm reports no network and a request that never gets one, nn::ssl creates a context and no connection,
 //     nn::nsd names the retail environment and resolves no name.
 //
-// Adapted from two projects, each at the commit read for research 31. oot-pc-recomp at 8e09aaa
+// Adapted from two projects, each at the commit read for the services study. oot-pc-recomp at 8e09aaa
 // (https://github.com/philneitz/oot-pc-recomp, a GPL-3.0-or-later repository): runtime/ov_eventfd.c (no file header,
 // so GPL-3.0-or-later: the eventfd table as host counters, and Poll over it) and runtime/ov_system.c (MIT file header,
 // Copyright (c) 2026 MacNativeGames contributors: the nn::socket, nn::nifm, nn::nsd and nn::ssl overrides that
@@ -39,7 +39,7 @@
 //
 // ---- What the SDK and the game do, measured on the modules and not taken from a donor
 //
-// EventFd flags (research 31, Q1). nn::socket::EventFd hands its flags word to the bsd client interface unchanged,
+// EventFd flags (the services study). nn::socket::EventFd hands its flags word to the bsd client interface unchanged,
 // with no mask and no translation, so the numbering is that of the caller's headers and the service. The game's libc
 // eventfd is a shim that passes it on unchanged as well. The two calls the game's gRPC makes pass 6 (the wake-up
 // descriptor: non-blocking plus close-on-exec) and 0 (an availability probe, closed at once), and the SDK's movie
@@ -819,7 +819,7 @@ HOS_OVERRIDE("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", ov_nifm_submit_wait, 
 
 // SubmitNetworkRequest, IsNetworkRequestOnHold, CancelNetworkRequest: on a console the nifm service evaluates a
 // request as it serves the queries, so the first query after a submission finds it on hold and the next finds it
-// settled (refused). A caller that polls this form needs the first answer (research 31, section 5.2); this game
+// settled (refused). A caller that polls this form needs the first answer (the services study); this game
 // imports the waiting form.
 static void ov_nifm_submit(Cpu *c) {
     (void)c;

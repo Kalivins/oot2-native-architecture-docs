@@ -691,7 +691,7 @@ class StepsTest(Base):
         self.assertFalse(extract.Extract().verify(ctx, rec))
 
     def test_romfs_index_and_image_are_checked_at_start_and_key_the_link(self):
-        """The RomFS reaches oot2.exe's start-up checks and the link step's key (ticket 30's program.py): the copy."""
+        """The RomFS reaches oot2.exe's start-up checks and the link step's key (the build and link step's program.py): the copy."""
         from prepare import program
         ctx = self.ctx()
         self.assertEqual(program.game_files(ctx), [])

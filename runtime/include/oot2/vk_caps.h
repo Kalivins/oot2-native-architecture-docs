@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The SPIR-V capabilities and extensions the device's required list gives (oot2/vk_required.h, ticket 60): a module
+// The SPIR-V capabilities and extensions the device's required list gives (oot2/vk_required.h, the pipeline builder): a module
 // may declare a capability only when some item of the list enables the feature behind it, because a device that has
 // every item is the only device the renderer opens, and a module that needs one more feature would fail validation or
 // worse on a player's device that happens to lack it. The list is derived from the items, so adding an item adds its

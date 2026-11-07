@@ -250,7 +250,7 @@ class PiecesTest(unittest.TestCase):
         self.assertEqual(build_game.cmd_arg("a b$c"), '"a b$$c"')
 
     def test_cpp_sources_have_their_own_rule_and_the_program_is_linked_by_the_cxx_driver(self) -> None:
-        # Research 104: runtime/ui is C++ behind a C header. A .cpp file is compiled as C++17 without exceptions and
+        # The C++ build check: runtime/ui is C++ behind a C header. A .cpp file is compiled as C++17 without exceptions and
         # without run-time type information, and the C++ driver links, with -static on Windows so that no DLL of the
         # toolchain sits beside oot2.exe.
         gen = self.dir / "game folder" / "gen"
@@ -303,7 +303,7 @@ class PiecesTest(unittest.TestCase):
             self.assertIsNone(build_game.find_cxx(str(self.dir / "clang" / ("clang" + suffix))))
 
     def test_a_module_without_an_end_marker_is_refused_by_name(self) -> None:
-        # Ticket 92: the marker says where a module's lifted code ends; a lift made without it cannot be built.
+        # The lifted-code end marker: the marker says where a module's lifted code ends; a lift made without it cannot be built.
         gen = self.dir / "gen"
         fake_gen(gen, {"main": 1}, marker=False)
         with self.assertRaisesRegex(build_game.BuildError, "end marker missing: the manifest of main does not name "
@@ -643,7 +643,7 @@ class ProgramTest(unittest.TestCase):
         self.assertEqual(self.compiled["objects"], lifted_objects(self.game / "build"))
 
     def test_the_system_timer_is_requested_at_start_unless_the_setting_is_off(self) -> None:
-        # Ticket 116: main calls rt_timer_hold_start right after the settings load, before the first thread and before
+        # The timer resolution hold: main calls rt_timer_hold_start right after the settings load, before the first thread and before
         # main()'s own log line. The request itself is read back by tests/test_runtime_timer.py; here the real main is
         # shown to make the call, once, and to honour the setting.
         done = run_program(self.exe, cwd=Path(self.tmp.name))
@@ -913,7 +913,7 @@ class ProgramTest(unittest.TestCase):
         self.assertEqual(count(with_extra), count(without) + 1)
 
     def test_a_cpp_object_is_in_the_library_the_manifest_and_the_program(self) -> None:
-        # Research 104: the stand-in of runtime/ui goes through the C++ rule, is listed and hashed in the object
+        # The C++ build check: the stand-in of runtime/ui goes through the C++ rule, is listed and hashed in the object
         # manifest like any other object, and is linked whole into a program that still starts and stops as before.
         build = self.game / "build"
         listed = (build / "obj" / build_game.RUNTIME_LIST).read_text(encoding="utf-8").split()
@@ -934,7 +934,7 @@ class ProgramTest(unittest.TestCase):
 
     @unittest.skipUnless(WIN, "a PE import table")
     def test_program_imports_no_dll_of_the_toolchain(self) -> None:
-        # Research 104: libc++ and libunwind are linked in, so no libc++.dll, libunwind.dll or libwinpthread-1.dll has
+        # The C++ build check: libc++ and libunwind are linked in, so no libc++.dll, libunwind.dll or libwinpthread-1.dll has
         # to sit beside oot2.exe.
         imports = [name.lower() for name in pe_imports(self.exe)]
         self.assertIn("kernel32.dll", imports)

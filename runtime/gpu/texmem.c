@@ -154,7 +154,7 @@ void texring_take(uint64_t value, uint64_t size, uint64_t align, TexSlot *out) {
             plat_mutex_unlock(&g.ring_mu);
             rt_fatal("gfx: vulkan: the staging ring is full inside one submission: submission %llu holds %llu bytes of its "
                      "%llu (cap %llu) and asks for %llu more, and no earlier submission is left to wait for; the lever is "
-                     "to upload before the submission (ticket 63) or a larger ring", (ull)value, (ull)mine,
+                     "to upload before the submission (the Vulkan replay) or a larger ring", (ull)value, (ull)mine,
                      (ull)g.ring_bytes, (ull)TEXRING_CAP, (ull)need);
         }
         g.st.ring_waits++;

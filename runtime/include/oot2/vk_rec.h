@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The recorder of the Vulkan back end (architecture D12, D17b, sections 6.1 and 6.2; ticket 62, research 20 section E).
+// The recorder of the Vulkan back end (architecture D12, D17b, sections 6.1 and 6.2; the recorder, the pipeline cost study).
 // The replay runs on the submitting thread and does not make Vulkan calls: it writes each command of a frame as a packet
 // into a 16 MiB ring (oot2/gpu_ring.h), and a recorder thread reads the packets in order, makes the calls into the
 // frame's command buffer and submits it on the timeline (oot2/gpu_vk.h). The replay's thread time is then the walk of
-// the ops and the packing, which research 20 measured at a third less than recording itself.
+// the ops and the packing, which the pipeline cost study measured at a third less than recording itself.
 //
 // A frame is one submission: vkrec_begin waits until fewer than `frames` (2: section 6.1) frames are between their
 // begin and the device's completion, then takes the submission gate and the next timeline value (the fence value the
@@ -25,7 +25,7 @@
 // replay builds has one). A command the later tickets bring (queries, timestamps, conditional rendering)
 // is one more line in VKREC_FIXED or one more hand-written pair in vk_rec_pack.c.
 //
-// Breadcrumbs (D17b, research 16 D2). Every draw, mesh draw and dispatch gets a number in its frame (from 1) and a record
+// Breadcrumbs (D17b, the NVIDIA fault study). Every draw, mesh draw and dispatch gets a number in its frame (from 1) and a record
 // of the stage identities in effect when it was written (vkrec_stages); the recorder sets a diagnostic checkpoint whose
 // marker is GPU_VK_DRAW_MARKER(value, n) right before the call, so the device-loss report (vk_loss.c) can name the last draw
 // that ran by its stages. Records live in tables of the frames in flight, which is as long as a checkpoint can name them.

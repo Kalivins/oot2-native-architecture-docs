@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The desktop harness of the Vulkan back end's replay (ticket 63; oot2/vk_replay.h), driven by
+// The desktop harness of the Vulkan back end's replay (the Vulkan replay; oot2/vk_replay.h), driven by
 // tests/test_runtime_vk_replay_draw.py:
 //
 //   vk_replay_draw probe

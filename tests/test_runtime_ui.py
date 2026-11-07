@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Tests of runtime/ui, the runtime's one C++ directory (runtime/include/oot2/ui.h, research 104): a stand-in that uses
+"""Tests of runtime/ui, the runtime's one C++ directory (runtime/include/oot2/ui.h, the C++ build check): a stand-in that uses
 the C++ standard library behind a C header, built and linked the way the program is.
 
 tools/build_game.py builds a runtime folder holding the headers and runtime/ui into the runtime library, with the Ninja
@@ -140,7 +140,7 @@ class UiTest(unittest.TestCase):
         self.assertEqual([name for name in imports if name.startswith("lib")], [])
 
     def test_the_toolchain_carries_what_the_static_link_needs(self) -> None:
-        # The pieces an installer bundle takes from an llvm-mingw tree for C++ (research 104): the driver, the static
+        # The pieces an installer bundle takes from an llvm-mingw tree for C++ (the C++ build check): the driver, the static
         # standard library and unwinder it links, the headers a .cpp file includes. The sizes go to the log.
         root = Path(self.tool.cxx).resolve().parent.parent
         lib = root / "x86_64-w64-mingw32" / "lib"
@@ -164,7 +164,7 @@ def undefined_names(nm: str, obj: Path) -> list[str]:
 
 
 class UiImguiTest(unittest.TestCase):
-    """The stand-in built with the fetched Dear ImGui (tools/fetch_imgui.py, research 107): its four core sources
+    """The stand-in built with the fetched Dear ImGui (tools/fetch_imgui.py, the ImGui fetch study): its four core sources
     are compiled into the runtime library by the plan's own rule, the stand-in includes the header and asks the core
     whether the two agree, and the library links, whole, into a program that runs. No window, no device, no drawing.
 

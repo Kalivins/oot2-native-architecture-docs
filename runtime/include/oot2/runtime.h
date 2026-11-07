@@ -61,7 +61,7 @@ void rt_set_stop_flush(void (*flush)(void));
 void rt_add_stop_writer(void (*writer)(int code, const char *line));
 void rt_run_stop_hook(int code, const char *line);
 
-// ---- the system timer resolution (timer.c, ticket 116)
+// ---- the system timer resolution (timer.c, the timer resolution hold)
 // Hold a 0.5 ms system timer resolution while the process runs unless the setting timer_resolution is 0, and log one
 // "timer:" line either way. Call it once, after the settings are loaded and before any thread starts, so the vsync
 // clock's first wait already runs on the finer timer. The request is given back on every exit path (plat.h): a normal
@@ -75,7 +75,7 @@ void rt_timer_hold_start(void);
 //   const uint64_t <mod>_fn_addrs[];   guest function starts, strictly ascending
 //   const GuestFn <mod>_fn_ptrs[];     the lifted function for each start
 //   const uint64_t <mod>_fn_count;
-//   void <mod>_lifted_end(Cpu *);      the end marker: linked after the module's last lifted code (ticket 92)
+//   void <mod>_lifted_end(Cpu *);      the end marker: linked after the module's last lifted code (the lifted-code end marker)
 // and the build glue describes each module with an RtModule (base and size from layout.h).
 //
 // The end marker is what says where a module's lifted code stops. The tables give function starts only, so without it
@@ -166,7 +166,7 @@ const char *rt_hostfn_at(int i, uint64_t *calls, uint64_t *first_lr, int *missin
 // The calls of every slot at once (relaxed reads, not one instant): at most max values into calls, returns the slot count.
 int rt_hostfn_snapshot(uint64_t *calls, int max);
 
-// Census mode (ticket 38; research 31 Q5): the setting census at 1 (oot2/settings.h; OOT2_CENSUS=1 in the environment),
+// Census mode (the null back end boot; the services study): the setting census at 1 (oot2/settings.h; OOT2_CENSUS=1 in the environment),
 // read once, never the default. A run in census mode may go on past a gap that stops a default run (an NVN2 entry point
 // without a body returns 0), so every line it writes is marked "[census mode]" (log) or "#census-mode" (files), and its
 // normal end has its own exit code, RT_EXIT_CENSUS. The setting census_frames=N (OOT2_CENSUS_FRAMES; census mode only)

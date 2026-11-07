@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Synthetic task, mesh and pixel programs for the first translated mesh draw (ticket 72), assembled from instruction words.
+"""Synthetic task, mesh and pixel programs for the first translated mesh draw (the mesh bindings work), assembled from instruction words.
 
 No game code is involved and nothing here reads global memory, so the translator's raw-access helper is not either. The
 programs draw a strip of small triangles, one for each (task workgroup n, mesh workgroup j) pair, and encode n and j twice,

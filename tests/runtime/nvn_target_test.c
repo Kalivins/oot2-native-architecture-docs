@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Contract tests of the fixed frame rate (ticket 111; architecture D22; research 94 F11; runtime/nvn/nvn_window.c,
+// Contract tests of the fixed frame rate (the fixed frame rate gate; architecture D22; the frame-rate study; runtime/nvn/nvn_window.c,
 // runtime/core/vsync.c, oot2/nvn_pace.h), driven by tests/test_runtime_nvn_target.py: `nvn_target_test <case> [args]`.
 // Each case runs in its own process and prints "ok <case>".
 //

@@ -16,7 +16,7 @@
 select reads the splitter's output (pairing.tsv and jobs.jsonl) and writes the sets the harness builds: one
 pre-rasterization library for every distinct (task, mesh) pair (a mesh stage with no task is a pair with an empty task),
 the (task, mesh, pixel) triples, and the task and mesh programs no archive pairs. Pairs and triples carry a scope: `core`
-when the variation sits in the update's Foliage or Model archive (research 13 finding 23: 338 pairs, 1,131 triples) and
+when the variation sits in the update's Foliage or Model archive (the mesh shader study: 338 pairs, 1,131 triples) and
 `package` for ApplicationPackage's own copies, so both readings are reported. translate runs the jobs of those sets
 through the translator and spirv-val. prepare writes the job lists. The runs, all with the driver's internal pipeline
 cache disabled (S3's method), are:
@@ -58,7 +58,7 @@ pipe_cost = cc.pipe_cost
 pool = cc.pool
 cc.BUSY = tuple(dict.fromkeys(cc.BUSY + ("vkmeshcost", "vkcomputecost")))  # the supervisor's busy list
 
-CORE_ARCHIVES = ("Foliage.Product.110", "Model.Product.110")   # research 13's walk; the rest is ApplicationPackage's copies
+CORE_ARCHIVES = ("Foliage.Product.110", "Model.Product.110")   # the mesh shader study's walk; the rest is ApplicationPackage's copies
 MEMORY_KILL_MB = 6_000
 FLOOR_MB = 1_500
 MESH_SPV_TO_VK = dict(cc.SPV_TO_VK, SPV_EXT_mesh_shader="VK_EXT_mesh_shader")
@@ -236,8 +236,8 @@ def build_lists(sel: dict, tr: dict[str, dict]) -> dict:
 
 def missing_components(mesh_outputs: list[dict], pixel_inputs: list[dict]) -> tuple:
     """The (location, component) pairs a pixel stage reads that the mesh stage before it does not write, sorted: the stage
-    interface gap of research 20 finding G (VUID-RuntimeSpirv-OpEntryPoint-08743). `*_outputs` and `*_inputs` are a
-    description's interface lists. The runtime pads a stage with exactly these outputs (ticket 60), so the pairs are a pad set."""
+    interface gap of the pipeline cost study (VUID-RuntimeSpirv-OpEntryPoint-08743). `*_outputs` and `*_inputs` are a
+    description's interface lists. The runtime pads a stage with exactly these outputs (the pipeline builder), so the pairs are a pad set."""
     written = {(o["location"], o["component"] + i) for o in mesh_outputs for i in range(o["components"])}
     wanted = {(i["location"], i["component"] + c) for i in pixel_inputs for c in range(i["components"])}
     return tuple(sorted(wanted - written))

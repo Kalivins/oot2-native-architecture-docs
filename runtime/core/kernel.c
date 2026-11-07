@@ -495,7 +495,7 @@ static int ap_try(RtThread *w) {
     return to != 0;
 }
 
-// The lifted code's host ranges, one per module: from its lowest function to its end marker (ticket 92). A range
+// The lifted code's host ranges, one per module: from its lowest function to its end marker (the lifted-code end marker). A range
 // that ran to the highest function start would take whatever the linker placed after it for lifted code.
 void kern_load_code_ranges(void) {
     uintptr_t lo[16], end[16];

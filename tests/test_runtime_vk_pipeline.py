@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
 """Tests of the pipeline builder (runtime/gpu/vk_pipeline.c, vk_layout.c, vk_caps.c, spirv.c, shader_desc.c; architecture
-D12 and D13, ticket 60), through tests/runtime/vk_pipeline_test.c, built like tests/test_runtime_gpu.py's programs at -O2.
+D12 and D13, the pipeline builder), through tests/runtime/vk_pipeline_test.c, built like tests/test_runtime_gpu.py's programs at -O2.
 
 Three groups, by what they need:
 
@@ -17,8 +17,8 @@ Three groups, by what they need:
   fatal), the pipeline cache warm in a second process and dropped after a driver change, a stage's objects released and
   made again, and eight threads asking for one pipeline.
 - On the player's own pack (the desktop, with OOT2_T60_PACK and OOT2_T60_WORK set; never in continuous integration): the
-  pair ticket 23 drew, built from the pack, against tools/firstdraw's own draw of the same modules; a sample of corpus
-  pairs by research 20's method, padded pairs included; compute pipelines; a second process warm from the cache; and the
+  pair the stage bindings work drew, built from the pack, against tools/firstdraw's own draw of the same modules; a sample of corpus
+  pairs by the pipeline cost study's method, padded pairs included; compute pipelines; a second process warm from the cache; and the
   capability check over the whole corpus with its counter-run.
 
 Without clang or the Vulkan SDK the program tests skip, unless OOT2_REQUIRE_CLANG or OOT2_REQUIRE_VULKAN is set; without a
@@ -54,7 +54,7 @@ JOB_CS = ROOT / "xlate" / "host" / "Job.cs"
 LEVEL = "-O2"
 EXIT_NO_DEVICE = 3
 SPIRV_MAGIC = 0x07230203
-TRANSLATOR = hashlib.sha256(b"synthetic translator of ticket 60").hexdigest()
+TRANSLATOR = hashlib.sha256(b"synthetic translator of the pipeline builder").hexdigest()
 
 # Vulkan constants the tables are printed with.
 VK_UNIFORM_BUFFER, VK_STORAGE_BUFFER, VK_STORAGE_IMAGE, VK_SAMPLED_IMAGE, VK_SAMPLER = 6, 7, 3, 2, 0
@@ -218,7 +218,7 @@ class TablesTest(unittest.TestCase):
         heap = int(re.search(r"DefaultHeapImages = (\d+)", JOB_CS.read_text(encoding="utf-8")).group(1))
         self.assertEqual([int(rows[0][1]), int(rows[0][2]), int(rows[0][3])], [0, VK_SAMPLED_IMAGE, heap])
         self.assertEqual([int(rows[1][1]), int(rows[1][2]), int(rows[1][3])], [1, VK_SAMPLER, 4096])
-        for r in rows:   # every stage, update-after-bind, update-unused-while-pending (ticket 61) and partially bound
+        for r in rows:   # every stage, update-after-bind, update-unused-while-pending (the bindless tables) and partially bound
             self.assertEqual(int(r[4], 16), GFX_STAGES | STAGE_COMPUTE)
             self.assertEqual(int(r[5], 16), 0x1 | 0x2 | 0x4)   # UPDATE_AFTER_BIND (1) | UPDATE_UNUSED_WHILE_PENDING (2) | PARTIALLY_BOUND (4)
 
@@ -997,7 +997,7 @@ class DeviceTest(DeviceTestCase):
         w = self.stats(warm.stdout, "warm")
         self.assertEqual((w["libraries"], w["links"], w["computes"]), (c["libraries"], c["links"], c["computes"]))
         # everything the driver compiled comes back from the cache: the libraries that hold a shader and the compute
-        # pipeline. A library with no shader and a fast link compile nothing and are not cache entries (research 20: a
+        # pipeline. A library with no shader and a fast link compile nothing and are not cache entries (the pipeline cost study: a
         # link is microseconds), so the driver never reports them as hits.
         self.assertEqual((w["stage_library_hits"], w["compute_hits"]), (w["stage_libraries"], w["computes"]), w)
         print("\n" + cold.stdout + warm.stdout)
@@ -1091,7 +1091,7 @@ class PlayerPackTest(DeviceTestCase):
         work = self.work / "select"
         work.mkdir(exist_ok=True)
         shutil.copy(os.environ["OOT2_T60_PAIRS"], work / "pairs.jsonl")
-        self.assertEqual(pipe_cost.select(work, pairs, 20), 0)   # research 20's selection: deciles of module size, seed 20
+        self.assertEqual(pipe_cost.select(work, pairs, 20), 0)   # the pipeline cost study's selection: deciles of module size, seed 20
         rows = json.loads((work / "sample.json").read_text(encoding="utf-8"))["pairs"]
         tsv = self.work / f"pairs-{pairs}.tsv"
         tsv.write_text("".join(f"{r['vs']}\t{r['ps']}\n" for r in rows), encoding="utf-8")
@@ -1099,7 +1099,7 @@ class PlayerPackTest(DeviceTestCase):
 
     def test_a_sample_of_corpus_pairs_builds_and_links_with_no_refusal_padded_pairs_included(self) -> None:
         if not os.environ.get("OOT2_T60_PAIRS"):
-            self.skipTest("OOT2_T60_PAIRS names S3's pairs.jsonl (the corpus pairs of research 20)")
+            self.skipTest("OOT2_T60_PAIRS names S3's pairs.jsonl (the corpus pairs of the pipeline cost study)")
         n = int(os.environ.get("OOT2_T60_SAMPLE", "120"))
         tsv = self.sample(n)
         cache = self.work / f"pipeline-cache-pairs-{n}.bin"

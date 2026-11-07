@@ -5,7 +5,7 @@
 namespace Ryujinx.Graphics.Shader
 {
     /// <summary>
-    /// oot2-native: textures read through push constant slots (the layout `uni` of oot2-native's ticket 23). A texture whose
+    /// oot2-native: textures read through push constant slots (the layout `uni` of oot2-native's stage bindings work). A texture whose
     /// <see cref="TextureDefinition.Set"/> is <see cref="SlotSet"/> is no descriptor of its own: its binding number is a slot of
     /// 32-bit words in the push constants, from byte <see cref="SlotsOffset"/>, holding an NVN texture handle (texture ID in
     /// bits 0..19, sampler ID in bits 20..31). The shader loads the image at that texture ID from the global image array and

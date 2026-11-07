@@ -53,7 +53,7 @@ class CensusTests(unittest.TestCase):
         self.assertEqual(pc.count(d, shared_support=True), 9)
 
     def test_a_schema_2_description_is_refused(self):
-        # Ticket 23's numbering (layout uni) would read here as a different set 0; the census measured schema 1.
+        # The stage bindings work's numbering (layout uni) would read here as a different set 0; the census measured schema 1.
         with self.assertRaises(ValueError):
             pc.describe(dict(res("vs"), schema=2))
         self.assertEqual(pc.describe(dict(res("vs"), schema=1))["binds"], [(0, "ubo", 1)])

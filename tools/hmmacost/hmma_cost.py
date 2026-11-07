@@ -68,7 +68,7 @@ sys.path.insert(0, str(ROOT / "tools" / "shaders"))
 import pool  # noqa: E402
 
 M32 = 0xFFFFFFFF
-LOCAL = 128              # invocations per workgroup, as the game's tensor dispatches (research 47)
+LOCAL = 128              # invocations per workgroup, as the game's tensor dispatches (the played programs census)
 WARPS = LOCAL // 32
 IN_ADDR, OUT_ADDR = 0x10000000, 0x20000000   # guest addresses of the two storage buffers (16-aligned)
 SB_IN, SB_OUT = 0x100, 0x110                 # c[0] byte offsets of their address and size pairs

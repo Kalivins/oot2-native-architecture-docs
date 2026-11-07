@@ -10,7 +10,7 @@ namespace Oot2.Xlate;
 /// <summary>
 /// The VK_EXT_mesh_shader limits a task or mesh program is checked against. The translator has no device: prepare fills
 /// the "mesh_limits" job option from the device, and a job without it takes the RTX 3060 Ti's, as read on the reference PC
-/// (driver 617.14; research 13, finding 1). The names are the Vulkan properties' with the "maxMesh" or "maxTask" prefix
+/// (driver 617.14; the mesh shader study). The names are the Vulkan properties' with the "maxMesh" or "maxTask" prefix
 /// in snake case.
 /// </summary>
 internal sealed record MeshLimits
@@ -70,7 +70,7 @@ internal sealed record MeshLimits
     };
 }
 
-/// <summary>What a task or mesh program costs against the limits, by Vulkan's formulas (research 13, finding 3).</summary>
+/// <summary>What a task or mesh program costs against the limits, by Vulkan's formulas (the mesh shader study).</summary>
 internal readonly record struct MeshSizes(int PayloadBytes, int OutputBytes, int VertexLocations, int PrimitiveLocations, int SharedBytes);
 
 internal static class MeshChecks

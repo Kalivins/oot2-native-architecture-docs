@@ -40,7 +40,7 @@
 //
 // The stage-key dump (OOT2_STAGE_KEYS=PATH, off unless set): the first time a key is met, one line is appended to PATH
 // and flushed, so a run that is killed keeps what it had. The file is a measurement for the player's own machine (what
-// prepare's cache must hold for the stages a boot sets, ticket 76), never shipped; it names the game's programs and stays
+// prepare's cache must hold for the stages a boot sets, the run-time key check), never shipped; it names the game's programs and stays
 // in the player's folders. A "#oot2-stage-keys 1" line, then one tab-separated line a distinct key, in the order the
 // game first set it:
 //   seq  present  key  kind  code_size  inst_size  code_sha256  ctl_hex

@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
 """What the pipeline step builds, in what order, on how many workers, and how an interrupted run resumes (architecture
-section 6.1, step 1; research 20 B and 21 C). Nothing here needs a GPU: the builder is a program that speaks a line
+section 6.1, step 1; the pipeline cost and compute build time studies). Nothing here needs a GPU: the builder is a program that speaks a line
 protocol (tools/pipebuild/pipebuild.c), and the tests of this module run it as a stand-in script.
 
 The work list. Every job of the shader cache pack that translated becomes one item: the compute pipeline of a compute
 module (`cs`), the pre-rasterization library of a vertex module as translated (`vs`, unpadded: the padded ones are known
 only from play and come from the ledger), the fragment library of a pixel module (`ps`). Task and mesh modules (`ts`,
-`ms`) wait for the mesh draws ticket and are counted as not built, so every total is a lower bound until then.
+`ms`) wait for the mesh draws work and are counted as not built, so every total is a lower bound until then.
 
-The order. Compute first, then graphics; inside each group the longest first, by the size of the module (research 20
-B3: build time ranks with SPIR-V size, 0.98 for vertex and 0.99 for pixel modules), so the last items to run are the
+The order. Compute first, then graphics; inside each group the longest first, by the size of the module (the pipeline cost study:
+build time ranks with SPIR-V size, 0.98 for vertex and 0.99 for pixel modules), so the last items to run are the
 short ones and the pool is never left waiting on one long build. Ties break on the key, so the order is the same in
 every process.
 
-The workers. A build holds 0.3 to 2.8 GB of host memory (research 21 C) and the driver compiles on the calling thread,
+The workers. A build holds 0.3 to 2.8 GB of host memory (the compute build time study) and the driver compiles on the calling thread,
 so the builder runs as one process per worker, each with its own device and its own empty pipeline cache. How many run
 follows the free memory (a share of it, not the CPU count alone); each item reserves what a model of its size says it
 holds, the largest ones run alone, and compute builds are held to six at a time (twelve threads were no faster than six
@@ -56,10 +56,10 @@ NOT_BUILT = ("ms", "ts")               # task and mesh: the mesh draws ticket bu
 KIND_NAMES = {"cs": "compute", "vs": "vertex", "ps": "pixel", "ms": "mesh", "ts": "task"}
 
 # The memory an item reserves: a floor for the process (device, driver, the mapped pack) plus a share of the module's
-# size, capped at the largest build measured (research 21 B and C: raw-access builds 0.3 GB, tensor builds 0.3 to 2.6
+# size, capped at the largest build measured (the compute build time study: raw-access builds 0.3 GB, tensor builds 0.3 to 2.6
 # GB, a 12 MB plain build 2.8 GB). A model that overestimates costs workers, one that underestimates costs paging; the
 # step records each worker's measured peak so the constants can be read against a real run.
-# Measured on the 3060 Ti (ticket 81's 28-program sample, compute programs from 28 KB to 11.6 MB, working set of the one
+# Measured on the 3060 Ti (the pipeline step's 28-program sample, compute programs from 28 KB to 11.6 MB, working set of the one
 # worker running): 816 KB 0.35 GB, 1.0 MB 0.72, 1.35 MB 0.69, 2.6 MB 0.99, 11.6 MB 2.91.
 BASE_BYTES = 320 * MiB
 PER_MODULE_BYTE = 400
@@ -72,12 +72,12 @@ MEM_SHARE = 0.8                        # of the free memory the workers may rese
 FLOOR_BYTES = 1 * GiB                  # free memory under which no new item starts
 WORKER_BYTES = 512 * MiB               # for counting workers from the free memory
 MAX_WORKERS = 12
-COMPUTE_AT_ONCE = 6                    # research 21 C
+COMPUTE_AT_ONCE = 6                    # the compute build time study
 FLUSH_SECONDS = 60.0
 ITEM_TIMEOUT = 900.0                   # seconds one item may take (a tensor program took 303 s while 12 threads built)
 RETRY_TIMEOUT = 3600.0                 # an item that got no answer, tried again alone
 START_TIMEOUT = 300.0                  # a builder's start: device, pack, empty cache
-FATAL_EXITS = (70, 71)                 # the runtime's exit codes for a named fatal (research 24)
+FATAL_EXITS = (70, 71)                 # the runtime's exit codes for a named fatal (the runtime boundary study)
 LOG_MARK = "=== builder start ==="
 # A named fatal that says the machine, not the module, failed: memory ran out, or the device was lost. It is a crash
 # (the item is tried again alone), never a refusal recorded for good.

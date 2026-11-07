@@ -2,7 +2,7 @@
 // Copyright (C) 2026 The oot2-native contributors
 //
 // Device tests of the uploads of CPU-written textures (runtime/gpu/vk_texture.c, oot2/vk_texture.h, the arena images of
-// vk_image.c; architecture D19, ticket 65). Driven by tests/test_runtime_vk_texture.py: `vk_texture_test <case>`, one
+// vk_image.c; architecture D19, the texture upload). Driven by tests/test_runtime_vk_texture.py: `vk_texture_test <case>`, one
 // case per process. Needs a device with every item of oot2/vk_required.h; exit 3 (no loader, no device) is a skip.
 //
 //   untile     the compute pass on the device equals the CPU untiler byte for byte over the table of

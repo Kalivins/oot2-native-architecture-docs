@@ -21,8 +21,8 @@
 // Recomp runtime/nvn/vulkan/record.c, MIT, Copyright (c) 2026 Peiikai): the replay thread packs, a recorder thread makes
 // the calls and ends the command buffer, and the replay thread's wait is for the frame two before. Changed here: the
 // recorder also submits (architecture 6.1: "packets to Vulkan commands, queue submit"), frames in flight are counted
-// against the timeline's done value, the breadcrumb is a numbered record per draw that the loss report decodes (research
-// 16 D2) where DKB writes a kind and a number, and the recorder has no direct fallback.
+// against the timeline's done value, the breadcrumb is a numbered record per draw that the loss report decodes (the NVIDIA fault
+// study) where DKB writes a kind and a number, and the recorder has no direct fallback.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

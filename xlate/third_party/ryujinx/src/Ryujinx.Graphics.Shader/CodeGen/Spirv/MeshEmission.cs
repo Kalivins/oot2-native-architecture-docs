@@ -75,7 +75,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         /// The outputs of a mesh stage, from the job's map and nothing else: the position as an array of vec4 (a built-in has to
         /// be whole), every other written component as an array of float at its location and component, per-primitive ones
         /// decorated PerPrimitiveEXT, and the triangle indices. A component the map does not name is never declared (the
-        /// worst program is at 86 percent of the output memory limit, research 13).
+        /// worst program is at 86 percent of the output memory limit, the mesh shader study).
         /// </summary>
         public static void DeclareOutputs(CodeGenContext context)
         {

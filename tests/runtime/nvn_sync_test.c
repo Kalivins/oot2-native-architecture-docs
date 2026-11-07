@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Contract tests of the acquire sync (ticket 95; architecture D22; runtime/nvn/nvn_window.c, runtime/nvn/nvn_queue.c,
+// Contract tests of the acquire sync (the acquire sync hold; architecture D22; runtime/nvn/nvn_window.c, runtime/nvn/nvn_queue.c,
 // oot2/nvn_pace.h), driven by tests/test_runtime_nvn_sync.py: `nvn_sync_test <case>`. Each case runs in its own process
 // and prints "ok <case>".
 //
@@ -786,7 +786,7 @@ static void case_change(void) {
 }
 
 // change_mid: the interval changes between the acquire and the wait: the sync keeps the tick the acquire gave it (read at
-// the acquire, as ticket 88 reads it), and the change applies at the next acquire.
+// the acquire, as the acquire gate reads it), and the change applies at the next acquire.
 static void case_change_mid(void) {
     static const Step steps[] = {{0, 0, 0}, {0, 3, 0}, {0, 0, 0}, {0, 1, 0}, {0, 0, 0}};
     static const Exp exp[] = {
@@ -835,7 +835,7 @@ static void case_setting(int call, int expect, const char *name) {
 }
 
 // setting_bad: a value that is neither sync nor acquire is refused by name, with exit code 2, by the store's first read
-// (research 103's rule); the harness checks the exit code and the line.
+// (the settings store study's rule); the harness checks the exit code and the line.
 static void case_setting_bad(void) {
     objects(NULL, 3, 1, 0, 0, PLACEMENT_ENV);
     guard_begin("an unknown OOT2_HOLD_PLACEMENT was taken for a placement");

@@ -548,7 +548,7 @@ static void close_fakes(void) {
     vkrec_idle();
     uint32_t nf;
     const VkRecFrame *fr = vkrec_frames(&nf);
-    for (uint32_t i = 0; i < nf; i++)   // the packets' size, for the bytes a draw costs (research 62: 2.8 KB a draw)
+    for (uint32_t i = 0; i < nf; i++)   // the packets' size, for the bytes a draw costs (the recorder study: 2.8 KB a draw)
         printf("frame %llu packets %u bytes %llu\n", (ull)fr[i].value, fr[i].packets, (ull)fr[i].bytes);
     gpu_sync_finish();
     vkrec_close();

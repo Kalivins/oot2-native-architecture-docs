@@ -4,7 +4,7 @@
 // What the pipeline builder reads of a module's resource description (schema 2, xlate/host/ResultWriter.cs; the text is
 // the translator's JSON, stored unchanged in the shader cache pack, oot2/shader_cache.h): the stage, whether the module
 // fits the `uni` layout, and its user interface by location, which decides whether a vertex module has to be padded
-// for the pixel module it is linked to (research 20, finding G). Nothing here needs Vulkan.
+// for the pixel module it is linked to (the pipeline cost study). Nothing here needs Vulkan.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
@@ -65,7 +65,7 @@ void shd_pad_text(const ShdPad *pad, int n, char *out, size_t cap);
 //
 // Where a module reads its resources, for the replay of recorded NVN2 commands: which constant banks, storage buffers,
 // textures, storage images and vertex attributes the module declares, and at which set and binding of the layout
-// (xlate/host/UniLayout.cs) each one is. The caps are generous: research 23 counted at most 11 user banks plus c0, c1, c2
+// (xlate/host/UniLayout.cs) each one is. The caps are generous: the stage bindings study counted at most 11 user banks plus c0, c1, c2
 // and c24 in a pixel module, 14 storage buffers and 12 textures (one an array of 32) in a compute module, 23 textures in
 // a pixel module and 6 images over the corpus.
 #define SHD_MAX_CBUFS 32

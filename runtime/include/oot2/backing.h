@@ -17,16 +17,16 @@
 //   mirror   VRAM kept current from the guest's pages, in the place an import would take (Mirrors below).
 //   none     before that first bind, and for pages of a pool the CPU can see that no import or mirror covers.
 // A page of a virtual pool is the page of the physical pool its one run maps it to (the front end allows one run per
-// virtual pool, research 33 decision 4); a bind over an unmapped page is a named fatal.
+// virtual pool, the device and pool study); a bind over an unmapped page is a named fatal.
 //
 // The page is 4 KiB in a pool the CPU can see: the page of commit and of host import, and NVN aligns pool storage to
 // 4 KiB only, so one 64 KiB page can hold two pools. In the GPU address window (gfx.h) it is 64 KiB.
 //
 // Imports. A host import covers committed pages only: one over an uncommitted page fails, and after a failed import the
-// driver refuses every import of that size or larger until a smaller one succeeds (research 14 F12, research 48 B1, B7).
+// driver refuses every import of that size or larger until a smaller one succeeds (the raw-address study, the write-watch study).
 // Imports are cut to windows of BACKING_IMPORT_WINDOW aligned in the address space, and on Windows the guest's watched
 // regions are reserved in pieces of that size (runtime/core/plat.c), so an import walks no further than its window
-// (research 48 answer 4: the driver walks the run of committed pages that follows the pointer, to the reservation's end).
+// (the write-watch study: the driver walks the run of committed pages that follows the pointer, to the reservation's end).
 // A cell is a pool cut to the windows one bind touches: one window, or two for a bind across a boundary. The bind's own
 // pages are committed first, as host I/O commits its target (rt_mem_commit_io), then the cell's import covers the run of
 // committed pages around the bind inside the cell (rt_mem_commit_run). A later bind the import does not cover replaces it
@@ -86,7 +86,7 @@
 // mapped at the next raw-access submission), brings every mirror current (backing_sync_mirrors) and records the
 // submission as the newest raw-access one; backing_version and backing_raw_runs give the table's builder the map as runs.
 // A raw-access submission can reach every backing, so a backing that leaves the map waits for the newest one as well as
-// for its own resolves (research 57 F4: one value, not a stamp on every backing), and so does pool_fini. Raw stores into
+// for its own resolves (the backing map study: one value, not a stamp on every backing), and so does pool_fini. Raw stores into
 // a mirror are known only from the table's store bits, after the work: the raw path writes those pages back at the
 // submission's end, before its value is done, as the descriptor path's writes are. A copy into a mirror the CPU wrote
 // while a raw-access submission is in flight waits for it first, so its write-back does not meet a newer copy; and a bind
@@ -101,9 +101,9 @@
 
 #include "oot2/gfx.h"
 
-// ---- the rule (one function, its constants named: spike S5 and research 14 A7 move them)
-#define BACKING_IMPORT_WINDOW (64ull << 20)   // research 48: a bounded 64 MiB import costs 0.8 ms to make, 1.6 ms to free
-#define BACKING_IMPORT_PROBE 0x1000ull        // research 48 B7: the small import that clears a failed one
+// ---- the rule (one function, its constants named: spike S5 and the raw-address study move them)
+#define BACKING_IMPORT_WINDOW (64ull << 20)   // the write-watch study: a bounded 64 MiB import costs 0.8 ms to make, 1.6 ms to free
+#define BACKING_IMPORT_PROBE 0x1000ull        // the write-watch study: the small import that clears a failed one
 #define BACKING_BLOCK (256ull << 20)          // a VRAM block; an extent larger than this has a block of its own
 #define BACKING_SPARE_BLOCKS 1                // empty blocks kept ready by the block thread
 #define BACKING_DEFERRED_MAX 1024             // backings waiting for retirement; a full queue waits for its oldest

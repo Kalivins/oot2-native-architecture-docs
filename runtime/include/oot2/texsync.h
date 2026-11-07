@@ -11,7 +11,7 @@
 // A texture never uploaded before gets every region: a region none of whose pages was ever stamped and none of whose
 // pages is committed (nothing, the CPU and host I/O included, ever wrote there, which reads as zeros) is zeros, so that the
 // pages nobody touched are not committed by reading them; the others are read from guest memory. Committed counts as
-// written whatever the write watch saw, since host I/O into guest pages may not show in it (research 58 F5). A range the write watch does not cover (pagegen_scan answers UINT64_MAX: no write
+// written whatever the write watch saw, since host I/O into guest pages may not show in it (the mirror coherence study). A range the write watch does not cover (pagegen_scan answers UINT64_MAX: no write
 // watch on this platform, or storage outside the watched regions) cannot say what changed, so every region is stale at
 // every use and the use is counted.
 //

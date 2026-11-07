@@ -20,7 +20,7 @@ of them belongs in the repository:
                   (summary.json census holds the counts by container and by reason)
   pairing.tsv     one row per BNSH variation: the keys of its vertex, pixel, task and mesh stages, and
                   whether it sits in a superseded Product.100 file (summary.json pairing.outside_product100
-                  holds the counts to set against research 13, which walked the 110 files only)
+                  holds the counts to set against the mesh shader study, which walked the 110 files only)
   summary.json    counts, errors and the cost of the run
 
 Usage:
@@ -839,8 +839,8 @@ def build_job(stage: str, ctl: bytes, code) -> JobSpec:
         spec.start, spec.length = SPH_BYTES, inst - SPH_BYTES
         mesh: dict[str, Any] = {"kind": stage, "threads": threads, "payload": payload}
         # The task map is whatever its own header says: nothing in the dump shows yet that a task
-        # program's output bits mean anything (research 13 finding 10 calls its header a type-1
-        # vertex header), so it may come out empty; ticket 71 checks it on the real scan.
+        # program's output bits mean anything (the mesh shader study calls its header a type-1
+        # vertex header), so it may come out empty; the mesh emission checks it on the real scan.
         outputs: dict[str, list[list[int]]] = {"vertex": output_map(code[:SPH_BYTES]), "primitive": []}
         max_v = max_p = nv = np_ = 0
         if stage == "ms":
@@ -915,7 +915,7 @@ class Collector:
     by_stage_records: dict[str, int] = field(default_factory=dict)
     # variation label -> stage -> job key ("?" when the stage's job could not be built)
     variations: dict[str, dict[str, str]] = field(default_factory=dict)
-    # labels of the variations that sit in a superseded Product.100 file (research 13 walked the 110 files only)
+    # labels of the variations that sit in a superseded Product.100 file (the mesh shader study walked the 110 files only)
     variations_100: set[str] = field(default_factory=set)
     # programs that were read but gave no job (the scanner adds the ones it found no program for)
     census: list[CensusRow] = field(default_factory=list)
@@ -1016,7 +1016,7 @@ PAIRING_STAGES = ("vs", "ps", "ts", "ms")
 
 
 def pairing_counts(rows: list[list[str]]) -> dict[str, int]:
-    """The counts research 13 made by hand, from rows of [variation, vertex, pixel, task, mesh]:
+    """The counts the mesh shader study made by hand, from rows of [variation, vertex, pixel, task, mesh]:
     variations, variations with a mesh stage, distinct (task, mesh) pairs and distinct
     (task, mesh, pixel) triples (only variations whose keys are all built)."""
     pairs: set[tuple[str, str]] = set()
@@ -1038,7 +1038,7 @@ def write_pairing_tsv(path: Path, variations: dict[str, dict[str, str]],
     each ("" when the variation has none, "?" when its job could not be built), then 1 when the
     variation sits in a superseded Product.100 file. Returns the counts over all rows plus the
     same counts over the rows outside Product.100 (under "outside_product100"), which are the
-    ones to set against research 13: it walked the 110 files only."""
+    ones to set against the mesh shader study: it walked the 110 files only."""
     rows: list[list[str]] = []
     flags: list[bool] = []
     with open(path, "w", encoding="utf-8", newline="\n") as fh:

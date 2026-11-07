@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Contract tests of the video decoder service under the SDK's movie library (runtime/hos/ov_codec.c, ticket 98).
+"""Contract tests of the video decoder service under the SDK's movie library (runtime/hos/ov_codec.c, the movie player).
 
 Builds tests/runtime/codec_test.c with runtime/core, runtime/nvn and runtime/hos and a fake AV1 decoder
 (tests/runtime/av1_fake.h, written against the seam of runtime/video/av1.h) against a synthetic layout, at -O1 and -O2,

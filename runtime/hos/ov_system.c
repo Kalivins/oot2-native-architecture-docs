@@ -13,7 +13,7 @@
 // and shared_font.c at b75be8c; inside a GPL-3.0-or-later repository): the oe, applet, am, prepo, nfp, err, aoc, pctl,
 // diag, account, time and pl answers, the message queue behind PopNotificationMessage, the local user table, the clock
 // snapshot layout and the calendar arithmetic. The answers for the network clock task and the network service accounts
-// follow what NXNative (MIT) documents (research 31, pack section 5.2); no code was taken from it.
+// follow what NXNative (MIT) documents (the services study); no code was taken from it.
 //
 // Changed here: the settings the donor read from environment variables and an ini file are fixed (language en-US,
 // docked with performance boost, always in focus), and the local user has one constant Uid instead of a file, so there
@@ -429,7 +429,7 @@ static void ov_prepo_limit_event(Cpu *c) {
     ret_x(c, ev);
 }
 HOS_OVERRIDE("_ZN2nn5prepo30GetOverSaveFrequencyLimitEventEv", ov_prepo_limit_event, HOS_OFFLINE,
-             "a bound event that never fires: reports stay local so no limit is hit; research 31 pack 4.2 (no donor)");
+             "a bound event that never fires: reports stay local so no limit is hit; the services study (no donor)");
 
 // ==== nn::nfp: no NFC reader
 static int32_t nfp_state;
@@ -574,17 +574,17 @@ static void ov_fibre_internal(Cpu *c) {
             hos_caller(c, at, (int)sizeof at));
 }
 HOS_OVERRIDE("_ZN2nn2os6detail20DispatchFiberContextEPPNS1_22FiberContextForHorizonES4_", ov_fibre_internal, HOS_GAP,
-             "named gap: the SDK's register and stack swap, replaced by host fibres; ticket 39");
+             "named gap: the SDK's register and stack swap, replaced by host fibres; the nn::os fibre support");
 HOS_OVERRIDE("_ZN2nn2os6detail18FiberImplByHorizon10InitializeEPNS0_9FiberTypeE", ov_fibre_internal, HOS_GAP,
-             "named gap: the SDK's first fibre frame, replaced by host fibres; ticket 39");
+             "named gap: the SDK's first fibre frame, replaced by host fibres; the nn::os fibre support");
 HOS_OVERRIDE("_ZN2nn2os6detail18FiberImplByHorizon13MapAliasStackEPPvPKvm", ov_fibre_internal, HOS_GAP,
-             "named gap: fibres run on the stack they were given; ticket 39");
+             "named gap: fibres run on the stack they were given; the nn::os fibre support");
 HOS_OVERRIDE("_ZN2nn2os6detail18FiberImplByHorizon15UnmapAliasStackEPKvS4_m", ov_fibre_internal, HOS_GAP,
-             "named gap: fibres run on the stack they were given; ticket 39");
+             "named gap: fibres run on the stack they were given; the nn::os fibre support");
 HOS_OVERRIDE("_ZN2nn2os6detail17CallFiberFunctionEPvPFPNS0_9FiberTypeES2_E", ov_fibre_internal, HOS_GAP,
-             "named gap: the SDK's fibre trampoline, replaced by host fibres; ticket 39");
+             "named gap: the SDK's fibre trampoline, replaced by host fibres; the nn::os fibre support");
 HOS_OVERRIDE("_ZN2nn4diag6detail9Backtrace10InitializeEPKNS_2os9FiberTypeE", ov_fibre_internal, HOS_GAP,
-             "named gap: a suspended fibre's saved context is not kept by host fibres; ticket 39");
+             "named gap: a suspended fibre's saved context is not kept by host fibres; the nn::os fibre support");
 
 // ==== nn::aoc: no add-on content
 static void ov_aoc_initialize(Cpu *c) {
@@ -626,7 +626,7 @@ static void ov_pctl_agc(Cpu *c) {
             "controls is not recorded", hos_caller(c, at, (int)sizeof at));
 }
 HOS_OVERRIDE("_ZN2nn4pctl33CheckAgcPermissionUnderMinimumAgeERKNS_7account3UidE", ov_pctl_agc, HOS_GAP,
-             "named gap, not an answer: no donor and no recorded answer; research 31 pack 3.2");
+             "named gap, not an answer: no donor and no recorded answer; the services study");
 
 // ==== nn::account: one offline local user with a constant Uid. A console's own user would differ; the game only needs
 // one stable Uid, which the donor kept in a file.
@@ -738,8 +738,8 @@ HOS_OVERRIDE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", ov_nickna
 // Network service accounts are never available offline: every call answers failure. The AsyncContext the game builds
 // for them is reached only through its four members below, all overridden, so its layout never matters: construction
 // and destruction write nothing, GetSystemEvent hands out an already signalled event and GetResult is the failure.
-// Research 31 pack 5.2.
-#define WHY_NSA "failure at once: the network service account is never available offline; pack 5.2"
+// See the services study.
+#define WHY_NSA "failure at once: the network service account is never available offline"
 static void ov_account_failure(Cpu *c) { ret_x(c, HOS_R_UNAVAILABLE); }
 HOS_OVERRIDE("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", ov_account_failure,
              HOS_OFFLINE, WHY_NSA);
@@ -748,7 +748,7 @@ HOS_OVERRIDE("_ZN2nn7account44EnsureNetworkServiceAccountIdTokenCacheAsyncEPNS0_
 HOS_OVERRIDE("_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE",
              ov_account_failure, HOS_OFFLINE, WHY_NSA);
 HOS_OVERRIDE("_ZN2nn7account12AsyncContext9GetResultEv", ov_account_failure, HOS_OFFLINE,
-             "the failure: no request is ever sent; pack 5.2");
+             "the failure: no request is ever sent");
 
 // Result LoadNetworkServiceAccountIdTokenCache(size_t *size, char *buffer, size_t capacity, const UserHandle &)
 static void ov_account_token_cache(Cpu *c) {
@@ -757,12 +757,12 @@ static void ov_account_token_cache(Cpu *c) {
     ret_x(c, HOS_R_UNAVAILABLE);
 }
 HOS_OVERRIDE("_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0_10UserHandleE", ov_account_token_cache,
-             HOS_OFFLINE, "size 0 and failure: no token cache offline; pack 5.2");
+             HOS_OFFLINE, "size 0 and failure: no token cache offline");
 
 HOS_OVERRIDE("_ZN2nn7account12AsyncContextC1Ev", ov_nothing, HOS_OFFLINE,
-             "writes nothing: no IPC object is created offline; pack 5.2");
+             "writes nothing: no IPC object is created offline");
 HOS_OVERRIDE("_ZN2nn7account12AsyncContextD1Ev", ov_nothing, HOS_OFFLINE,
-             "writes nothing: no IPC object to close; pack 5.2");
+             "writes nothing: no IPC object to close");
 
 // Result AsyncContext::GetSystemEvent(os::SystemEvent *event): an already signalled event bound to the game's. The
 // SystemEvent holds its SystemEventType first, which is what hos_bind_system_event takes. Manual clear.
@@ -773,7 +773,7 @@ static void ov_account_context_event(Cpu *c) {
     ret_x(c, HOS_R_OK);
 }
 HOS_OVERRIDE("_ZN2nn7account12AsyncContext14GetSystemEventEPNS_2os11SystemEventE", ov_account_context_event,
-             HOS_OFFLINE, "an already signalled event: the request finished at once with failure; pack 5.2");
+             HOS_OFFLINE, "an already signalled event: the request finished at once with failure");
 
 // ==== nn::time: the host clock and time zone. User and network clocks follow the host wall clock, and the steady clock
 // counts seconds on the host's monotonic timer, with one random source id per process. ClockSnapshot has the public
@@ -1124,7 +1124,7 @@ HOS_OVERRIDE("_ZN2nn4time48CalculateStandardUserSystemClockDifferenceByUserERKNS
 // below, so its layout never matters: construction and destruction write nothing, Initialize hands the task an event
 // of the host's, StartTask signals it at once, and GetResult is the failure. Each task has its own slot, kept from
 // Initialize to the destructor; the event of slot i is event_at(i) and keeps the clear mode of its first use.
-// Research 31 pack 5.2.
+// See the services study.
 typedef struct {
     uint64_t task;   // the game's task object, 0 when the slot is free
     int bound, autoclear;
@@ -1139,9 +1139,9 @@ static NetClockSlot *netclock_find(uint64_t task) {
 }
 
 HOS_OVERRIDE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTaskC1Ev", ov_nothing, HOS_OFFLINE,
-             "writes nothing: no session is opened offline; pack 5.2");
+             "writes nothing: no session is opened offline");
 HOS_OVERRIDE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask6CancelEv", ov_zero, HOS_OFFLINE,
-             "nothing to cancel: the task finishes at once; pack 5.2");
+             "nothing to cancel: the task finishes at once");
 
 // Result Initialize(os::EventClearMode): ManualClear is 0 and AutoClear 1 in the public SDK
 static void ov_netclock_initialize(Cpu *c) {
@@ -1167,7 +1167,7 @@ static void ov_netclock_initialize(Cpu *c) {
     ret_x(c, HOS_R_OK);
 }
 HOS_OVERRIDE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask10InitializeENS_2os14EventClearModeE",
-             ov_netclock_initialize, HOS_OFFLINE, "success, the task gets a host event; pack 5.2");
+             ov_netclock_initialize, HOS_OFFLINE, "success, the task gets a host event");
 
 // The slot of the task in x0 with its event address and clear mode, a guest stop when the task was never initialised.
 static NetClockSlot *netclock_of(Cpu *c, const char *fn, uint64_t *event, int *autoclear) {
@@ -1191,7 +1191,7 @@ static void ov_netclock_start(Cpu *c) {
     ret_x(c, HOS_R_OK);
 }
 HOS_OVERRIDE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9StartTaskEv", ov_netclock_start, HOS_OFFLINE,
-             "finishes at once: the finish event is signalled, no request is sent; pack 5.2");
+             "finishes at once: the finish event is signalled, no request is sent");
 
 // os::SystemEvent &GetFinishEvent(): the task's event, already signalled by StartTask
 static void ov_netclock_event(Cpu *c) {
@@ -1201,12 +1201,12 @@ static void ov_netclock_event(Cpu *c) {
     ret_x(c, event);
 }
 HOS_OVERRIDE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask14GetFinishEventEv", ov_netclock_event, HOS_OFFLINE,
-             "the task's host event, signalled by StartTask; pack 5.2");
+             "the task's host event, signalled by StartTask");
 
 // Result GetResult(): the failure
 static void ov_netclock_result(Cpu *c) { ret_x(c, HOS_R_UNAVAILABLE); }
 HOS_OVERRIDE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9GetResultEv", ov_netclock_result, HOS_OFFLINE,
-             "failure: the network clock is never available offline; pack 5.2");
+             "failure: the network clock is never available offline");
 
 static void ov_netclock_destroy(Cpu *c) {
     plat_mutex_lock(&sys_lock);
@@ -1215,9 +1215,9 @@ static void ov_netclock_destroy(Cpu *c) {
     plat_mutex_unlock(&sys_lock);
 }
 HOS_OVERRIDE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTaskD1Ev", ov_netclock_destroy, HOS_OFFLINE,
-             "frees the task's slot, no session to close; pack 5.2");
+             "frees the task's slot, no session to close");
 
-// ==== nn::pl shared fonts. No font files are prepared yet (research 31 pack, Q7), so what the donor does without its
+// ==== nn::pl shared fonts. No font files are prepared yet (the services study), so what the donor does without its
 // files is done here: the load state is Loaded, since the game spins until it is, and the address, the size and the
 // request for the NX font are named gaps, so a font the game needs stops the run at the call that wants it and not in
 // a wait. The donor read the six BFTTF files of the console's shared fonts from a folder; that comes when the files do.
@@ -1261,4 +1261,4 @@ static void ov_font_request(Cpu *c) {
             hos_caller(c, at, (int)sizeof at));
 }
 HOS_OVERRIDE("_ZN2nn2pl17RequestLoadNxFontEPvm", ov_font_request, HOS_GAP,
-             "named gap, not an answer: no donor and no font file is prepared; research 31 pack Q7");
+             "named gap, not an answer: no donor and no font file is prepared; the services study");

@@ -8,7 +8,7 @@
 // Scratch memory comes in chunks of host-visible, coherent memory, each with one buffer over it; a frame takes chunks
 // from a free list and hands them back from the completion thread once its value is done, so a chunk the device may
 // still read is never written. Attachment views are made per frame and destroyed the same way (a render target change
-// is rare next to a draw: research 17 counts 127 a Forest frame).
+// is rare next to a draw: the NVN2 call census counts 127 a Forest frame).
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,7 +29,7 @@
 #include "oot2/vk_replay.h"
 #include "plat.h"
 
-// ---------- the descriptions of stages, parsed once per stage record (records are immortal: research 35)
+// ---------- the descriptions of stages, parsed once per stage record (records are immortal: the programs and state study)
 #define BIND_BUCKETS 4096
 typedef struct BindEntry {
     const nvn_stage *stage;

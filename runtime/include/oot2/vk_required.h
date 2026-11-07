@@ -4,8 +4,8 @@
 // The Vulkan device items the renderer requires (architecture section 1), as one list. The check step of
 // `oot2 prepare` (tools/prepare/hostcheck.c, read by tools/prepare/check.py) and the runtime (runtime/gpu, and
 // `oot2 --vulkan-items`) both include this header, so the check and the device the Vulkan back end creates cannot
-// disagree about what a device must have. The list starts with the 19 items of section 1; the back end's tickets
-// extend it here, and nowhere else.
+// disagree about what a device must have. The list starts with the 19 items of section 1; the back end's later
+// work extends it here, and nowhere else.
 //
 // OOT2_VK_ITEMS(X) expands X(id, what, test, enable) once per item, in this order:
 //   id      a C identifier: the item's name in the probe's JSON and in `oot2 --vulkan-items`
@@ -24,14 +24,14 @@
 // limit with "at most" checks the extension itself (host_memory_import), since zero would pass it.
 //
 // Items 20 to 27 came with the Vulkan back end's device: what the device itself, the uni layout, the mesh path and the
-// translated programs use (architecture D12, D16, D18; research 13, 19, 20 and 22).
+// translated programs use (architecture D12, D16, D18; the mesh shader, first draw, pipeline cost and translator defects studies).
 //
-// Items 28 to 31 came with the pipeline builder's capability check (ticket 60, oot2/vk_caps.h): the translated modules
+// Items 28 to 31 came with the pipeline builder's capability check (the pipeline builder, oot2/vk_caps.h): the translated modules
 // declare 64-bit integers (the raw-access helper), storage images without a format, cube array images and non-uniform
 // indexing of storage image arrays, and the check over the whole corpus found no item that enables them. All four are
 // features every desktop GPU that has the items above offers.
 //
-// Items 34 to 42 are the core features the replay's draw state needs (ticket 140): one viewport and scissor for each of
+// Items 34 to 42 are the core features the replay's draw state needs (the core features requirement): one viewport and scissor for each of
 // the 16 NVN has, line and point fill, depth clamp, the depth bias clamp, the depth bounds test, wide lines, a blend
 // state and write mask for each colour target, dual-source blend factors and indirect draws with a first instance.
 // Every desktop GPU that has the items above has them. robustBufferAccess is not among them and stays off: a raw

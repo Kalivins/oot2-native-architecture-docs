@@ -3,7 +3,7 @@
 //
 // The ledger (architecture D21): the per-player file of what the game used, written by oot2.exe and read by the next
 // prepare, never shipped. One row per (stage key, answers, attachment formats): the stage is a program stage's job key
-// (nvn_stage.key, research 35), the answers are the translator's (xlate/host/Job.cs: tex, img, attr, fout), and the
+// (nvn_stage.key, the programs and state study), the answers are the translator's (xlate/host/Job.cs: tex, img, attr, fout), and the
 // attachment formats are what a linked pipeline needs (D12).
 //
 // Where the state comes from. A draw's record carries no state, and the state a draw uses was bound by earlier records,

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""The pipelines step of `oot2 prepare` (architecture D12, D21 and section 6.1, step 1; ticket 81): with the GPU the
+"""The pipelines step of `oot2 prepare` (architecture D12, D21 and section 6.1, step 1; the pipeline step): with the GPU the
 game will use, build every pipeline library and compute pipeline the shader cache holds, into the application pipeline
 cache `pipelines/pipeline.cache`, so that a launch creates them again from that file in milliseconds instead of
 compiling them. What it builds, in what order, on how many workers and how a stopped run resumes is pipesched.py.
@@ -21,13 +21,13 @@ the driver that wrote it.
 What it does not build. Task and mesh pipelines wait for the mesh draws ticket and are counted as not built, so the
 totals are a lower bound. Vertex libraries are built as translated, without padding: a pixel stage that reads an
 output its vertex stage does not write needs a padded vertex library, and those pairs are known only from play
-(research 20 G), so the ledger's pipelines step builds them.
+(the pipeline cost study), so the ledger's pipelines step builds them.
 
 In the output folder:
 
   pipelines/pipeline.cache   the application pipeline cache (the runtime reads it at launch)
   pipelines/times.tsv        one row per module built or refused: the driver's time, the cache hit, the module size,
-                             the worker's memory, how many ran at once; the tier rule of ticket 83 reads it
+                             the worker's memory, how many ran at once; the tier rule reads it
 
 `--pipelines-jobs N` sets the workers, `--pipelines-list FILE` limits the step to the job keys in a file, and
 `--pipelines-cold` turns the driver's own pipeline cache off (OOT2_VK_DRIVER_CACHE), which is what a timing needs.

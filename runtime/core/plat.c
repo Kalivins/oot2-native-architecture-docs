@@ -117,7 +117,7 @@ int plat_is_free(uint64_t addr) {
 }
 
 // Piece by piece, in address order, until the buffer is full: a query with reset resets only the pages it returns
-// (research 48 B5), so pieces after a full buffer keep their marks for the next call.
+// (the write-watch study), so pieces after a full buffer keep their marks for the next call.
 uint64_t plat_written(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset) {
     uint64_t total = 0;
     for (uint64_t a = addr, b; a < addr + size && total < max; a = b) {
@@ -307,7 +307,7 @@ int plat_random(void *p, size_t n) {
 
 // ---- the system timer resolution. ntdll's NtSetTimerResolution takes the units of 100 ns that timeBeginPeriod cannot
 // ask for (it takes whole milliseconds). It is undocumented, so it is resolved at run time (no import library, as
-// plat_sys.c does for pdh.dll), and a missing or failing call is the caller's to log. Measured in research 55: a request
+// plat_sys.c does for pdh.dll), and a missing or failing call is the caller's to log. Measured in the vsync clock study: a request
 // of 5000 is granted 5000, and a finer one is clamped to the finest the hardware allows.
 typedef LONG(NTAPI *NtSetTimerResolutionFn)(ULONG want, BOOLEAN on, PULONG now);
 typedef LONG(NTAPI *NtQueryTimerResolutionFn)(PULONG coarsest, PULONG finest, PULONG now);
@@ -879,7 +879,7 @@ void plat_timer_ops(const PlatTimerOps *ops) {
 // Windows 11 ignores a process's request while its window is minimized or hidden, unless the process opts out with
 // SetProcessInformation (ProcessPowerThrottling, PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION). Decided with the
 // maintainer on 2026-11-07: no opt-out. A minimized or occluded game needs no sub-millisecond pacing, and the system's
-// power saving stays intact. Not tested: the development machine runs Windows 10 (research/116-timer-resolution.md).
+// power saving stays intact. Not tested: the development machine runs Windows 10 (the timer resolution study).
 int plat_timer_hold(uint64_t want_ns, uint64_t *granted_ns) {
     if (__atomic_load_n(&g_timer_held, __ATOMIC_ACQUIRE)) {
         if (granted_ns) *granted_ns = plat_timer_resolution_ns();

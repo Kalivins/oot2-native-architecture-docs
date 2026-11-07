@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The pacing trace (ticket 95), for the game measurement the ticket asks for. Never part of a default run: it is off unless
+// The pacing trace (the acquire sync hold), for the game measurement the ticket asks for. Never part of a default run: it is off unless
 // the environment variable OOT2_PACE_TRACE names a file, and then the run says so in the file's first line and in the log.
 // AcquireTexture, SyncWait and QueuePresentTexture each write one line (event, wall nanoseconds since the first line, the
 // virtual clock's tick, then what the event knows: the window's interval, the hold, the placement, the timeout, the result,

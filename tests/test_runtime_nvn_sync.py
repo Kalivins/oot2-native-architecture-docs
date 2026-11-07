@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Contract tests of the acquire sync (ticket 95, architecture D22): under the
+"""Contract tests of the acquire sync (the acquire sync hold, architecture D22): under the
 default placement AcquireTexture returns at once and the sync it returns is
 signalled at the gate tick; the old placement (the hold inside the call) is
 behind the settings store's key hold_placement = acquire (OOT2_HOLD_PLACEMENT, the

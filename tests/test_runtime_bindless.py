@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
 """Tests of the Vulkan back end's format table and bindless tables (runtime/gpu/vk_format.c, bindless.c, vk_bindless.c,
-vk_image.c; architecture D10, D13 and D19, ticket 61), through tests/runtime/bindless_test.c, built like
+vk_image.c; architecture D10, D13 and D19, the bindless tables), through tests/runtime/bindless_test.c, built like
 tests/test_runtime_gpu.py's programs.
 
 Two groups, by what they need:

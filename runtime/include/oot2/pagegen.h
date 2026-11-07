@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Page generations: the one owner of the write watch (architecture D14, D19; research 48 answer 3).
+// Page generations: the one owner of the write watch (architecture D14, D19; the write-watch study).
 //
 // rt_mem_written resets the operating system's mark of every page it reports (oot2/memory.h), so two callers would take
 // each other's pages: what one query reported, the next one never sees. Nothing but runtime/gpu/pagegen.c calls it (a
@@ -15,7 +15,7 @@
 // mark for the next query. So a consumer that copies a range after a query that returned g holds every write stamped up
 // to g, and a later stamp of a page it already copied is a harmless repeat.
 //
-// Cost (research 48, spike S5, on the reference PC): a query costs about 1.3 ms per committed GiB of its range plus 0.1
+// Cost (the write-watch study, spike S5, on the reference PC): a query costs about 1.3 ms per committed GiB of its range plus 0.1
 // microsecond per page it reports, and the game then pays about 0.7 microsecond at its next write of each page the query
 // reset; separate queries of separate ranges cost what one query of the same pages costs. So a consumer queries only the
 // ranges it keeps a copy of, range by range, and never a whole region.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The video decoder service under the SDK's movie library (architecture D24b, ticket 98): the AV1 entry points of
+// The video decoder service under the SDK's movie library (architecture D24b, the movie player): the AV1 entry points of
 // nn::codec, answered here on the host with the decoder seam of runtime/video (dav1d).
 //
 // What the SDK does on the console. The movie library (movie::VideoDecoder, in the game's SDK module) reaches the video

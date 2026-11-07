@@ -38,7 +38,7 @@ static int g_registered;
 // Every listed name without a body: on entry c->pc is the entry point's own synthetic address (runtime.h).
 static void nvn_unbodied(Cpu *c) {
     const char *name = rt_hostfn_name(c->pc);
-    if (rt_census_on()) {   // census mode only: list the gap once, answer 0 and go on (research 31 Q5)
+    if (rt_census_on()) {   // census mode only: list the gap once, answer 0 and go on (the services study)
         if (rt_hostfn_calls(c->pc) == 1) {
             char at[96];
             rt_log("unbodied nvn: %s, answered 0, at %s", name ? name : "(unnamed)",

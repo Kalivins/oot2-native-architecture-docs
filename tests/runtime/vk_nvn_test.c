@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Tests of the NVN to Vulkan tables and the bank fillers (oot2/vk_nvn.h, runtime/gpu/vk_nvn.c; ticket 63), driven by
+// Tests of the NVN to Vulkan tables and the bank fillers (oot2/vk_nvn.h, runtime/gpu/vk_nvn.c; the Vulkan replay), driven by
 // tests/test_runtime_vk_nvn.py: `vk_nvn_test <case>`, one case per process. No device is needed. A passing case prints
 // "ok <case>"; a failed check prints its line and exits 1.
 //

@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Tests for tools/meshcost (spike S4, ticket 74): the sets of task, mesh and pixel programs read from the splitter's
+"""Tests for tools/meshcost (spike S4, the mesh pipeline cost spike): the sets of task, mesh and pixel programs read from the splitter's
 pairing file, the interface gap, the job lists, the statistics, the harness's refusal of a wrong job file, and the harness on
 the GPU.
 
 Three groups. The first needs nothing but Python: every input is built here, no game data. The second builds
 tools/meshcost/vkmeshcost.c with clang and the Vulkan SDK headers and feeds it job files it must refuse before it touches
-Vulkan; it skips without them, unless OOT2_REQUIRE_CLANG or OOT2_REQUIRE_VULKAN is set. The third translates ticket 72's
+Vulkan; it skips without them, unless OOT2_REQUIRE_CLANG or OOT2_REQUIRE_VULKAN is set. The third translates the mesh bindings work's
 synthetic task, mesh and pixel programs, builds their libraries and links on the GPU with validation on, and runs the counter-run
 (a layout without the push constants, which validation must report); it runs only when OOT2_GPU_TESTS is set, the translator is
 built and tools/build_vkdraw.py --harness vkmeshcost has been run: no CI runner has a GPU.
@@ -403,7 +403,7 @@ class HarnessJobFileTest(unittest.TestCase):
                      and (ROOT / "build" / "vkmeshcost" / "vkmeshcost.exe").is_file(),
                      "set OOT2_GPU_TESTS, build the translator and tools/build_vkdraw.py --harness vkmeshcost to run on the GPU")
 class GpuTest(unittest.TestCase):
-    """Ticket 72's synthetic task, mesh and pixel programs through the harness: libraries and links build clean, and a layout
+    """The mesh bindings work's synthetic task, mesh and pixel programs through the harness: libraries and links build clean, and a layout
     without the push constants is caught by validation."""
 
     @classmethod

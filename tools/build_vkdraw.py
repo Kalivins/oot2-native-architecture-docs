@@ -8,7 +8,7 @@
                                 [--cc clang]
 
 vkdraw is spike S2's first draw (tools/firstdraw/vkdraw.c); vkmesh is its task and mesh
-sibling, for the first translated mesh draw (tools/firstdraw/vkmesh.c, ticket 72); vkpipecost is spike
+sibling, for the first translated mesh draw (tools/firstdraw/vkmesh.c, the mesh bindings work); vkpipecost is spike
 S3's pipeline and descriptor cost harness (tools/pipecost/*.c, Windows only);
 vkcomputecost is spike S6's compute pipeline build harness
 (tools/computecost/vkcomputecost.c, Windows only); vkmeshcost is spike S4's task and mesh

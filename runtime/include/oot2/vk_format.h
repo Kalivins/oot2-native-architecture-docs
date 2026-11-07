@@ -2,7 +2,7 @@
 // Copyright (C) 2026 The oot2-native contributors
 //
 // The format table of the Vulkan back end (architecture D19): every NVNformat of NVN's enumeration (0x01 to 0x9C, the
-// range research 34 sized) and the Vulkan format that stands for it. Images, render targets, vertex attributes and the
+// range the texture and sampler study sized) and the Vulkan format that stands for it. Images, render targets, vertex attributes and the
 // transcode all read this one table; it takes no device, so the check of the table over every format runs without
 // one. What depends on the device (a format the device lacks, the stand-in that replaces it) is decided by the
 // functions below from a caller's answer to "does the device take this format for these features".
@@ -28,9 +28,9 @@
 
 enum {
     VKF_EXPAND_RGB = 1,   // 3-component format: Vulkan has no sampled format for it, each texel is expanded to four
-                          // components on upload (ticket 65), so no image can stand on the game's own storage
+                          // components on upload (the texture upload), so no image can stand on the game's own storage
     VKF_ALPHA_ONE = 2,    // X format: alpha is sampled as 1 (a view swizzle)
-    VKF_ASTC = 4,         // block-compressed ASTC: the device may not sample it; the transcode makes a BC image (ticket 66)
+    VKF_ASTC = 4,         // block-compressed ASTC: the device may not sample it; the transcode makes a BC image (the ASTC transcode)
     VKF_DEPTH = 8,
     VKF_STENCIL = 16,
     VKF_SRGB = 32,

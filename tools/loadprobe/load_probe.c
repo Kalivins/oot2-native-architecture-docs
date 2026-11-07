@@ -8,7 +8,7 @@
 // Built and run by tools/loadprobe/load_probe.py against a layout.h for the player's modules:
 //   load_probe <path> <sha256> [<path> <sha256> ...]     in layout order (layout.h MOD_LIST)
 // No lifted code exists here, so the dispatch table gets one stand-in function at the start and end of each module.
-// The runtime needs each module's end marker past its functions (ticket 92): probe_end.c, linked right after this
+// The runtime needs each module's end marker past its functions (the lifted-code end marker): probe_end.c, linked right after this
 // file as a module's <mod>_table.c is linked after its lifted code, holds it, and the probe checks the order first.
 #include <stdio.h>
 #include <stdlib.h>

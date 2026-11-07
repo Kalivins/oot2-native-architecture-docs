@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Calls runtime/ui through its C header (oot2/ui.h), the way the rest of the runtime will: research 104's proof that C
+// Calls runtime/ui through its C header (oot2/ui.h), the way the rest of the runtime will: the C++ build check's proof that C
 // code reaches the C++ stand-in and that the C++ standard library is linked behind it. One case per process, named on
 // the command line (tests/test_runtime_ui.py): ui_test CASE [ARGS]. Exit 0 passes, 1 fails with a line on stderr.
 #include <stdio.h>
@@ -91,7 +91,7 @@ static int case_flags(int argc, char **argv) {
 }
 
 // ui_test imgui VERSION|none: the Dear ImGui the runtime was built with, and whether its core agrees with the headers
-// the stand-in saw (research 107). "none" is a build without the library.
+// the stand-in saw (the ImGui fetch study). "none" is a build without the library.
 static int case_imgui(int argc, char **argv) {
     CHECK(argc == 3);
     UiBuild b = ui_standin_build();

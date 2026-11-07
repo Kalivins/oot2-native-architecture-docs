@@ -710,7 +710,7 @@ def _emit_chunk(task):
 
 # ------------------------------------------------------------------------------------------------ driver
 
-# The end of a module's lifted code (ticket 92). The table is the last object of its module in the link, so this
+# The end of a module's lifted code (the lifted-code end marker). The table is the last object of its module in the link, so this
 # function lies after every lifted function and static helper of the module; its address is the first byte of host
 # code that is not the module's. The runtime refuses a function at or past it (dispatch.c), so a link order that moved
 # the table is an error at start, not a silent misreading of host code as guest code. noinline and used keep it out of

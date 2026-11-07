@@ -29,7 +29,7 @@ uint64_t plat_resident(uint64_t addr, uint64_t size);           // bytes of comm
 // On Windows a write-watched reservation (the heap and alias regions) is made of pieces cut at multiples of PLAT_PIECE
 // in the address space, and every call above splits its range at those boundaries, a reservation being the unit of each
 // of them. The reason is the GPU back end's host imports: the driver walks the run of committed pages that follows an
-// imported pointer to the end of its reservation, 14 ms per GiB (research 48 answer 4), and a piece bounds that walk
+// imported pointer to the end of its reservation, 14 ms per GiB (the write-watch study), and a piece bounds that walk
 // to one import window (oot2/backing.h). The POSIX half reserves in one piece; nothing there walks.
 #define PLAT_PIECE (64ull << 20)
 typedef struct PlatProcMem {
@@ -92,7 +92,7 @@ void plat_sleep_ns(uint64_t ns);
 int plat_random(void *p, size_t n);     // bytes from the system's generator; 1 on success
 __attribute__((noreturn)) void plat_exit(int code);   // flushes the C streams, then ends the process
 
-// ---- the system timer resolution (ticket 116). The Windows scheduler wakes a waiting thread at its timer's tick, 15.6
+// ---- the system timer resolution (the timer resolution hold). The Windows scheduler wakes a waiting thread at its timer's tick, 15.6
 // ms by default and as fine as 0.5 ms when some process asks for it; the request is a flag of the calling process, not a
 // count, and the system drops it when the process ends, however it ends. plat_timer_hold asks for want_ns; the policy
 // (the setting, the log line) is rt_timer_hold_start in timer.c, so this layer stays free of settings.

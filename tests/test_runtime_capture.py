@@ -20,7 +20,7 @@ environment, as in a run of the game.
 - off: no file and no frame boundary without OOT2_CAPTURE.
 - shown: shown ticks a back end reports late are written as they come.
 - cost: the CPU time of the present call with the capture on and off, printed
-  for the record (research/89 keeps the figures).
+  for the record (the capture study keeps the figures).
 
 Needs clang for x86-64 (OOT2_CC, else clang on PATH). Without one the tests
 skip, unless OOT2_REQUIRE_CLANG is set, as continuous integration sets it.
@@ -87,7 +87,7 @@ class CaptureTest(unittest.TestCase):
         if capture:
             e["OOT2_CAPTURE"] = "1"
         # the test's game passes no sync to AcquireTexture and relies on the acquire to pace its presents on the host's
-        # clock: the old placement, the hold inside the call (ticket 95; a game that passes no sync is not held by the default)
+        # clock: the old placement, the hold inside the call (the acquire sync hold; a game that passes no sync is not held by the default)
         e["OOT2_HOLD_PLACEMENT"] = "acquire"
         e.update(env or {})
         try:

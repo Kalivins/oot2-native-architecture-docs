@@ -164,7 +164,7 @@ def tex_words(rd2: int, rd: int, ra: int, rb: int, handle: int, mask: int = 0xF)
 
 
 class IntegerTests(unittest.TestCase):
-    """The integer, select and conversion instructions world-material programs use (ticket 23)."""
+    """The integer, select and conversion instructions world-material programs use (the stage bindings work)."""
 
     def regs(self, *instrs, **env) -> dict:
         return run(listing(*[(i,) for i in instrs], ("EXIT",)), **env).regs
@@ -251,7 +251,7 @@ class ControlTests(unittest.TestCase):
 
 
 class TextureInstructionTests(unittest.TestCase):
-    """Sources split between Ra and Rb, results packed by the mask (ticket 23)."""
+    """Sources split between Ra and Rb, results packed by the mask (the stage bindings work)."""
 
     def sample(self, text: str, words: tuple[int, int], regs: dict[int, float], from_ra: bool = False):
         prog = [(f"MOV R{k}, 0x{f2b(v):x}",) for k, v in regs.items()] + [(text, *words), ("EXIT",)]
@@ -455,7 +455,7 @@ def description(stage: str, *, cbufs=(), sbufs=(), textures=(), inputs=None, fit
 
 
 class BindingTests(unittest.TestCase):
-    """The draw's bindings come from the two descriptions alone (ticket 23, layout `uni`)."""
+    """The draw's bindings come from the two descriptions alone (the stage bindings work, layout `uni`)."""
 
     def setUp(self):
         bank = first_draw.bank_bytes({"0x110": {"u64": 0x1004}, "0x118": {"u32": [8]}})

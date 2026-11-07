@@ -364,7 +364,7 @@ static void create_device(uint64_t after) {
     oot2_vk_chain_features(&en, &features);
     features.features = en.features;
     // OOT2_VK_DRIVER_CACHE=off keeps the driver's own pipeline cache from serving or storing anything, so that a build
-    // is cold whatever ran before (spike S3's method, research 20 F; prepare's pipeline step measures with it). The
+    // is cold whatever ran before (spike S3's method, the pipeline cost study; prepare's pipeline step measures with it). The
     // structure rides on the device chain, which VK_KHR_pipeline_binary (a required item) makes valid.
     VkDevicePipelineBinaryInternalCacheControlKHR driver_cache = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_PIPELINE_BINARY_INTERNAL_CACHE_CONTROL_KHR, .disableInternalCache = VK_TRUE};

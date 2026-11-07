@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Ticket 72: draw a synthetic task and mesh pair on the GPU, direct and indirect, and check every pixel.
+"""The mesh bindings work: draw a synthetic task and mesh pair on the GPU, direct and indirect, and check every pixel.
 
     py -3 tools/firstdraw/mesh_draw.py --work DIR [--xlate oot2-xlate] [--vkmesh build/vkmesh/vkmesh.exe]
         [--validation on|sync|gpu|off] [--scenario NAME] [--counter NAME]

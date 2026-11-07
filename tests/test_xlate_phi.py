@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
-"""Tests for a global access whose address is a phi of a traced pointer and a pointer the shader loaded (ticket 120).
+"""Tests for a global access whose address is a phi of a traced pointer and a pointer the shader loaded (the mixed phi fix).
 
 The translator traces a global address to the constant buffer word pair that holds a storage
 buffer's base. When the address is a phi, it walks the sources, and a helper checks the address

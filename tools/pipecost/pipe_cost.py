@@ -77,7 +77,7 @@ def describe(res: dict) -> dict:
     only marks use: those arrays are bound once per command buffer.
     """
     if res.get("schema", 1) != 1:
-        # Schema 2 (ticket 23) numbers the layout `uni`: buffers at set 1, textures in push constant slots.
+        # Schema 2 (the stage bindings work) numbers the layout `uni`: buffers at set 1, textures in push constant slots.
         raise ValueError(f"a schema {res['schema']} description: this census reads schema 1 (set 0 per draw)")
     binds = [(res["support_buffer"]["binding"], UBO, 1)]
     binds += [(c["binding"], UBO, 1) for c in res["cbufs"]]

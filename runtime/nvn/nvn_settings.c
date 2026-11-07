@@ -2,12 +2,12 @@
 // Copyright (C) 2026 The oot2-native contributors
 //
 // The NVN2 front end's live keys in the settings store (oot2/settings.h), applied by hooks. hold_ticks is experiment
-// E2's hold (ticket 88), the store's first live key: its hook calls nvn_present_hold on whichever thread changed it, and
+// E2's hold (the acquire gate), the store's first live key: its hook calls nvn_present_hold on whichever thread changed it, and
 // the next acquire waits for the new hold. nvn_present_hold's own reading of OOT2_HOLD_TICKS (nvn_window.c) is left for
-// a program that never binds the store, such as ticket 88's tests: once bound, the call wins over that reading, and the
-// store, which reads the same variable, holds the value. hold_placement (ticket 95) is read by nvn_window.c from the
+// a program that never binds the store, such as the acquire gate's tests: once bound, the call wins over that reading, and the
+// store, which reads the same variable, holds the value. hold_placement (the acquire sync hold) is read by nvn_window.c from the
 // store at every acquire and present, so its hook only says when it changed; nvn_acquire_wait overrides it.
-// frame_rate_target (ticket 111) is read the same way, and its hook only says when it changed.
+// frame_rate_target (the fixed frame rate gate) is read the same way, and its hook only says when it changed.
 #include "oot2/nvn_pace.h"
 #include "oot2/runtime.h"
 #include "oot2/settings.h"

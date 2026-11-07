@@ -215,7 +215,7 @@ class SearchTest(unittest.TestCase):
 
 
 class MemoTest(unittest.TestCase):
-    """The memo of decoded words (Search.dec) is bounded and changes no answer (ticket 122: unbounded, it held 3.4 KiB
+    """The memo of decoded words (Search.dec) is bounded and changes no answer (the spin-search memory bound: unbounded, it held 3.4 KiB
     per word searched and made the search the peak memory of the whole prepare)."""
 
     SHAPES = [POLL, TEST_LOOP, POLL_STORE, LOCK_LOOP, CALL_IN_LOOP, COUNTED, STORE_OF_WRITTEN, FORWARD_ONLY]
@@ -354,7 +354,7 @@ class EmitterSpinTest(unittest.TestCase):
 
 class LiftRecordTest(unittest.TestCase):
     """The lift step's record carries the spin-wait search's peak memory beside its seconds, and not the code
-    generation's (ticket 122: the search was the peak of the whole prepare and nothing recorded it)."""
+    generation's (the spin-search memory bound: the search was the peak of the whole prepare and nothing recorded it)."""
 
     TABLE = {"main": [{"head": 16, "back_edges": [20], "size": 2, "kinds": []}]}
     REPORT = {"total_functions": 3, "spin_gates": 1, "modules": {"main": {"stats": {"c_bytes": 100}}}}

@@ -9,7 +9,7 @@
 // resolve that finds its backing holds the lock shared and stamps the submission's value on its pools and its backing
 // with an atomic maximum; one that must make a backing takes the lock exclusively and looks again. A backing leaves the
 // map only under the exclusive lock, so a stamp made under the shared lock is seen by whoever removes it. Memory is
-// freed outside the lock (freeing a 64 MiB import takes about 1.6 ms, research 48).
+// freed outside the lock (freeing a 64 MiB import takes about 1.6 ms, the write-watch study).
 //
 // A cell holds the imports and mirrors of the separate runs of committed pages that binds reached inside it, sorted and
 // disjoint. A bind outside them commits its own pages, then takes the whole run of committed pages around it: every
@@ -156,7 +156,7 @@ static void stamp(uint64_t *at, uint64_t value) {
 static uint64_t used_by(const Backing *b) { return __atomic_load_n(&b->last_use, __ATOMIC_ACQUIRE); }
 
 // The newest submission that can reach b: its own last resolve, or a raw-access submission, which reaches every
-// backing its page table maps (research 57 F4: one global value rather than a stamp on every backing).
+// backing its page table maps (the backing map study: one global value rather than a stamp on every backing).
 static uint64_t raw_last(void) { return __atomic_load_n(&g_raw_last, __ATOMIC_ACQUIRE); }
 static uint64_t reach(const Backing *b) {
     uint64_t u = used_by(b), r = raw_last();
@@ -630,7 +630,7 @@ static void committed_run(uint64_t lo, uint64_t hi, uint64_t plo, uint64_t phi, 
 }
 
 // Import [lo, hi), committed pages. A refusal is retried once after a 4 KiB import of the committed page probe clears
-// it (research 48 B7); a second refusal is a named fatal with the shape.
+// it (the write-watch study); a second refusal is a named fatal with the shape.
 static Backing *import_new(uint64_t lo, uint64_t hi, uint64_t probe, const char *why) {
     BackingMem m;
     if (!g_ops.import(lo, hi - lo, &m)) {

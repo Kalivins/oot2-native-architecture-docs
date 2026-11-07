@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
 """Device tests of the uploads of CPU-written textures (runtime/gpu/vk_texture.c, the arena images of vk_image.c, the
-untile pass runtime/gpu/shaders/untile.comp; architecture D19, ticket 65), through tests/runtime/vk_texture_test.c, built
+untile pass runtime/gpu/shaders/untile.comp; architecture D19, the texture upload), through tests/runtime/vk_texture_test.c, built
 like tests/test_runtime_gpu.py's programs. Every case runs under the validation layer with synchronization validation and
 ends with its counts, which must be 0 errors and 0 warnings.
 

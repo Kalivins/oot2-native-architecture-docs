@@ -1135,7 +1135,7 @@ static void dev_setup(const char *folder) {
     device_check(vkMapMemory(gpu_vk.device, D.readback_mem, 0, VK_WHOLE_SIZE, 0, &D.readback_map), "vkMapMemory");
 }
 
-// ---------- a replay of the synthetic frame, resolved as research 20's was (tools/pipecost/vkpc_draw.c, replay mode):
+// ---------- a replay of the synthetic frame, resolved as the pipeline cost study's was (tools/pipecost/vkpc_draw.c, replay mode):
 // the pipeline through a hash table keyed by program, 29 buffers through a binary search of 4,096 sorted ranges, the
 // uniform buffers copied from guest memory as the snapshot of D17a, texture handles through a table. Each draw changes
 // the pipeline (run length 1, as OoT's 601 program binds for 340 draws).
@@ -1551,7 +1551,7 @@ static void case_dev_loss(const char *folder, const char *dir) {
     gpu_vk_failed(VK_ERROR_DEVICE_LOST, "the test's injected loss");
 }
 
-// ---------- the timing of research 20 section E, on this device
+// ---------- the timing of the pipeline cost study, on this device
 static int cmp_u64(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
     return x < y ? -1 : x > y;

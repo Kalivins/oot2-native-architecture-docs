@@ -10,7 +10,7 @@
 // still be read), the memory heaps with their budget, what VK_EXT_device_fault describes (the description, every
 // faulting address with its precision, every vendor record) and the last diagnostic checkpoints the queue reached, each
 // with the value and kind of the submission it marks. The vendor's binary fault data, when the device offers it, is
-// saved byte for byte beside the report (research 16 D2: DKB Recomp logged only its size). The first thread that meets
+// saved byte for byte beside the report (the NVIDIA fault study: DKB Recomp logged only its size). The first thread that meets
 // the loss writes the report; another waits on the lock until the run ends, so no other fatal cuts the report short.
 // When the file cannot be written, the report goes to the log instead and the stop says so.
 //

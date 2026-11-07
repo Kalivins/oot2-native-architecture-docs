@@ -20,7 +20,7 @@ log walks at submit.
 - callbacks: the memory callback is called where the console's driver calls
   it, with its arguments, and nowhere else.
 - loop: 131 command buffers created, recorded, submitted and finalized each
-  frame, as research 17's census counts in the Forest, with no growth of the
+  frame, as the NVN2 call census counts in the Forest, with no growth of the
   host memory they hold.
 - failing cases: what the front end cannot honour stops by name.
 

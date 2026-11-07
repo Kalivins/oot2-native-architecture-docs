@@ -11,7 +11,7 @@ the first; the breadcrumbs, one numbered record per draw, which the marker names
 On the desktop's RTX 3060 Ti (skipped without a device that has every item of oot2/vk_required.h, unless OOT2_REQUIRE_GPU
 is set): 3,000 draws a frame on the uni layout through the ring and as direct calls, every cell of the target checked, under
 synchronization validation; a third frame that waits for the first while the device holds it on a semaphore; an injected
-device loss whose report names the last draw by its stages. OOT2_TIMING=1 also runs the timing of research 20 section E
+device loss whose report names the last draw by its stages. OOT2_TIMING=1 also runs the timing of the pipeline cost study
 (the submitting thread's and the recorder's time per frame against direct calls) and prints it.
 
 Each check has a counter-run, a test-only switch of vk_rec_test that breaks the mechanism the check is for: a ring that

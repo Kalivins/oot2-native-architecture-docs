@@ -9,10 +9,10 @@
 // unmapped page reads zero, drops its write and takes a miss log entry. The span runs from the lowest to the highest 2 MiB
 // chunk a run touches. The table is built again, whole, when the map's version moved since the copy in use was built;
 // a copy a submission in flight may read is never written, so the table has a few copies (RAW_COPIES_MAX), each in
-// device-local host-visible memory where the device has it (research 14 A4: there the walk ran at a direct pointer's
-// speed), else in host-visible memory. Building again rather than editing in place is what keeps both of research 124's
+// device-local host-visible memory where the device has it (the raw-address study: there the walk ran at a direct pointer's
+// speed), else in host-visible memory. Building again rather than editing in place is what keeps both of the Hookshot survey's
 // checks true by construction: a backing that left the map leaves no entry, and one whose range a newer backing took
-// leaves the newer entries alone. A build costs one write of the table (8 bytes per mapped page): see research 70.
+// leaves the newer entries alone. A build costs one write of the table (8 bytes per mapped page): see the raw page table study.
 //
 // A submission (gpu_vk_raw_begin, at its first raw-access stage; gpu_vk_raw_end at its end). The begin keeps the map's
 // invariant (backing_raw_begin), takes a current copy and returns the push words 0 to 3 for every raw-access stage of

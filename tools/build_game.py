@@ -32,13 +32,13 @@ runtime (every runtime/*/*.c and runtime/*/*.cpp) goes into a static library, li
 library is linked whole, because HOST_OVERRIDE entries (runtime.h) are found through a linker section, not through a
 reference that would pull their object out of an archive. On Windows the program is linked with
 --disable-high-entropy-va: with high-entropy ASLR the main thread's stack can land inside the fixed module region
-(research 28).
+(the memory and loader study).
 
 C++. A .cpp file of the runtime is compiled as C++17 without exceptions and without run-time type information
-(CXX_FLAGS: the runtime does not unwind C++ exceptions, research 05), by the compiler's C++ driver (--cxx, else
+(CXX_FLAGS: the runtime does not unwind C++ exceptions, the C++ exceptions study), by the compiler's C++ driver (--cxx, else
 OOT2_CXX, else clang++ beside the C compiler). The program is always linked by that driver, so a C++ object in the
 library finds the C++ standard library, and on Windows with -static, so libc++ and libunwind are inside oot2.exe and no
-DLL of the toolchain sits beside it (research 104). Only a .cpp file is C++ here: the sources of runtime/ui stay behind
+DLL of the toolchain sits beside it (the C++ build check). Only a .cpp file is C++ here: the sources of runtime/ui stay behind
 the C header oot2/ui.h.
 
 The Vulkan back end. The runtime compiles against the Vulkan headers and Volk (runtime/gpu/vk_volk.c includes volk.c),
@@ -49,7 +49,7 @@ SDK's Bin folder, else PATH), validated by it (--spirv-val), and embedded as spi
 into the runtime library (oot2/gpu.h). They are compiled at every build of the library, so an embedded shader always
 matches its source; no compiled shader is kept in the repository.
 
-Dear ImGui. The menu's library is fetched and never committed (tools/fetch_imgui.py, research 107): --imgui, else the
+Dear ImGui. The menu's library is fetched and never committed (tools/fetch_imgui.py, the ImGui fetch study): --imgui, else the
 OOT2_IMGUI variable, else fetched/imgui when it exists. A folder that is not exactly the pinned layout is refused by
 name. Its four core sources (fetch_imgui.CORE_SOURCES) are compiled as C++ with the runtime's C++ flags (warnings off:
 it is not this project's code) and join the runtime library; every C++ file of the runtime then sees its headers and
@@ -120,11 +120,11 @@ GEN_FLAGS = ("-std=gnu11", "-O1", "-march=x86-64-v3", "-fno-strict-aliasing", "-
 RT_FLAGS = ("-std=gnu11", "-O2", "-march=x86-64-v3", "-fno-strict-aliasing", "-Wall", "-Wextra") + \
     (() if WIN else ("-pthread",))
 # C++17 is what RmlUi asks for and Dear ImGui's C++11 code builds under; exceptions and run-time type information are
-# off because nothing unwinds a C++ exception (research 05). The other flags are the runtime's own.
+# off because nothing unwinds a C++ exception (the C++ exceptions study). The other flags are the runtime's own.
 CXX_FLAGS = ("-std=c++17", "-O2", "-march=x86-64-v3", "-fno-strict-aliasing", "-fno-exceptions", "-fno-rtti",
              "-Wall", "-Wextra") + (() if WIN else ("-pthread",))
 # -static on Windows: llvm-mingw's clang++ links libc++ as libc++.dll and libunwind as libunwind.dll unless told
-# otherwise, and a DLL of the toolchain must not sit beside oot2.exe (research 104). Linux links the system's C++
+# otherwise, and a DLL of the toolchain must not sit beside oot2.exe (the C++ build check). Linux links the system's C++
 # library, which every machine that builds there has.
 LINK_FLAGS = ("-Wl,--disable-high-entropy-va", "-static") if WIN else ("-pthread",)
 LINK_LIBS = () if WIN else ("-lm", "-ldl")   # Volk opens the Vulkan loader with dlopen
@@ -375,7 +375,7 @@ def end_marker(name: str) -> str:
 def check_end_marker(name: str, man: dict, table: Path) -> None:
     """The lifted code's end marker must be named by the manifest and defined by the function table, which the link
     places after the module's chunks. Without it the runtime cannot tell the last lifted function from the host code
-    linked after it (ticket 92), so the build stops here, before any compile."""
+    linked after it (the lifted-code end marker), so the build stops here, before any compile."""
     symbol = end_marker(name)
     if man.get("end_marker") != symbol:
         raise BuildError(f"end marker missing: the manifest of {name} does not name {symbol}: lift again with the "

@@ -8,7 +8,7 @@
 // The guest memory is the runtime's own (rt_mem_init and SetHeapSize, first-touch commit), so the commit query and the
 // commit epoch are the real ones. The device is a set of stand-ins: a block is host memory from calloc, an import is the
 // host range itself (so bytes written through an import's reference land in guest memory, as on a device), and the
-// import refuses, as the driver does (research 48 B1, B7), any range with a page that is not committed, judged
+// import refuses, as the driver does (the write-watch study), any range with a page that is not committed, judged
 // without the runtime: by VirtualQuery on Windows, elsewhere by whether the kernel can read the page (a write of one
 // byte from it into a pipe fails with EFAULT when it cannot). The timeline is oot2/gpu.h's over a counter the test
 // raises, as tests/runtime/gpu_test.c drives it.
@@ -23,7 +23,7 @@
 //   finiwait    pool_fini of a pool a submission in flight used returns only after that submission is done; one no
 //               submission used returns at once
 //   cross       a bind across a 64 MiB window boundary inside one pool gets one import that holds all of it
-//   refused     an import the device refuses once is retried after a 4 KiB import, as research 48 B7 requires
+//   refused     an import the device refuses once is retried after a 4 KiB import, as the write-watch study requires
 //   blocks      VRAM blocks are made by the block thread ahead of use; an extent larger than a block has its own
 //   flat        4,660 pools made, bound and finalized, three times: nothing of the map or the stand-ins grows
 //   bench       the resolver's cost per lookup over 4,500 pools, each already backed
@@ -101,7 +101,7 @@ static uint64_t submission(void) {
 
 // ---------- the stand-in device
 // 1 when every page of [a, a + n) is committed. VirtualQuery answers a whole run of pages in one state, and walks it
-// to tell its length, as a driver's import does (research 48 answer 4), so it is asked once per run, not per page.
+// to tell its length, as a driver's import does (the write-watch study), so it is asked once per run, not per page.
 static int range_committed(uint64_t a, uint64_t n) {
 #ifdef _WIN32
     while (n) {

@@ -69,7 +69,7 @@ def parse_module(text: str) -> tuple[str, Path]:
 
 def build(outdir: Path, cc: str) -> Path:
     exe = outdir / f"load_probe{'.exe' if os.name == 'nt' else ''}"
-    # probe_end.c right after load_probe.c: its end marker must lie past the stand-in function (ticket 92).
+    # probe_end.c right after load_probe.c: its end marker must lie past the stand-in function (the lifted-code end marker).
     sources = [str(Path(__file__).with_name(n)) for n in ("load_probe.c", "probe_end.c")] + \
         sorted(str(p) for p in CORE.glob("*.c"))
     extra = ["-Wl,--disable-high-entropy-va"] if os.name == "nt" else ["-pthread"]

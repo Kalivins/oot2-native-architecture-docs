@@ -73,7 +73,7 @@ uint64_t rt_mem_written(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t 
 
 // The commit state of guest pages, for the GPU back end's host imports (D14): an import over a page that is not
 // committed fails, and after a failed import the driver refuses every import of that size or larger for a while
-// (research 14 F12, research 48 B1 and B7). rt_mem_commit_run gives the length in bytes, from addr, of the run of pages
+// (the raw-address study, the write-watch study). rt_mem_commit_run gives the length in bytes, from addr, of the run of pages
 // in one state that holds addr, up to addr + size and up to the end of addr's region, with *committed set to 1 for
 // committed pages and 0 for pages that are not; a caller walks a range run by run. UINT64_MAX when addr lies in no
 // region (stack, heap, alias, modules, kernel); 0 for size 0. It reads the page map without the lock, so its answer is

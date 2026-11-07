@@ -3,7 +3,7 @@
 //
 // The two things the pipeline builder does to a translated SPIR-V module besides handing it to the driver
 // (runtime/gpu/spirv.c, architecture D12 and D13): read what it declares (its capabilities and extensions, which the
-// device's required list has to give, research 20 finding G and ticket 60), and add the vertex outputs a pixel module
+// device's required list has to give, the pipeline cost study and the pipeline builder), and add the vertex outputs a pixel module
 // reads and the vertex module does not write, set to what the console's next stage reads from an unwritten output,
 // (0, 0, 0, 1) (DKB Recomp's spirv_add_outputs does the same; this is a new implementation of the rule, see
 // THIRD_PARTY_NOTICES.md). Nothing here needs Vulkan.

@@ -1,26 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The pipeline builder of the Vulkan back end (architecture D12, D13 and the build policy of section 6.1; ticket 60,
-// research 20, 23 and 59): the one pipeline layout of the `uni` scheme, pipeline libraries per module, fast links per
+// The pipeline builder of the Vulkan back end (architecture D12, D13 and the build policy of section 6.1; the pipeline cost and
+// stage bindings studies): the one pipeline layout of the `uni` scheme, pipeline libraries per module, fast links per
 // (pair, attachment formats), compute pipelines per module, and the per-player pipeline cache. The Vulkan back end
 // calls it at run time and prepare's pipeline step calls it through a program linked with the runtime library, so a
 // cache hit at launch sees the create info prepare built (the code that makes every create info is here, once).
 //
-// What it builds from: the shader cache pack (oot2/shader_cache.h), by the job key of the stage (research 35, decision
+// What it builds from: the shader cache pack (oot2/shader_cache.h), by the job key of the stage (the programs and state study, decision
 // 1: "<key16>.<variant>", the key an nvn_stage carries); modules and descriptions are read from the mapped pack and
 // never copied. A key the pack lacks, a job that did not translate, a description of another schema or stage, a module
 // that does not fit its stage's slots, one that declares a capability the device's required list does not give
 // (oot2/vk_caps.h): each is a named fatal that prints the stage's shape, because no prepared module could ever answer
-// it (research 35: the bytes the game passes at run time have not been compared with the archives).
+// it (the programs and state study: the bytes the game passes at run time have not been compared with the archives).
 //
 // Every get is blocking: it creates what is missing before it returns, on the calling thread, and any number of threads
 // may ask at once (two asking for the same pipeline build it once). No pipeline is created or released while a
-// submission is in flight (section 6.1; research 16, D4): a get that would create one with the queue busy is a named
+// submission is in flight (section 6.1; the NVIDIA fault study): a get that would create one with the queue busy is a named
 // fatal, the miss path (oot2/vk_miss.h) drains first. The queue counts as idle while the only submission not done is the
 // one being replayed (it has put nothing on the queue yet). A pipeline that exists already is returned with no such check.
 //
-// Layout of the one pipeline layout (research 20, finding A; research 23 and 59; xlate/host/UniLayout.cs is the source
+// Layout of the one pipeline layout (the pipeline cost and stage bindings studies; xlate/host/UniLayout.cs is the source
 // the tables here are tested against):
 //   set 0  the global arrays, update-after-bind and partially bound: binding 0 the 33,025 sampled images, binding 1 the
 //          4,096 samplers; the same set layout for graphics and compute (the bindless ticket fills it)

@@ -86,7 +86,7 @@ uint64_t pagegen_scan(uint64_t lo, uint64_t hi) {
         }
         for (uint64_t k = 0; k < n; k++) stamp(g_batch[k] & ~(PAGEGEN_PAGE - 1), g);
         found += n;
-        if (n < BATCH) break;   // a full answer reset only what it returned (research 48 B5): ask again
+        if (n < BATCH) break;   // a full answer reset only what it returned (the write-watch study): ask again
     }
     g_st.scans++, g_st.scan_bytes += hi - lo, g_st.scan_pages += found, g_st.scan_ns += plat_now_ns() - t0;
     g_st.untracked += (uint64_t)!tracked;

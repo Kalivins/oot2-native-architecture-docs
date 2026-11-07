@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// What the front end counts per present (ticket 38). Every present logs itself the first time and then every 60th, so a run
+// What the front end counts per present (the null back end boot). Every present logs itself the first time and then every 60th, so a run
 // stopped by a time limit still says how many frames it presented. In census mode (OOT2_CENSUS=1, runtime.h) the table of
 // host-function calls is also copied at present 1 and at every 60th present, and nvn_census_write turns the copies into
-// calls per frame in research 17's six columns (phase, frames, slot, function, calls_per_frame, calls): phase "boot" is
+// calls per frame in the NVN2 call census's six columns (phase, frames, slot, function, calls_per_frame, calls): phase "boot" is
 // everything before present 1 (frames 0), "wNNN" is one window of presents, "all" the whole run after present 1. The
 // slot column is left empty; an offline join to the game's slot map fills it. Nothing here includes the hos layer.
 #include <stdio.h>
@@ -47,7 +47,7 @@ static void take(uint64_t seq) {
     plat_mutex_unlock(&g_lock);
 }
 
-// The title, as the log shows it (ticket 98, research 54). The movie's frame is 14 compute dispatches (13 of them tensor
+// The title, as the log shows it (the movie player, the title pass capture). The movie's frame is 14 compute dispatches (13 of them tensor
 // dispatches of the neural upscaler, one the conversion of the decoded planes to RGBA) and 10 nvnCommandBufferSetRenderTargets
 // calls a present; the menu then appears over the looping movie by itself. A window of 60 presents whose calls a present
 // reach both counts is a "movie window"; two in a row is the title's movie: the log says so once. The menu's own draws are

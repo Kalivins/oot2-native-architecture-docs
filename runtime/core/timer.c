@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The policy of the system timer resolution (ticket 116): whether to hold 0.5 ms while the game runs, which the setting
+// The policy of the system timer resolution (the timer resolution hold): whether to hold 0.5 ms while the game runs, which the setting
 // timer_resolution answers (oot2/settings.h; on by default; OOT2_TIMER_RESOLUTION=0 or --set timer_resolution=0 leaves
 // the system's), and the one log line that says what happened. The request itself and its release on every exit path are
 // the platform layer's (plat.h, plat_timer_hold); this file only decides and reports.
 //
-// Research 55 measured on the desktop that the p99 of the vsync events and of the acquire gate falls from 1.0 to 0.51 ms
+// The vsync clock study measured on the desktop that the p99 of the vsync events and of the acquire gate falls from 1.0 to 0.51 ms
 // when the process holds 0.5 ms (NtSetTimerResolution(5000)), against whatever another process happens to hold. The cost
 // is a higher timer interrupt rate, system-wide, for as long as the game runs: hence a setting.
 #include <stdio.h>

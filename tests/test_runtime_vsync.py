@@ -19,8 +19,8 @@ OOT2_VSYNC_P99_US to hold a quiet desktop to a tighter one. The figures are
 printed with the prefix "vsync figure:".
 
 The realtime case holds the system timer at 0.5 ms the way the program does
-(runtime/core/timer.c, ticket 116, on by default, in CI too) and prints the
-resolution it saw. The desktop's bound is 0.6 ms (research 55, Q3), a variable
+(runtime/core/timer.c, the timer resolution hold, on by default, in CI too) and prints the
+resolution it saw. The desktop's bound is 0.6 ms (the vsync clock study), a variable
 of the run and never a default; CI keeps 4 ms:
 
     OOT2_VSYNC_P99_US=600 py -3.14 -I -m unittest discover -s tests -p test_runtime_vsync.py -v

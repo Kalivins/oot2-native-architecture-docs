@@ -33,7 +33,7 @@
 //   end
 //   readback ID PATH            (after the last phase, write that buffer to a file)
 //
-// Layout (architecture D13, ticket 60): set 0 holds the global arrays (binding 0
+// Layout (architecture D13, the pipeline builder): set 0 holds the global arrays (binding 0
 // sampled images, binding 1 samplers; partially bound, update after bind), set 1 is
 // a push-descriptor set of 32 bindings, 128 bytes of push constants. The modules
 // the translator emits for compute declare exactly this.

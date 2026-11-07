@@ -43,7 +43,7 @@ The memo is bounded to SPIN_MEMO words (about 7 MiB) and is dropped when it fill
 word again, so no answer depends on it; the search of one head reads from 4 bytes before the head to 24 bytes past its
 farthest back-edge, which is far fewer than SPIN_MEMO words, so a head is searched from the memo almost entirely.
 What is left is the module image, the loader's copies and the table of candidate heads. The search's peak private
-bytes are held to 1 GiB (ticket 122): a quarter of the 4 GiB or so that an 8 GB machine has free once the system and
+bytes are held to 1 GiB (the spin-search memory bound): a quarter of the 4 GiB or so that an 8 GB machine has free once the system and
 the player's other programs have their share, and under the 1.2 GiB per process of the lift's code generation, so the
 search is no longer the peak of the lift step. The lift step records the peak beside the seconds
 (tools/prepare/program.py).

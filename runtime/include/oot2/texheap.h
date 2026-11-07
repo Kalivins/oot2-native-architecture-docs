@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Spike S7's instruments and the owner side of lever L1 (architecture D19, D27; research 49 built the generic half in
+// Spike S7's instruments and the owner side of lever L1 (architecture D19, D27; the page release study built the generic half in
 // runtime/core/memory.c, which knows no textures). Off by default: the setting texheap (OOT2_TEXHEAP=1) switches them on,
 // texheap_every (OOT2_TEXHEAP_EVERY, default 300) is how many presents lie between two samples. They answer how much of
 // the texture heap a run touches, how it fills, and whether the game reads a texel page after its upload retired.

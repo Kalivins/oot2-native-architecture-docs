@@ -4,13 +4,13 @@
 // The C face of runtime/ui, the runtime's one C++ directory (architecture section 2: the runtime is C11, and the
 // libraries a menu can be built on are C++). C++ stays behind this header: every function here is `extern "C"`, takes
 // and returns C types, and the C++ side is built without exceptions and without run-time type information
-// (tools/build_game.py, CXX_FLAGS), because the runtime does not unwind C++ exceptions (research 05). No C file
+// (tools/build_game.py, CXX_FLAGS), because the runtime does not unwind C++ exceptions (the C++ exceptions study). No C file
 // includes a C++ header, and no C++ object may let an exception leave a function declared here.
 //
 // The directory holds the configuration menu (menu.cpp, menu_draw.cpp: the functions after the stand-in's below) and
 // a stand-in that proves the C++ build: one file that uses the C++ standard library (a container, a string, an
-// algorithm) so that building and linking it proves the path (research 104), and that reports which Dear ImGui, if
-// any, the runtime was built with (research 107). The tests of the build keep using the stand-in.
+// algorithm) so that building and linking it proves the path (the C++ build check), and that reports which Dear ImGui, if
+// any, the runtime was built with (the ImGui fetch study). The tests of the build keep using the stand-in.
 #pragma once
 #include <stddef.h>
 
@@ -42,7 +42,7 @@ UiBuild ui_standin_build(void);
 // without its terminator: a value of cap or more means the text was cut.
 size_t ui_standin_list(const char *text, char *out, size_t cap);
 
-// ---- the configuration menu (research 93 D2, D6, D7; research 106)
+// ---- the configuration menu (the menu survey; the menu answers)
 //
 // The menu is rows over the settings store (oot2/settings.h) and never over a variable of its own: a row reads its
 // value from the store each time it is asked or drawn, and changes it only through rt_settings_set, which applies a

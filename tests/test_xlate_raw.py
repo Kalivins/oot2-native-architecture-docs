@@ -448,7 +448,7 @@ class RawHelperTest(Harness):
             self.assertFalse(f["control"] & FUNCTION_DONT_INLINE, f"function control {f['control']:#x}")
 
     def test_a_helper_with_many_call_sites_stays_a_call(self):
-        # Inlined at each of a module's sites, the helper multiplies the code the driver compiles (ticket 40):
+        # Inlined at each of a module's sites, the helper multiplies the code the driver compiles (the raw-access compile fix):
         # from 64 sites on, the translator declares it DontInline.
         # Each load gets its own register and its own store, so none of them is dead code.
         loads = [ampere(0x381, rd=4 + n, ra=2, rb=0, rc=0, low_bits=(4 * n) << 40, high_bits=bit(72) | bit(73, B32))

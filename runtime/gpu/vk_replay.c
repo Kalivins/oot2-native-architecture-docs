@@ -41,7 +41,7 @@ enum { ST_VS = 0, ST_FS = 1, ST_CS = 5, ST_TS = 6, ST_MS = 7, ST_N = 8 };
 #define ROOT_WORDS 64
 #define ROOT_BANK_BYTES (ROOT_TABLES * ROOT_WORDS * 4)
 #define UNIFORM_MAX 65536u     // the largest uniform range a binding gives (maxUniformBufferRange)
-#define STORAGE_ALIGN 16u      // research 19 B5: a storage buffer binds from its address rounded down to 16 bytes
+#define STORAGE_ALIGN 16u      // the first draw study: a storage buffer binds from its address rounded down to 16 bytes
 #define UNIFORM_ALIGN 256u
 #define SNAPS_MAX 4096
 #define WRITES_MAX 8192
@@ -69,7 +69,7 @@ const char *vkr_op_ticket(uint32_t op) {
     case OP_SIGNAL_EVENT: case OP_REPORT_COUNTER: case OP_RESET_COUNTER: case OP_RENDER_COND: case OP_WAIT_EVENT:
         return VKR_REPLAYED;
     case OP_DRAW_MESH: case OP_DRAW_MESH_IND: case OP_GEOMETRY_MODE:
-        return "task and mesh draws (ticket 73)";
+        return "task and mesh draws (the mesh draws)";
     case OP_BIND_ACCEL: return "acceleration structures (no ticket: the replay has no ray tracing)";
     case OP_JUMP: case OP_CALL: return "a called recording (the front end inlines every one)";
     default: return "unknown";
@@ -182,7 +182,7 @@ static const VkReplayOps *ops_now(void) { return g_ops ? g_ops : vkr_device_ops(
 void vkr_stats(VkrStats *out) {
     *out = g_stats;
     // Every draw and dispatch record is replayed, skipped by name or not made because rendering was off: what is left is
-    // GPU work lost (research 119: Hookshot's dark characters and bare foliage were work lost at start), 0 by contract.
+    // GPU work lost (the Hookshot survey: Hookshot's dark characters and bare foliage were work lost at start), 0 by contract.
     uint64_t accounted = g_stats.draws + g_stats.dispatches + g_stats.render_off + g_stats.skipped;
     out->lost = g_stats.draw_ops > accounted ? g_stats.draw_ops - accounted : accounted - g_stats.draw_ops;
 }
@@ -754,7 +754,7 @@ static void support(Set1 *s) {
 // ---------- draws
 // The frame that last drew into or cleared each image that stood as a render target (the miss path may skip a draw only
 // where the targets hold an earlier frame's picture, oot2/vk_miss.h). A small table: a frame has a few dozen targets
-// (research 17: 127 target changes a Forest frame, over far fewer images); an image that falls out is taken to hold
+// (the NVN2 call census: 127 target changes a Forest frame, over far fewer images); an image that falls out is taken to hold
 // nothing, which makes its draws wait, not skip.
 #define STAMPS 128
 static struct {
@@ -913,7 +913,7 @@ static int draw_prepare(int prim, uint32_t base_instance, VkBool32 *restart_out)
         g_stats.render_off++;
         return 0;
     }
-    if (P.id[ST_TS] || P.id[ST_MS]) stop("a vertex draw with task or mesh stages bound (ticket 73)");
+    if (P.id[ST_TS] || P.id[ST_MS]) stop("a vertex draw with task or mesh stages bound (the mesh draws)");
     const nvn_stage *vs = P.id[ST_VS], *fs = P.id[ST_FS];
     if (!vs) stop("a draw with no vertex stage bound");
     if (!fs) stop("a draw with no pixel stage bound (stage %s)", vs->key);

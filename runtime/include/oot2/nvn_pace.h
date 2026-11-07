@@ -13,7 +13,7 @@
 // released at that tick plus the interval, so ticks keep the clock's own phase (the grid never moves) and there is no
 // burst of immediate acquires to catch up.
 //
-// Where the release is (ticket 95, research 52 Q1). The default, NVN_ACQUIRE_WAIT_SYNC, is the console's: the call
+// Where the release is (the acquire sync hold, the logic step study). The default, NVN_ACQUIRE_WAIT_SYNC, is the console's: the call
 // chooses the index and returns at once, and the sync it returns is signalled at the gate tick (the clock has reached it
 // and the texture's last present is done); a guest thread that waits on the sync (nvnSyncWait) gives its virtual core up
 // for the wait, with no lock held. A game that passes no sync is held for nothing. A present that comes before the wait
@@ -23,7 +23,7 @@
 // guest thread's virtual core given up) and signals the sync at once; there the present's due tick is the tick in
 // progress, as before. Both placements use the same gate tick, so the E2 hold below works under both.
 //
-// A fixed frame rate (ticket 111, research 94 F11). The settings store's key frame_rate_target N (0, the default: off;
+// A fixed frame rate (the fixed frame rate gate, the frame-rate study). The settings store's key frame_rate_target N (0, the default: off;
 // 20 to 120; live, read at every acquire and present) gives the gate a second schedule of N slots a second on the same
 // origin as the clock's ticks (oot2/vsync.h, rt_sched_*): slot m is due at the system-counter count ceil(m * 31,250,000 /
 // N), computed from m, never as a sum of periods. A present takes the slot in progress (its due count is when that slot
@@ -62,7 +62,7 @@ uint64_t nvn_present_count(void);   // presents so far
 // known yet is asked of the back end (GfxBackend.present_shown, which never blocks) on each read until it answers.
 int nvn_present_record(uint64_t seq, NvnPresentRecord *out);
 
-// Where the pacing hold of AcquireTexture is (ticket 95): the settings store's key hold_placement (oot2/settings.h; the
+// Where the pacing hold of AcquireTexture is (the acquire sync hold): the settings store's key hold_placement (oot2/settings.h; the
 // environment variable OOT2_HOLD_PLACEMENT, the file, --set; values sync and acquire, live), read at every acquire and
 // present, so a change applies from the next one; a sync an earlier acquire returned keeps the tick it was given. The
 // enum's values are the key's indexes (nvn_settings.c checks).
@@ -78,7 +78,7 @@ void nvn_acquire_wait(int mode);
 // exit code 2).
 int nvn_acquire_wait_mode(void);
 
-// Experiment E2 (research 15): hold every present for `ticks` ticks while the game still asks for its own interval. The
+// Experiment E2 (the console frame rate study): hold every present for `ticks` ticks while the game still asks for its own interval. The
 // next acquire waits for max(interval, ticks). Off (0) unless this is called with a positive count, or the environment
 // variable OOT2_HOLD_TICKS names one at the first acquire, present or nvn_present_hold_ticks call, if this was never called. Never a default;
 // the records keep what the game asked for.

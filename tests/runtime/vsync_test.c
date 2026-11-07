@@ -384,9 +384,9 @@ static int cmp_u64(const void *a, const void *b) {
 // thread taking its core). The bound is loose for continuous integration runners, whose timing margins are not
 // measured; OOT2_VSYNC_P99_US sets a tighter one for a run on a quiet desktop.
 //
-// The case holds the system timer the way the program does (rt_timer_hold_start, ticket 116; timer.c), so the default,
+// The case holds the system timer the way the program does (rt_timer_hold_start, the timer resolution hold; timer.c), so the default,
 // which holds 0.5 ms, is what runs, in CI too, and it prints the resolution it saw at the start and at the end of the
-// run. The desktop's bound of 0.6 ms (research 55, Q3) is a variable of the run and never a default:
+// run. The desktop's bound of 0.6 ms (the vsync clock study) is a variable of the run and never a default:
 //   OOT2_VSYNC_P99_US=600 py -3.14 -I -m unittest discover -s tests -p test_runtime_vsync.py -v
 // CI keeps the 4 ms above. OOT2_TIMER_RESOLUTION=0 runs the case on the system's own resolution, for an A/B run.
 static void case_realtime(void) {

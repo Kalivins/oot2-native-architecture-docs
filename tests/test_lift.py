@@ -199,7 +199,7 @@ class GeneratorTest(unittest.TestCase):
             out_a, out_b = Path(tmp) / "a", Path(tmp) / "b"
             first = self.lift(exefs, out_a, "1")
             self.assertEqual(first["function_count"], 11)
-            # The end of the module's lifted code (ticket 92): the manifest names it, and it is the last thing in the
+            # The end of the module's lifted code (the lifted-code end marker): the manifest names it, and it is the last thing in the
             # function table, a definition of its own that the link places after every chunk.
             self.assertEqual(first["end_marker"], "main_lifted_end")
             table = (out_a / "main" / first["table"]).read_text(encoding="utf-8")

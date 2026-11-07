@@ -37,7 +37,7 @@ static const RtModule *g_mods[MAX_MODULES];   // sorted by base
 static int g_nmods;
 static int g_ready;
 static uint64_t g_table_bytes, g_functions;
-// Host range of each module's lifted code: from its lowest function to its end marker (ticket 92).
+// Host range of each module's lifted code: from its lowest function to its end marker (the lifted-code end marker).
 typedef struct CodeRange { uintptr_t lo, end; const RtModule *m; } CodeRange;
 static CodeRange g_range[MAX_MODULES];
 static int g_nranges;

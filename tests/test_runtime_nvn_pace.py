@@ -79,7 +79,7 @@ class PaceTest(unittest.TestCase):
 
     def run_case(self, level: str, case: str, hold_env: str | None = None) -> subprocess.CompletedProcess:
         env = {k: v for k, v in os.environ.items() if k != "OOT2_HOLD_TICKS"}
-        env["OOT2_HOLD_PLACEMENT"] = "acquire"   # these cases are the old placement's: the hold inside the call (ticket 95)
+        env["OOT2_HOLD_PLACEMENT"] = "acquire"   # these cases are the old placement's: the hold inside the call (the acquire sync hold)
         if hold_env is not None:
             env["OOT2_HOLD_TICKS"] = hold_env
         try:

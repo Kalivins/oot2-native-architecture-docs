@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// Contract test of the video decoder service under the SDK's movie library (runtime/hos/ov_codec.c, ticket 98), with a
+// Contract test of the video decoder service under the SDK's movie library (runtime/hos/ov_codec.c, the movie player), with a
 // fake AV1 decoder (av1_fake.h) behind the seam of runtime/video. Synthetic guest threads written by hand call the
 // service's nn::codec entry points as the SDK would, by their mangled names, and wait on its events with the kernel's
 // own WaitSynchronization. No game code, no SDK and no decoder is involved.

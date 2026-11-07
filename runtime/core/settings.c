@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The settings store (oot2/settings.h; research 93 D1, D5; ticket 103). Written here, after the shape of the stores
-// research 93 read: Dusklight's layers of default, value and override (F4), TotK Recomp's per-key live-or-restart
+// The settings store (oot2/settings.h; the menu survey). Written here, after the shape of the stores
+// the menu survey read: Dusklight's layers of default, value and override (F4), TotK Recomp's per-key live-or-restart
 // table and its line editing of the file (F8). No code is taken from either.
 //
 // One lock guards the layers, the file's bytes and the hooks; a published value is an atomic word that readers load

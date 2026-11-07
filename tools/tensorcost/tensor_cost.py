@@ -75,7 +75,7 @@ FORMATS = {
 UINT_AS_FLOAT = {"R16G16_UINT": "R16G16_FLOAT", "R32_UINT": "R32_FLOAT", "R8_UINT": "R8_UNORM"}
 FILTERS = {"nearest": 0, "linear": 1}
 WRAPS = {"repeat": 0, "mirror": 1, "mirrored_repeat": 1, "clamp_to_edge": 2, "clamp_to_border": 3, "mirror_clamp_to_edge": 4}
-# ticket 50 (research 50, row 1): ns per warp-wide HMMA.16816 (f16 accumulator) on the 3060 Ti
+# the HMMA cost study, row 1: ns per warp-wide HMMA.16816 (f16 accumulator) on the 3060 Ti
 HMMA_NS = {"scratch": 0.921, "coop_helper": 0.597, "coop_f16": 0.0533}
 
 
@@ -434,7 +434,7 @@ def pct(values: list[float], q: float) -> float:
 
 
 def hmma_ms(prog: dict) -> dict:
-    """Projected GPU time of one dispatch's HMMA in each form, from research 50's per-instruction costs
+    """Projected GPU time of one dispatch's HMMA in each form, from the HMMA cost study's per-instruction costs
     (each warp runs each static HMMA once: loops would multiply, branches divide)."""
     threads = prog["block"][0] * prog["block"][1] * prog["block"][2]
     warps = prog["grid"][0] * prog["grid"][1] * prog["grid"][2] * max(1, threads // 32)
@@ -482,7 +482,7 @@ def build_report(runs: dict, budget_ms: float) -> dict:
             "coop_helper_p99_ms": max(0.0, entry["frame_p99_ms"] - scratch_total + proj["coop_helper"]),
             "coop_f16_p99_ms": max(0.0, entry["frame_p99_ms"] - scratch_total + proj["coop_f16"]),
             "valid": scratch_total <= measured,
-            "assumption": "each warp runs each static HMMA once; research 50 ns per HMMA: scratch 0.921, helper swap 0.597, coop f16 0.0533; "
+            "assumption": "each warp runs each static HMMA once; the HMMA cost study's ns per HMMA: scratch 0.921, helper swap 0.597, coop f16 0.0533; "
                           "not valid (valid=false) where the projected HMMA time exceeds the measured frame, i.e. a program that does not run its HMMA on every warp"}
         entry["share_of_budget_p99"] = entry["frame_p99_ms"] / budget_ms
         if name in by_mode["empty"]:

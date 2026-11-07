@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 The oot2-native contributors
 //
-// The AV1 decoder seam (architecture D24b, ticket 98). The video decoder service of runtime/hos (ov_codec.c) hands a
+// The AV1 decoder seam (architecture D24b, the movie player). The video decoder service of runtime/hos (ov_codec.c) hands a
 // compressed temporal unit to a decoder and takes a picture back, all on host buffers: nothing here touches guest
 // memory or the SDK. The real decoder is dav1d (av1_dav1d.c); a test links a fake of its own, so the service's events,
 // frame ownership and Stop/Flush rules are tested with no decoder, and the decoder with no service.

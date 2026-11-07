@@ -213,7 +213,7 @@ BODIES |= {
     "nvnCommandBufferWaitEvent", "nvnDeviceFinalizeCommandHandle",
 }
 # Queues, syncs, events and timestamps (runtime/nvn/nvn_queue.c), windows and QueuePresentTexture (nvn_window.c): every
-# one of their entry points the game names or research 17's census met, the window's interval read back, and the
+# one of their entry points the game names or the NVN2 call census met, the window's interval read back, and the
 # device's current timestamp.
 BODIES |= {
     "nvnQueueBuilderSetDefaults", "nvnQueueBuilderSetDevice", "nvnQueueBuilderSetFlags",

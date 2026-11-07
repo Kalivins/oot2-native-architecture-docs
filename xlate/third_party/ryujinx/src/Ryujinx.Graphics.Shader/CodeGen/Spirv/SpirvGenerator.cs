@@ -213,7 +213,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 // oot2-native: a raw-access helper called from many sites stays a call. Most raw-access programs call it 253 times, and the driver
                 // (617.14) inlines every call unless told not to: inlined there, it made a module about twice as slow to build as with one copy of it
                 // (and 14 times as slow with nxnative's pool search). With few sites the call costs more than it saves (up to 1.5 times the build
-                // time under 52 sites): the measured crossover lies between 51 and 53 sites (ticket 40)
+                // time under 52 sites): the measured crossover lies between 51 and 53 sites (the raw-access compile fix)
                 FunctionControlMask control =
                     function.Name.EndsWith(Translation.Optimizations.GlobalToStorage.RawHelperSuffix, StringComparison.Ordinal) && callSites[funcIndex] >= RawHelperCallMinSites
                     ? FunctionControlMask.DontInline

@@ -3,7 +3,7 @@
 """Build of tools/loadprobe/load_probe.c by the probe's own build (load_probe.build: -Wall -Wextra -Werror, the probe,
 its end marker and runtime/core), then a run without modules.
 
-The probe describes its modules with RtModule literals. When RtModule gained the end marker (ticket 92) the probe was
+The probe describes its modules with RtModule literals. When RtModule gained the end marker (the lifted-code end marker) the probe was
 missed because nothing built it. A literal that leaves a field out is a build error here (-Wmissing-field-
 initializers). A marker linked below the probe's stand-in function, which rt_dispatch_init would refuse only after the
 modules are loaded, is the probe's exit 3 before it reads its arguments; run without arguments, a correct probe stops

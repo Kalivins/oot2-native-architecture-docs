@@ -5,7 +5,7 @@
 
     py -3 tools/fetch_imgui.py [--dest DIR]
 
-The runtime's menu (runtime/ui, research 93 and 106) is built on Dear ImGui, which is C++ and too large to commit: the
+The runtime's menu (runtime/ui, the menu survey and answers) is built on Dear ImGui, which is C++ and too large to commit: the
 content guard refuses a file over 512 KiB and flags a source file over 256 KiB, and imgui.cpp is 957 KiB. So none of
 it is kept in this repository (THIRD_PARTY_NOTICES.md). This script lays out the pieces the runtime builds, at one
 pinned version, in DIR (default fetched/imgui, which .gitignore and the content guard both name). tools/build_game.py
