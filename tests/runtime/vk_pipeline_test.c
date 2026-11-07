@@ -1,0 +1,903 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// Tests of the pipeline builder (runtime/gpu/vk_pipeline.c and its parts), driven by tests/test_runtime_vk_pipeline.py:
+// `vk_pipeline_test <case> args...`, one case per process.
+//
+// Cases that need no device (continuous integration runs them):
+//   tables                       the layout's tables and the dynamic state lists, printed
+//   desc FILE                    a description parsed: stage, fit, interface by location, or the refusal
+//   pad VS_DESC PS_DESC          the padding a vertex stage needs for a pixel stage
+//   spvdecl MODULE               the capabilities and extensions a module declares
+//   spvpad IN OUT SPEC           a module with outputs added (SPEC "location:component:components:type,...")
+//   capcheck MODULE [drop CAP]   a module judged against the required list (a capability may be dropped from it)
+//   cachejudge                   cache file headers judged for a device
+//   store BASE VARIANTS KEY KIND SHAPE   a stage looked up in a pack of packs (VARIANTS "-" for none)
+//   storeopen BASE VARIANTS      the packs opened: "ok" or the refusal
+// Cases that need a device with every item of oot2/vk_required.h, on a synthetic pack of GLSL modules:
+//   usable                       how many devices have every item (exit 3 when there is no loader or device)
+//   layouts                      the layouts are made, valid under validation, and destroyed
+//   synth_draw PACK [unpad]      a pair linked for two formats and drawn; the padded input reads (0, 0, 0, 1)
+//   synth_compute PACK           a compute pipeline dispatched
+//   synth_inflight PACK          a pipeline asked for with a submission in flight: a named fatal
+//   synth_cache PACK FILE PHASE  cold (build and save), warm (build from the file) or tamper (a driver change)
+//   synth_release PACK           a stage's objects released and made again
+//   synth_threads PACK           eight threads ask for one pipeline: it is made once
+//   synth_absent PACK            a stage the pack lacks: a named fatal with its shape
+// Cases on the player's own pack (the desktop, never in continuous integration):
+//   firstdraw DRAW PACK VKEY PKEY OUT   tools/firstdraw's draw, built from the pack through the builder
+//   corpus_pairs PACK PAIRS THREADS CACHE [save]   pairs built and linked for two formats
+//   corpus_compute PACK KEYS THREADS CACHE         compute pipelines built
+//   caps PACK KEYS [drop CAP]                      every module's declarations against the required list
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "volk.h"
+
+#include "oot2/gpu.h"
+#include "oot2/gpu_vk.h"
+#include "oot2/nvn_program.h"
+#include "oot2/runtime.h"
+#include "oot2/shader_desc.h"
+#include "oot2/spirv.h"
+#include "oot2/vk_caps.h"
+#include "oot2/vk_pipeline.h"
+#include "plat.h"
+#include "vk_draw.h"
+
+#define CHECK(cond)                                                                    \
+    do {                                                                               \
+        if (!(cond)) {                                                                 \
+            fprintf(stderr, "check failed at line %d: %s\n", __LINE__, #cond);        \
+            exit(1);                                                                   \
+        }                                                                              \
+    } while (0)
+
+#define EXIT_NO_DEVICE 3
+
+#ifdef _WIN32
+#define STRTOK strtok_s
+#else
+#define STRTOK strtok_r
+#endif
+
+static void *read_all(const char *path, size_t *size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "cannot open %s\n", path);
+        exit(1);
+    }
+    fseek(f, 0, SEEK_END);
+    long long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    void *p = malloc(n > 0 ? (size_t)n : 1);
+    CHECK(p && fread(p, 1, (size_t)n, f) == (size_t)n);
+    fclose(f);
+    *size = (size_t)n;
+    return p;
+}
+
+// ---------- tables
+
+static void print_dynamic(const char *variant, const Oot2VkFacts *f) {
+    static const VkGraphicsPipelineLibraryFlagsEXT parts[4] = {
+        VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT,
+        VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT,
+        VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT};
+    static const char *names[4] = {"vertex_input", "pre_rasterization", "fragment", "output"};
+    for (int i = 0; i < 4; i++) {
+        VkDynamicState d[VKP_MAX_DYNAMIC];
+        uint32_t n = vkp_dynamic_states(parts[i], f, d);
+        printf("dyn %s %s %u", variant, names[i], n);
+        for (uint32_t k = 0; k < n; k++) printf(" %d", (int)d[k]);
+        printf("\n");
+    }
+}
+
+static void case_tables(void) {
+    VkDescriptorSetLayoutBinding b[VKP_SET1_MAX];
+    VkDescriptorBindingFlags fl[2];
+    uint32_t n = vkp_set0_bindings(b, fl);
+    for (uint32_t i = 0; i < n; i++)
+        printf("set0 %u %d %u %#x %#x\n", b[i].binding, (int)b[i].descriptorType, b[i].descriptorCount, b[i].stageFlags, fl[i]);
+    for (int layout = 0; layout < 2; layout++) {
+        n = vkp_set1_bindings(layout, b);
+        for (uint32_t i = 0; i < n; i++)
+            printf("set1 %s %u %d %#x\n", layout == VKP_GRAPHICS ? "graphics" : "compute", b[i].binding,
+                   (int)b[i].descriptorType, b[i].stageFlags);
+        VkPushConstantRange r = vkp_push_range(layout);
+        printf("push %s %#x %u %u\n", layout == VKP_GRAPHICS ? "graphics" : "compute", r.stageFlags, r.offset, r.size);
+    }
+    n = vkp_set2_bindings(b);
+    for (uint32_t i = 0; i < n; i++) printf("set2 %u %d %#x\n", b[i].binding, (int)b[i].descriptorType, b[i].stageFlags);
+    Oot2VkFacts f;
+    memset(&f, 0, sizeof f);
+    print_dynamic("none", &f);
+    f.eds3 = (VkPhysicalDeviceExtendedDynamicState3FeaturesEXT){
+        .extendedDynamicState3PolygonMode = 1, .extendedDynamicState3DepthClampEnable = 1,
+        .extendedDynamicState3LogicOpEnable = 1, .extendedDynamicState3ColorBlendEnable = 1,
+        .extendedDynamicState3ColorBlendEquation = 1, .extendedDynamicState3ColorWriteMask = 1};
+    print_dynamic("all", &f);
+    f.eds3.extendedDynamicState3PolygonMode = 0;
+    print_dynamic("nopoly", &f);
+    printf("ok tables\n");
+}
+
+// ---------- descriptions, padding, SPIR-V
+
+static void print_io(const char *tag, const ShdIo *io, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++)
+        printf("%s %d %u %u %u %u %d %u\n", tag, io[i].location, io[i].component, io[i].components, io[i].type, io[i].bits,
+               io[i].array_length, io[i].used);
+}
+
+static int load_desc(const char *path, ShaderDesc *d, char *why, size_t cap) {
+    size_t n;
+    char *text = read_all(path, &n);
+    int ok = shd_parse(text, n, SHC_DESC_SCHEMA, d, why, cap);
+    free(text);
+    return ok;
+}
+
+static void case_desc(const char *path) {
+    static ShaderDesc d;
+    char why[256];
+    if (!load_desc(path, &d, why, sizeof why)) {
+        printf("refused: %s\n", why);
+        return;
+    }
+    printf("kind %s fits %d raw %d\n", shd_kind_name(d.kind), d.fits, d.raw_pointers);
+    print_io("in", d.inputs, d.ninputs);
+    print_io("out", d.outputs, d.noutputs);
+}
+
+static void case_pad(const char *vs, const char *ps) {
+    static ShaderDesc v, p;
+    char why[256];
+    CHECK(load_desc(vs, &v, why, sizeof why));
+    CHECK(load_desc(ps, &p, why, sizeof why));
+    ShdPad pad[16];
+    int n = shd_pad_set(&v, &p, pad, 16, why, sizeof why);
+    if (n < 0) {
+        printf("refused: %s\n", why);
+        return;
+    }
+    char text[256];
+    shd_pad_text(pad, n, text, sizeof text);
+    printf("pad %d %s\n", n, text);
+    for (int i = 0; i < n; i++) printf("run %u %u %u %u\n", pad[i].location, pad[i].component, pad[i].components, pad[i].type);
+}
+
+static void case_spvdecl(const char *path) {
+    size_t n;
+    uint32_t *w = read_all(path, &n);
+    SpvDecl d;
+    char why[256];
+    if (!spv_declarations(w, n / 4, &d, why, sizeof why)) {
+        printf("refused: %s\n", why);
+        return;
+    }
+    printf("version %08x\n", d.version);
+    for (uint32_t i = 0; i < d.ncaps; i++) {
+        const char *name = spv_capability_name(d.caps[i]);
+        printf("cap %u %s\n", d.caps[i], name ? name : "?");
+    }
+    for (uint32_t i = 0; i < d.nexts; i++) printf("ext %s\n", d.exts[i]);
+    free(w);
+}
+
+static void case_spvpad(const char *in, const char *out, const char *spec) {
+    size_t n;
+    uint32_t *w = read_all(in, &n);
+    SpvOutput add[16];
+    uint32_t nadd = 0;
+    for (const char *p = spec; *p && nadd < 16;) {
+        unsigned l, c, k, t;
+        int used = 0;
+        CHECK(sscanf(p, "%u:%u:%u:%u%n", &l, &c, &k, &t, &used) == 4);
+        add[nadd++] = (SpvOutput){l, c, k, t};
+        p += used;
+        if (*p == ',') p++;
+    }
+    size_t words = 0;
+    char why[256];
+    uint32_t *o = spv_add_outputs(w, n / 4, add, nadd, &words, why, sizeof why);
+    if (!o) {
+        printf("refused: %s\n", why);
+        return;
+    }
+    FILE *f = fopen(out, "wb");
+    CHECK(f && fwrite(o, 4, words, f) == words);
+    fclose(f);
+    printf("padded %zu words to %zu\n", n / 4, words);
+    free(o), free(w);
+}
+
+static void case_capcheck(const char *path, int argc, char **argv) {
+    size_t n;
+    uint32_t *w = read_all(path, &n);
+    SpvDecl d;
+    char why[256];
+    CHECK(spv_declarations(w, n / 4, &d, why, sizeof why));
+    static Oot2VkFacts f;
+    VkcList l;
+    vkc_list(&f, &l);
+    if (argc >= 2 && !strcmp(argv[0], "drop")) {
+        uint32_t drop = (uint32_t)strtoul(argv[1], NULL, 10);
+        size_t at = 0;
+        for (size_t i = 0; i < l.ncaps; i++)
+            if (l.caps[i] != drop) l.caps[at++] = l.caps[i];
+        l.ncaps = at;
+    }
+    if (vkc_check(&l, &d, why, sizeof why)) printf("bad: %s\n", why);
+    else printf("ok\n");
+    printf("list %zu capabilities, %zu extensions\n", l.ncaps, l.nexts);
+    free(w);
+}
+
+static void case_cachejudge(void) {
+    VkPhysicalDeviceProperties props;
+    memset(&props, 0, sizeof props);
+    props.vendorID = 0x10de, props.deviceID = 0x2486;
+    for (int i = 0; i < (int)VK_UUID_SIZE; i++) props.pipelineCacheUUID[i] = (uint8_t)(0xa0 + i);
+    uint8_t data[64];
+    memset(data, 0x5a, sizeof data);
+    VkPipelineCacheHeaderVersionOne h = {.headerSize = sizeof h, .headerVersion = VK_PIPELINE_CACHE_HEADER_VERSION_ONE,
+                                         .vendorID = props.vendorID, .deviceID = props.deviceID};
+    memcpy(h.pipelineCacheUUID, props.pipelineCacheUUID, VK_UUID_SIZE);
+    memcpy(data, &h, sizeof h);
+    printf("matching %d\n", (int)vkp_cache_judge(data, sizeof data, &props));
+    data[16 + 5] ^= 1;   // a byte of the UUID
+    printf("uuid %d\n", (int)vkp_cache_judge(data, sizeof data, &props));
+    data[16 + 5] ^= 1;
+    VkPhysicalDeviceProperties other = props;
+    other.deviceID = 0x2487;
+    printf("device %d\n", (int)vkp_cache_judge(data, sizeof data, &other));
+    other = props, other.vendorID = 0x1002;
+    printf("vendor %d\n", (int)vkp_cache_judge(data, sizeof data, &other));
+    printf("short %d\n", (int)vkp_cache_judge(data, 20, &props));
+    printf("empty %d\n", (int)vkp_cache_judge(data, 0, &props));
+    uint32_t version = 2;
+    memcpy(data + 4, &version, 4);
+    printf("version %d\n", (int)vkp_cache_judge(data, sizeof data, &props));
+    memcpy(data + 4, &(uint32_t){VK_PIPELINE_CACHE_HEADER_VERSION_ONE}, 4);
+    uint32_t hs = 1000;   // a header size past the data
+    memcpy(data, &hs, 4);
+    printf("headersize %d\n", (int)vkp_cache_judge(data, sizeof data, &props));
+    printf("none=%d loaded=%d other=%d unreadable=%d\n", VKP_CACHE_NONE, VKP_CACHE_LOADED, VKP_CACHE_OTHER_DRIVER,
+           VKP_CACHE_UNREADABLE);
+}
+
+static int kind_of(const char *name) {
+    for (int k = 0; k < SHD_KINDS; k++)
+        if (!strcmp(name, shd_kind_name(k))) return k;
+    return -1;
+}
+
+static void case_store(const char *base, const char *variants, const char *key, const char *kind, const char *shape) {
+    char why[512];
+    if (!vkp_store_open(base, strcmp(variants, "-") ? variants : NULL, why, sizeof why)) {
+        printf("refused: %s\n", why);
+        return;
+    }
+    nvn_stage st = {.kind = NVN_STAGE_PS, .ctl_size = 0x57, .code_size = 0x1230, .inst_size = 0x1000};
+    snprintf(st.key, sizeof st.key, "%s", key);
+    VkpStage s = {.key = key, .answers = NULL, .shape = strcmp(shape, "0") ? &st : NULL};
+    static VkpModule m;
+    vkp_module(&s, kind_of(kind), &m);
+    printf("module %u bytes from %d, kind %s, fits %d, %u inputs, %u outputs\n", m.bytes, m.from, shd_kind_name(m.desc.kind),
+           m.desc.fits, m.desc.ninputs, m.desc.noutputs);
+    vkp_store_close();
+}
+
+static void case_storeopen(const char *base, const char *variants) {
+    char why[512];
+    if (!vkp_store_open(base, strcmp(variants, "-") ? variants : NULL, why, sizeof why)) printf("refused: %s\n", why);
+    else printf("ok\n"), vkp_store_close();
+}
+
+
+// ---------- usable: how many devices here have every item (the driver skips the device cases when none does)
+static void case_usable(void) {
+    if (volkInitialize() != VK_SUCCESS) {
+        printf("no Vulkan loader\n");
+        exit(EXIT_NO_DEVICE);
+    }
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_3};
+    VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app};
+    VkInstance inst;
+    if (vkCreateInstance(&ci, NULL, &inst) != VK_SUCCESS) {
+        printf("no Vulkan 1.3 instance\n");
+        exit(EXIT_NO_DEVICE);
+    }
+    volkLoadInstanceOnly(inst);
+    uint32_t n = 0;
+    CHECK(vkEnumeratePhysicalDevices(inst, &n, NULL) == VK_SUCCESS);
+    if (!n) {
+        printf("no Vulkan device\n");
+        exit(EXIT_NO_DEVICE);
+    }
+    VkPhysicalDevice devs[16];
+    if (n > 16) n = 16;
+    CHECK(vkEnumeratePhysicalDevices(inst, &n, devs) >= 0);
+    int usable = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t ne = 0;
+        CHECK(vkEnumerateDeviceExtensionProperties(devs[i], NULL, &ne, NULL) == VK_SUCCESS);
+        VkExtensionProperties *ext = calloc(ne ? ne : 1, sizeof *ext);
+        CHECK(ext && vkEnumerateDeviceExtensionProperties(devs[i], NULL, &ne, ext) == VK_SUCCESS);
+        Oot2VkFacts f;
+        oot2_vk_query(vkGetPhysicalDeviceProperties2, vkGetPhysicalDeviceFeatures2, devs[i], ext, ne, &f);
+        free(ext);
+        unsigned char has[OOT2_VK_ITEM_COUNT];
+        usable += oot2_vk_judge(&f, has) == OOT2_VK_ITEM_COUNT;
+    }
+    vkDestroyInstance(inst, NULL);
+    printf("usable %d\nok usable\n", usable);
+}
+
+// ---------- the device
+
+static void close_and_report(void) {
+    vkp_close();
+    vkp_store_close();
+    gpu_vk_close();
+    uint64_t errors, warnings;
+    gpu_vk_validation_counts(&errors, &warnings);
+    printf("validation errors %llu warnings %llu\n", (unsigned long long)errors, (unsigned long long)warnings);
+}
+
+#define VS_KEY "5100000000000001.00000000"
+#define PS_KEY "5100000000000002.00000000"
+#define CS_KEY "5100000000000003.00000000"
+#define CS2_KEY "5100000000000004.00000000"
+#define NO_KEY "5100000000000009.00000000"
+
+static void open_all(const char *pack, const char *cache) {
+    gpu_vk_open();
+    char why[512];
+    if (!vkp_store_open(pack, NULL, why, sizeof why)) {
+        fprintf(stderr, "the pack did not open: %s\n", why);
+        exit(1);
+    }
+    vkp_open(cache);
+}
+
+static const VkpFormats F32 = {1, {VK_FORMAT_R32G32B32A32_SFLOAT}, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
+static const VkpFormats F16 = {1, {VK_FORMAT_R16G16B16A16_SFLOAT}, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
+static const VkpFormats F8 = {1, {VK_FORMAT_R8G8B8A8_UNORM}, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
+
+static void print_stats(const char *tag) {
+    VkpStats s;
+    vkp_stats(&s);
+    printf("stats %s libraries %llu hits %llu stage %llu hits %llu links %llu hits %llu computes %llu hits %llu padded %llu "
+           "resident %llu build_ms %.1f %.1f %.1f\n", tag, (unsigned long long)s.libraries,
+           (unsigned long long)s.library_hits, (unsigned long long)s.stage_libraries,
+           (unsigned long long)s.stage_library_hits, (unsigned long long)s.links, (unsigned long long)s.link_hits,
+           (unsigned long long)s.computes,
+           (unsigned long long)s.compute_hits, (unsigned long long)s.padded, (unsigned long long)s.resident,
+           (double)s.build_ns[0] / 1e6, (double)s.build_ns[1] / 1e6, (double)s.build_ns[2] / 1e6);
+}
+
+static void case_layouts(void) {
+    gpu_vk_open();
+    VkpLayouts l;
+    vkp_layouts_create(&l);
+    CHECK(l.global && l.graphics_push && l.compute_push && l.task && l.graphics && l.compute);
+    vkp_layouts_destroy(&l);
+    CHECK(!l.graphics);
+    gpu_vk_close();
+    uint64_t e, w;
+    gpu_vk_validation_counts(&e, &w);
+    printf("validation errors %llu warnings %llu\nok layouts\n", (unsigned long long)e, (unsigned long long)w);
+}
+
+static float half_to_float(uint16_t h) {
+    uint32_t s = (uint32_t)(h >> 15) << 31, e = (h >> 10) & 31, m = h & 1023, bits;
+    if (e == 0) {
+        if (m == 0) bits = s;
+        else {
+            e = 127 - 15 + 1;
+            while (!(m & 1024)) m <<= 1, e--;
+            bits = s | e << 23 | (m & 1023) << 13;
+        }
+    } else if (e == 31) {
+        bits = s | 0x7f800000u | m << 13;
+    } else {
+        bits = s | (e + 127 - 15) << 23 | m << 13;
+    }
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+static void pixel_of(const void *img, VkFormat fmt, uint32_t w, uint32_t x, uint32_t y, float out[4]) {
+    size_t at = ((size_t)y * w + x);
+    if (fmt == VK_FORMAT_R32G32B32A32_SFLOAT) memcpy(out, (const float *)img + at * 4, 16);
+    else if (fmt == VK_FORMAT_R16G16B16A16_SFLOAT)
+        for (int i = 0; i < 4; i++) out[i] = half_to_float(((const uint16_t *)img)[at * 4 + i]);
+    else
+        for (int i = 0; i < 4; i++) out[i] = (float)((const uint8_t *)img)[at * 4 + i] / 255.0f;
+}
+
+// The synthetic pair's draw: a triangle over the whole target, vertex bank 1, vertex storage 9, pixel bank 14, pixel
+// storage 25 and one push word. The pixel stage adds the vertex output at location 1, which nothing writes.
+static void synth_spec(DrawSpec *s, VkPipeline pipe, VkFormat fmt, void *out) {
+    static const float vs_bank[4] = {0, 0, 0, 0}, vs_data[4] = {0.25f, 0.5f, 0.75f, 0.0f};
+    static const float ps_bank[4] = {0.5f, 0.25f, 0.0f, 0.0f}, ps_data[4] = {2.0f, 2.0f, 2.0f, 0.5f};
+    memset(s, 0, sizeof *s);
+    s->pipeline = pipe, s->format = fmt, s->width = s->height = 32, s->vertex_count = 3, s->out = out;
+    s->clear[0] = s->clear[1] = s->clear[2] = s->clear[3] = -7.0f;
+    s->binds[s->nbinds++] = (DrawBind){1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, vs_bank, 16};
+    s->binds[s->nbinds++] = (DrawBind){9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, vs_data, 16};
+    s->binds[s->nbinds++] = (DrawBind){14, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, ps_bank, 16};
+    s->binds[s->nbinds++] = (DrawBind){25, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, ps_data, 16};
+    s->push[4] = 1;   // words[1].x
+}
+
+static int near4(const float *got, const float *want, float tol) {
+    for (int i = 0; i < 4; i++) {
+        float d = got[i] - want[i];
+        if (d < -tol || d > tol) return 0;
+    }
+    return 1;
+}
+
+static void case_synth_draw(const char *pack, int unpad) {
+    open_all(pack, NULL);
+    vkp_unpad = unpad;
+    VkpStage vs = {.key = VS_KEY}, ps = {.key = PS_KEY};
+    VkPipeline p32 = vkp_graphics(&vs, &ps, &F32), p16 = vkp_graphics(&vs, &ps, &F16);
+    CHECK(p32 && p16 && p32 != p16);
+    CHECK(vkp_graphics(&vs, &ps, &F32) == p32);   // the same pipeline again, made once
+    print_stats("graphics");
+    static float img32[32 * 32 * 4];
+    static uint16_t img16[32 * 32 * 4];
+    DrawSpec s;
+    synth_spec(&s, p32, F32.color[0], img32);
+    draw_run(&s);
+    synth_spec(&s, p16, F16.color[0], img16);
+    draw_run(&s);
+    float px32[4], px16[4];
+    pixel_of(img32, F32.color[0], 32, 16, 16, px32);
+    pixel_of(img16, F16.color[0], 32, 16, 16, px16);
+    printf("pixel f32 %g %g %g %g\npixel f16 %g %g %g %g\n", px32[0], px32[1], px32[2], px32[3], px16[0], px16[1], px16[2], px16[3]);
+    // a + b (b padded to (0, 0, 0, 1)) + bank, times storage, plus the push word
+    const float want[4] = {2.5f, 2.5f, 2.5f, 1.5f};
+    int ok32 = near4(px32, want, 1e-5f), ok16 = near4(px16, want, 1e-2f);
+    printf("padded input reads (0, 0, 0, 1): f32 %s, f16 %s\n", ok32 ? "yes" : "no", ok16 ? "yes" : "no");
+    close_and_report();
+    if (!unpad) CHECK(ok32 && ok16);
+    printf("ok synth_draw\n");
+}
+
+static void case_synth_compute(const char *pack) {
+    open_all(pack, NULL);
+    VkpStage cs = {.key = CS_KEY};
+    VkPipeline p = vkp_compute(&cs);
+    CHECK(p && vkp_compute(&cs) == p);
+    uint32_t bank[4] = {3, 0, 0, 0}, push[VKP_PUSH_BYTES / 4] = {7};
+    DrawBind binds[2] = {{1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, bank, 16}, {9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, 128 * 4}};
+    DrawBuf bufs[2];
+    bufs[0] = draw_buffer(16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, bank, 16);
+    bufs[1] = draw_buffer(128 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, 0);
+    dispatch_run(p, binds, 2, bufs, push, 4);
+    const uint32_t *out = bufs[1].map;
+    for (uint32_t i = 0; i < 128; i++) CHECK(out[i] == i * 3 + 7);
+    printf("128 values written by the dispatch: 3 * i + 7\n");
+    draw_buffer_free(&bufs[0]), draw_buffer_free(&bufs[1]);
+    print_stats("compute");
+    close_and_report();
+    printf("ok synth_compute\n");
+}
+
+static void case_synth_inflight(const char *pack) {
+    open_all(pack, NULL);
+    VkpStage cs = {.key = CS_KEY}, cs2 = {.key = CS2_KEY};
+    VkPipeline p = vkp_compute(&cs);
+    VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+                                    .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE};
+    VkSemaphoreCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &st};
+    VkSemaphore gate;
+    CHECK(vkCreateSemaphore(gpu_vk.device, &si, NULL, &gate) == VK_SUCCESS);
+    VkSemaphoreSubmitInfo wait = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = gate, .value = 1,
+                                  .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    uint64_t v = gpu_vk_begin(GPU_VK_INTERNAL);
+    gpu_vk_cmd();
+    CHECK(gpu_vk_end(&wait, 1) == v);
+    CHECK(gpu_sync_handed() != gpu_sync_done());
+    CHECK(vkp_compute(&cs) == p);   // what exists is returned, in flight or not
+    printf("the existing pipeline was returned with a submission in flight\n");
+    fflush(stdout);
+    vkp_compute(&cs2);              // one that must be made: a named fatal
+    printf("returned\n");
+}
+
+static void case_synth_cache(const char *pack, const char *file, const char *phase) {
+    open_all(pack, file);
+    printf("cache_state %d\n", (int)vkp_cache_state());
+    VkpStage vs = {.key = VS_KEY}, ps = {.key = PS_KEY}, cs = {.key = CS_KEY};
+    CHECK(vkp_graphics(&vs, &ps, &F32) && vkp_graphics(&vs, &ps, &F16) && vkp_compute(&cs));
+    print_stats(phase);
+    if (!strcmp(phase, "cold")) {
+        char why[256];
+        CHECK(vkp_cache_save(why, sizeof why));
+        printf("cache saved\n");
+    }
+    close_and_report();
+    printf("ok synth_cache\n");
+}
+
+static void case_synth_release(const char *pack) {
+    open_all(pack, NULL);
+    VkpStage vs = {.key = VS_KEY}, ps = {.key = PS_KEY};
+    CHECK(vkp_graphics(&vs, &ps, &F32));
+    VkpStats a, b, c;
+    vkp_stats(&a);
+    vkp_release(PS_KEY);
+    vkp_stats(&b);
+    printf("resident %llu before, %llu after releasing the pixel stage\n", (unsigned long long)a.resident,
+           (unsigned long long)b.resident);
+    CHECK(b.resident < a.resident);
+    CHECK(vkp_graphics(&vs, &ps, &F32));
+    vkp_stats(&c);
+    printf("the pipeline and the pixel stage's library were made again: links %llu to %llu, libraries %llu to %llu\n",
+           (unsigned long long)b.links, (unsigned long long)c.links, (unsigned long long)b.libraries,
+           (unsigned long long)c.libraries);
+    CHECK(c.links == b.links + 1 && c.libraries == b.libraries + 1);   // the vertex library was kept
+    close_and_report();
+    printf("ok synth_release\n");
+}
+
+#define THREADS 8
+static VkPipeline g_thread_pipe[THREADS];
+static int g_started, g_done, g_go;
+
+static void thread_main(void *arg) {
+    int i = (int)(intptr_t)arg;
+    __atomic_add_fetch(&g_started, 1, __ATOMIC_SEQ_CST);
+    while (!__atomic_load_n(&g_go, __ATOMIC_ACQUIRE)) plat_yield();
+    VkpStage vs = {.key = VS_KEY}, ps = {.key = PS_KEY};
+    g_thread_pipe[i] = vkp_graphics(&vs, &ps, &F32);
+    __atomic_add_fetch(&g_done, 1, __ATOMIC_SEQ_CST);
+}
+
+static void case_synth_threads(const char *pack) {
+    open_all(pack, NULL);
+    for (intptr_t i = 0; i < THREADS; i++) plat_thread_start(thread_main, (void *)i, 8u << 20);
+    while (__atomic_load_n(&g_started, __ATOMIC_SEQ_CST) < THREADS) plat_yield();
+    __atomic_store_n(&g_go, 1, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&g_done, __ATOMIC_SEQ_CST) < THREADS) plat_sleep_ns(1000000);
+    for (int i = 1; i < THREADS; i++) CHECK(g_thread_pipe[i] == g_thread_pipe[0] && g_thread_pipe[0]);
+    VkpStats s;
+    vkp_stats(&s);
+    print_stats("threads");
+    CHECK(s.links == 1);
+    printf("%d threads asked for one pipeline: made once\n", THREADS);
+    close_and_report();
+    printf("ok synth_threads\n");
+}
+
+static void case_synth_absent(const char *pack) {
+    open_all(pack, NULL);
+    nvn_stage st = {.kind = NVN_STAGE_VS, .ctl_size = 0x57, .code_size = 0x4560, .inst_size = 0x4000};
+    snprintf(st.key, sizeof st.key, "%s", NO_KEY);
+    VkpStage vs = {.key = NO_KEY, .shape = &st}, ps = {.key = PS_KEY};
+    vkp_graphics(&vs, &ps, &F32);
+    printf("returned\n");
+}
+
+// ---------- the player's own pack
+
+typedef struct Job {
+    char vs[64], ps[64];
+    double ms;
+} Job;
+
+static Job *g_jobs;
+static uint32_t g_njobs, g_next;
+static int g_compute_jobs;
+static const VkpFormats *g_formats[2] = {&F8, &F16};
+
+static char *trim(char *s) {
+    size_t n = strlen(s);
+    while (n && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ')) s[--n] = 0;
+    return s;
+}
+
+static void read_jobs(const char *path, int pairs) {
+    size_t n;
+    char *text = read_all(path, &n), *line, *save = NULL;
+    text = realloc(text, n + 1);
+    text[n] = 0;
+    uint32_t cap = 1024;
+    g_jobs = calloc(cap, sizeof *g_jobs);
+    for (line = STRTOK(text, "\n", &save); line; line = STRTOK(NULL, "\n", &save)) {
+        trim(line);
+        if (!*line) continue;
+        if (g_njobs == cap) g_jobs = realloc(g_jobs, (cap *= 2) * sizeof *g_jobs), memset(g_jobs + g_njobs, 0, g_njobs * sizeof *g_jobs);
+        char *tab = strchr(line, '\t');
+        if (pairs) {
+            CHECK(tab);
+            *tab = 0;
+            snprintf(g_jobs[g_njobs].ps, sizeof g_jobs[0].ps, "%s", tab + 1);
+        }
+        snprintf(g_jobs[g_njobs].vs, sizeof g_jobs[0].vs, "%s", line);
+        g_njobs++;
+    }
+    free(text);
+}
+
+static void job_main(void *arg) {
+    (void)arg;
+    for (;;) {
+        uint32_t i = __atomic_fetch_add(&g_next, 1, __ATOMIC_SEQ_CST);
+        if (i >= g_njobs) break;
+        Job *j = &g_jobs[i];
+        uint64_t t0 = plat_now_ns();
+        VkpStage a = {.key = j->vs}, b = {.key = j->ps};
+        if (g_compute_jobs) {
+            CHECK(vkp_compute(&a));
+        } else {
+            for (int f = 0; f < 2; f++) CHECK(vkp_graphics(&a, &b, g_formats[f]));
+        }
+        j->ms = (double)(plat_now_ns() - t0) / 1e6;
+    }
+    __atomic_add_fetch(&g_done, 1, __ATOMIC_SEQ_CST);
+}
+
+static int cmp_double(const void *a, const void *b) {
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void run_jobs(int threads) {
+    uint64_t t0 = plat_now_ns();
+    g_done = 0, g_next = 0;
+    for (int i = 0; i < threads; i++) plat_thread_start(job_main, NULL, 8u << 20);
+    while (__atomic_load_n(&g_done, __ATOMIC_SEQ_CST) < threads) plat_sleep_ns(10000000);
+    double wall = (double)(plat_now_ns() - t0) / 1e9;
+    double *ms = malloc((g_njobs ? g_njobs : 1) * sizeof *ms);
+    for (uint32_t i = 0; i < g_njobs; i++) ms[i] = g_jobs[i].ms;
+    qsort(ms, g_njobs, sizeof *ms, cmp_double);
+    printf("jobs %u on %d threads in %.1f s; per job p50 %.3f ms p99 %.3f ms max %.3f ms\n", g_njobs, threads, wall,
+           ms[g_njobs / 2], ms[(size_t)((g_njobs - 1) * 0.99)], ms[g_njobs - 1]);
+    free(ms);
+}
+
+static void case_corpus(const char *pack, const char *list, int pairs, int threads, const char *cache, int save) {
+    open_all(pack, strcmp(cache, "-") ? cache : NULL);
+    printf("cache_state %d\n", (int)vkp_cache_state());
+    read_jobs(list, pairs);
+    g_compute_jobs = !pairs;
+    run_jobs(threads);
+    print_stats(pairs ? "pairs" : "compute");
+    // every pair a second time: the same pipelines, nothing made
+    VkpStats a, b;
+    vkp_stats(&a);
+    for (uint32_t i = 0; i < g_njobs; i++) {
+        VkpStage x = {.key = g_jobs[i].vs}, y = {.key = g_jobs[i].ps};
+        if (pairs) CHECK(vkp_graphics(&x, &y, g_formats[0]));
+        else CHECK(vkp_compute(&x));
+    }
+    vkp_stats(&b);
+    CHECK(a.libraries == b.libraries && a.links == b.links && a.computes == b.computes);
+    if (save) {
+        char why[256];
+        CHECK(vkp_cache_save(why, sizeof why));
+        printf("cache saved\n");
+    }
+    close_and_report();
+    printf("ok corpus\n");
+}
+
+// tools/firstdraw's draw file, read for the directives the builder's draw needs.
+static float *file_floats(const char *path, size_t *bytes) { return read_all(path, bytes); }
+
+static VkFormat attr_format(const char *s) {
+    static const struct { const char *name; VkFormat f; } t[] = {
+        {"r32f", VK_FORMAT_R32_SFLOAT}, {"rg32f", VK_FORMAT_R32G32_SFLOAT}, {"rgb32f", VK_FORMAT_R32G32B32_SFLOAT},
+        {"rgba32f", VK_FORMAT_R32G32B32A32_SFLOAT}, {"r32i", VK_FORMAT_R32_SINT}, {"rg32i", VK_FORMAT_R32G32_SINT},
+        {"rgb32i", VK_FORMAT_R32G32B32_SINT}, {"rgba32i", VK_FORMAT_R32G32B32A32_SINT}, {"r32ui", VK_FORMAT_R32_UINT},
+        {"rg32ui", VK_FORMAT_R32G32_UINT}, {"rgb32ui", VK_FORMAT_R32G32B32_UINT}, {"rgba32ui", VK_FORMAT_R32G32B32A32_UINT}};
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++)
+        if (!strcmp(t[i].name, s)) return t[i].f;
+    fprintf(stderr, "unknown attribute format %s\n", s);
+    exit(1);
+}
+
+static void case_firstdraw(const char *draw, const char *pack, const char *vkey, const char *pkey, const char *out_path) {
+    static DrawSpec s;
+    static void *keep[256];
+    int nkeep = 0;
+    size_t n;
+    char *text = read_all(draw, &n);
+    text = realloc(text, n + 1);
+    text[n] = 0;
+    char *save = NULL;
+    for (char *line = STRTOK(text, "\n", &save); line; line = STRTOK(NULL, "\n", &save)) {
+        trim(line);
+        char w[32];
+        if (sscanf(line, "%31s", w) != 1) continue;
+        char *rest = line + strlen(w);
+        while (*rest == ' ') rest++;
+        unsigned a, b, c, d, e;
+        char fmt[32], path[1024], tp[32], filter[32], addr[32], stages[8];
+        if (!strcmp(w, "size")) {
+            CHECK(sscanf(rest, "%u %u", &a, &b) == 2);
+            s.width = a, s.height = b;
+        } else if (!strcmp(w, "clear")) {
+            CHECK(sscanf(rest, "%f %f %f %f", &s.clear[0], &s.clear[1], &s.clear[2], &s.clear[3]) == 4);
+        } else if (!strcmp(w, "vertices")) {
+            CHECK(sscanf(rest, "%u %u %1023[^\n]", &a, &b, path) == 3);
+            s.vertex_count = a, s.stride = b;
+            if (b) {
+                size_t vb;
+                s.vertices = keep[nkeep++] = file_floats(path, &vb);
+                s.vertices_size = (uint32_t)vb;
+            }
+        } else if (!strcmp(w, "attribute")) {
+            CHECK(sscanf(rest, "%u %31s %u", &a, fmt, &b) == 3);
+            s.attrs[s.nattrs++] = (DrawAttr){a, attr_format(fmt), b};
+        } else if (!strcmp(w, "uniform") || !strcmp(w, "storage")) {
+            CHECK(sscanf(rest, "%u %7s %1023[^\n]", &a, stages, path) == 3);
+            size_t bytes;
+            void *data = keep[nkeep++] = file_floats(path, &bytes);
+            s.binds[s.nbinds++] = (DrawBind){a, w[0] == 'u' ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                             data, bytes};
+        } else if (!strcmp(w, "image")) {
+            CHECK(sscanf(rest, "%u %31s %u %u %u %1023[^\n]", &a, tp, &b, &c, &d, path) == 6);
+            size_t bytes;
+            VkImageViewType v = !strcmp(tp, "2d") ? VK_IMAGE_VIEW_TYPE_2D : !strcmp(tp, "2darray") ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                : !strcmp(tp, "3d") ? VK_IMAGE_VIEW_TYPE_3D : VK_IMAGE_VIEW_TYPE_CUBE;
+            s.tex[s.ntex++] = (DrawTex){a, v, b, c, d, keep[nkeep++] = file_floats(path, &bytes)};
+        } else if (!strcmp(w, "sampler")) {
+            CHECK(sscanf(rest, "%u %31s %31s", &a, filter, addr) == 3);
+            s.samp[s.nsamp++] = (DrawSamp){a, !strcmp(filter, "linear") ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
+                                           !strcmp(addr, "repeat") ? VK_SAMPLER_ADDRESS_MODE_REPEAT : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE};
+        } else if (!strcmp(w, "push")) {
+            CHECK(sscanf(rest, "%u %u", &a, &e) == 2 && a % 4 == 0 && a < VKP_PUSH_BYTES);
+            s.push[a / 4] = e;
+        }
+        (void)c;
+    }
+    free(text);
+    CHECK(s.width && s.height && nkeep < 256);
+    s.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    s.out = malloc((size_t)s.width * s.height * 16);
+    open_all(pack, NULL);
+    VkpStage vs = {.key = vkey}, ps = {.key = pkey};
+    s.pipeline = vkp_graphics(&vs, &ps, &F32);
+    VkPipeline p16 = vkp_graphics(&vs, &ps, &F16);
+    CHECK(s.pipeline && p16);
+    draw_run(&s);
+    FILE *f = fopen(out_path, "wb");
+    CHECK(f && fwrite(s.out, 1, (size_t)s.width * s.height * 16, f) == (size_t)s.width * s.height * 16);
+    fclose(f);
+    print_stats("firstdraw");
+    close_and_report();
+    printf("ok firstdraw\n");
+}
+
+typedef struct Tally {
+    uint32_t cap;
+    uint64_t count;
+} Tally;
+
+static void case_caps(const char *pack, const char *keys, int argc, char **argv) {
+    char why[512];
+    static ShcSet set;
+    CHECK(shc_set_open(&set, pack, NULL, SHC_DESC_SCHEMA, why, sizeof why) == SHC_OK);
+    static Oot2VkFacts f;
+    VkcList l;
+    vkc_list(&f, &l);
+    if (argc >= 2 && !strcmp(argv[0], "drop")) {
+        uint32_t drop = (uint32_t)strtoul(argv[1], NULL, 10);
+        size_t at = 0;
+        for (size_t i = 0; i < l.ncaps; i++)
+            if (l.caps[i] != drop) l.caps[at++] = l.caps[i];
+        l.ncaps = at;
+    }
+    static Tally caps[256];
+    static struct { char name[SPV_EXT_LEN]; uint64_t count; } exts[64];
+    size_t ncaps = 0, nexts = 0;
+    size_t n;
+    char *text = read_all(keys, &n), *save = NULL;
+    text = realloc(text, n + 1);
+    text[n] = 0;
+    uint64_t modules = 0, bad = 0, failed = 0;
+    for (char *line = STRTOK(text, "\n", &save); line; line = STRTOK(NULL, "\n", &save)) {
+        trim(line);
+        char *tab = strchr(line, '\t');
+        if (tab) *tab = 0;
+        if (!*line) continue;
+        ShcEntry e;
+        if (shc_set_find(&set, line, NULL, &e) == SHC_MISS) {
+            printf("missing %s\n", line);
+            bad++;
+            continue;
+        }
+        if (e.status != SHC_TRANSLATED) {
+            failed++;
+            continue;
+        }
+        modules++;
+        SpvDecl d;
+        CHECK(spv_declarations(e.module, e.module_bytes / 4, &d, why, sizeof why));
+        for (uint32_t i = 0; i < d.ncaps; i++) {
+            size_t k = 0;
+            while (k < ncaps && caps[k].cap != d.caps[i]) k++;
+            if (k == ncaps) {
+                CHECK(ncaps < 256);
+                caps[ncaps++].cap = d.caps[i];
+            }
+            caps[k].count++;
+        }
+        for (uint32_t i = 0; i < d.nexts; i++) {
+            size_t k = 0;
+            while (k < nexts && strcmp(exts[k].name, d.exts[i])) k++;
+            if (k == nexts) {
+                CHECK(nexts < 64);
+                snprintf(exts[nexts++].name, SPV_EXT_LEN, "%s", d.exts[i]);
+            }
+            exts[k].count++;
+        }
+        if (vkc_check(&l, &d, why, sizeof why)) {
+            bad++;
+            if (bad <= 5) printf("first refusals: %s: %s\n", line, why);
+        }
+    }
+    printf("modules %llu, failure records %llu, refused %llu\n", (unsigned long long)modules, (unsigned long long)failed,
+           (unsigned long long)bad);
+    for (size_t i = 0; i < ncaps; i++) {
+        const char *name = spv_capability_name(caps[i].cap);
+        printf("cap %u %s %llu %s\n", caps[i].cap, name ? name : "?", (unsigned long long)caps[i].count,
+               vkc_has_cap(&l, caps[i].cap) ? "in the list" : "NOT in the list");
+    }
+    for (size_t i = 0; i < nexts; i++) {
+        size_t k = 0;
+        while (k < l.nexts && strcmp(l.exts[k], exts[i].name)) k++;
+        printf("ext %s %llu %s\n", exts[i].name, (unsigned long long)exts[i].count, k < l.nexts ? "in the list" : "NOT in the list");
+    }
+    free(text);
+    vkp_store_close();
+    printf("%s caps\n", bad ? "refused" : "ok");
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    const char *cs = argv[1];
+    if (!strcmp(cs, "tables")) case_tables();
+    else if (!strcmp(cs, "desc") && argc >= 3) case_desc(argv[2]);
+    else if (!strcmp(cs, "pad") && argc >= 4) case_pad(argv[2], argv[3]);
+    else if (!strcmp(cs, "spvdecl") && argc >= 3) case_spvdecl(argv[2]);
+    else if (!strcmp(cs, "spvpad") && argc >= 5) case_spvpad(argv[2], argv[3], argv[4]);
+    else if (!strcmp(cs, "capcheck") && argc >= 3) case_capcheck(argv[2], argc - 3, argv + 3);
+    else if (!strcmp(cs, "cachejudge")) case_cachejudge();
+    else if (!strcmp(cs, "store") && argc >= 7) case_store(argv[2], argv[3], argv[4], argv[5], argv[6]);
+    else if (!strcmp(cs, "storeopen") && argc >= 4) case_storeopen(argv[2], argv[3]);
+    else if (!strcmp(cs, "usable")) case_usable();
+    else if (!strcmp(cs, "caps") && argc >= 4) case_caps(argv[2], argv[3], argc - 4, argv + 4);
+    else {
+        // the cases below open the device: a machine without a loader or a device skips
+        if (volkInitialize() != VK_SUCCESS) {
+            printf("no Vulkan loader\n");
+            return EXIT_NO_DEVICE;
+        }
+        if (!strcmp(cs, "layouts")) case_layouts();
+        else if (!strcmp(cs, "synth_draw") && argc >= 3) case_synth_draw(argv[2], argc >= 4 && !strcmp(argv[3], "unpad"));
+        else if (!strcmp(cs, "synth_compute") && argc >= 3) case_synth_compute(argv[2]);
+        else if (!strcmp(cs, "synth_inflight") && argc >= 3) case_synth_inflight(argv[2]);
+        else if (!strcmp(cs, "synth_cache") && argc >= 5) case_synth_cache(argv[2], argv[3], argv[4]);
+        else if (!strcmp(cs, "synth_release") && argc >= 3) case_synth_release(argv[2]);
+        else if (!strcmp(cs, "synth_threads") && argc >= 3) case_synth_threads(argv[2]);
+        else if (!strcmp(cs, "synth_absent") && argc >= 3) case_synth_absent(argv[2]);
+        else if (!strcmp(cs, "firstdraw") && argc >= 7) case_firstdraw(argv[2], argv[3], argv[4], argv[5], argv[6]);
+        else if (!strcmp(cs, "corpus_pairs") && argc >= 6) case_corpus(argv[2], argv[3], 1, atoi(argv[4]), argv[5], argc >= 7);
+        else if (!strcmp(cs, "corpus_compute") && argc >= 6) case_corpus(argv[2], argv[3], 0, atoi(argv[4]), argv[5], argc >= 7);
+        else return 2;
+    }
+    fflush(stdout);
+    return 0;
+}
