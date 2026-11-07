@@ -15,6 +15,9 @@ namespace Ryujinx.Graphics.Shader.Translation
         public int ComputeLocalSizeY { get; }
         public int ComputeLocalSizeZ { get; }
 
+        // oot2-native: set for a task or mesh program, which stays a Compute stage until the generator names its execution model
+        public MeshStageInfo MeshStage { get; init; }
+
         public bool TessCw => _graphicsState.TessCw;
         public TessPatchType TessPatchType => _graphicsState.TessPatchType;
         public TessSpacing TessSpacing => _graphicsState.TessSpacing;

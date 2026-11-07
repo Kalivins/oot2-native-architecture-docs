@@ -20,6 +20,9 @@ internal static class Kinds
     public const string Decode = "decode";
     public const string Translate = "translate";
     public const string Validate = "validate";
+
+    // A task or mesh program past a limit the device (or the job's mesh_limits) gives; the message names the limit
+    public const string OverLimit = "over_limit";
 }
 
 /// <summary>A failure that already knows its contract kind.</summary>
@@ -82,6 +85,9 @@ internal sealed class JobOptions
     public bool NonUniformIndexing { get; init; } = true;
     public bool CapabilityFixup { get; init; } = true;
     public string Variant { get; init; } = "";
+
+    // The limits a task or mesh program is checked against (the RTX 3060 Ti's unless prepare reads the device)
+    public MeshLimits MeshLimits { get; init; } = MeshLimits.Default;
 }
 
 /// <summary>
@@ -109,7 +115,7 @@ internal sealed class Job
 
     private static readonly HashSet<string> KnownOptions = new(StringComparer.Ordinal)
     {
-        "debug", "reduced", "float64", "nonuniform_indexing", "capability_fixup", "variant",
+        "debug", "reduced", "float64", "nonuniform_indexing", "capability_fixup", "variant", "mesh_limits",
     };
 
     public string Key { get; private set; }
@@ -129,6 +135,13 @@ internal sealed class Job
     // emission declares exactly these and no other component. Echoed into res.json; no pass reads it yet.
     public int[][] OutputsVertex { get; private set; }
     public int[][] OutputsPrimitive { get; private set; }
+
+    // A task or mesh job as the stage the translator emits: built from its mesh object, local size and output map (null for other stages).
+    // MeshPayloadBytes is the payload the control section declares, MeshOwnShared whether the program uses shared memory of its own
+    public MeshStageInfo MeshStage { get; private set; }
+    public int MeshPayloadBytes { get; private set; }
+    public bool MeshOwnShared { get; private set; }
+
     public AnswerMap<SamplerType> Tex { get; } = new();
     public AnswerMap<ImageAnswer> Img { get; } = new();
     public AnswerMap<AttributeType> Attr { get; } = new();
@@ -321,12 +334,112 @@ internal sealed class Job
                 job.OutputsVertex = ReadOutputList(Require(outputs, "vertex"), "outputs.vertex", true);
                 job.OutputsPrimitive = ReadOutputList(Require(outputs, "primitive"), "outputs.primitive", false);
             }
+
+            BuildMeshStage(job);
         }
 
         if (job.Stage is "vs" or "ps" && job.CodeLength is long cl && cl < 0x90)
         {
             throw Bad($"code_length {cl} leaves no room for a 0x80-byte header and an instruction");
         }
+    }
+
+    // The stage description of a task or mesh job (MeshStageInfo), from what split.py derives out of the control section:
+    // the mesh object (kind, threads, payload bytes, and for a mesh program has_task, max_vertices, max_primitives) and the
+    // output map. The sizes come from here, never from the program header. A mesh program needs its map; a task program's
+    // output is its payload, so a map on a task job must be empty (all 20 task jobs of the dump are).
+    private static void BuildMeshStage(Job job)
+    {
+        if (job.Mesh is not JsonElement m)
+        {
+            throw Bad($"a {job.Stage} job needs its 'mesh' object");
+        }
+
+        bool task = job.Stage == "ts";
+        string kind = MeshString(m, "kind");
+
+        if (kind != job.Stage)
+        {
+            throw Bad($"mesh.kind '{Clip(kind)}' is not the job's stage {job.Stage}");
+        }
+
+        int threads = MeshInt(m, "threads", 1, MaxThreads);
+
+        if (job.Local[0] != threads || job.Local[1] != 1 || job.Local[2] != 1)
+        {
+            throw Bad($"local {job.Local[0]}x{job.Local[1]}x{job.Local[2]} is not mesh.threads {threads} by 1 by 1");
+        }
+
+        int payload = MeshInt(m, "payload", 0, MaxSharedBytes);
+        bool hasTask = false;
+        int maxVertices = 0, maxPrimitives = 0;
+
+        if (!task)
+        {
+            if (job.OutputsVertex == null)
+            {
+                throw Bad("a mesh job needs its 'outputs' map");
+            }
+
+            hasTask = MeshBool(m, "has_task");
+            maxVertices = MeshInt(m, "max_vertices", 1, 4096);
+            maxPrimitives = MeshInt(m, "max_primitives", 1, 4096);
+
+            foreach ((string field, int[][] list) in new[] { ("vertex_components", job.OutputsVertex), ("primitive_components", job.OutputsPrimitive) })
+            {
+                if (m.TryGetProperty(field, out JsonElement c) && (c.ValueKind != JsonValueKind.Number || !c.TryGetInt32(out int n) || n != list.Length))
+                {
+                    throw Bad($"mesh.{field} does not match the outputs map's {list.Length} components");
+                }
+            }
+        }
+        else if (job.OutputsVertex != null && (job.OutputsVertex.Length != 0 || job.OutputsPrimitive.Length != 0))
+        {
+            throw Bad("a task job's output map must be empty: its output is its payload");
+        }
+
+        MeshComponent[] Lines(int[][] list)
+        {
+            MeshComponent[] lines = new MeshComponent[list?.Length ?? 0];
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                lines[i] = new MeshComponent(list[i][0], list[i][1]);
+            }
+
+            return lines;
+        }
+
+        job.MeshPayloadBytes = payload;
+        job.MeshOwnShared = m.TryGetProperty("own_shared", out JsonElement own) && own.ValueKind == JsonValueKind.True;
+        job.MeshStage = new MeshStageInfo
+        {
+            Kind = task ? MeshStageKind.Task : MeshStageKind.Mesh,
+            Threads = threads,
+
+            // A task's output region holds the group count at byte 4, so it has at least two words
+            PayloadWords = Math.Max(task ? 2 : 1, (payload + 3) / 4),
+            HasTask = hasTask,
+            MaxVertices = maxVertices,
+            MaxPrimitives = maxPrimitives,
+            VertexLines = task ? Array.Empty<MeshComponent>() : Lines(job.OutputsVertex),
+            PrimitiveLines = task ? Array.Empty<MeshComponent>() : Lines(job.OutputsPrimitive),
+        };
+    }
+
+    private static string MeshString(JsonElement m, string field)
+    {
+        return m.TryGetProperty(field, out JsonElement v) ? ReadString(v, "mesh." + field) : throw Bad($"missing field 'mesh.{field}'");
+    }
+
+    private static int MeshInt(JsonElement m, string field, long min, long max)
+    {
+        return m.TryGetProperty(field, out JsonElement v) ? (int)ReadInt(v, "mesh." + field, min, max) : throw Bad($"missing field 'mesh.{field}'");
+    }
+
+    private static bool MeshBool(JsonElement m, string field)
+    {
+        return m.TryGetProperty(field, out JsonElement v) ? ReadBool(v, "mesh." + field) : throw Bad($"missing field 'mesh.{field}'");
     }
 
     private static void ParseAnswers(JsonElement obj, Job job)
@@ -430,6 +543,7 @@ internal sealed class Job
 
         bool debug = true, reduced = false, float64 = true, nonUniform = true, fixup = true;
         string variant = "";
+        MeshLimits limits = MeshLimits.Default;
 
         foreach (JsonProperty p in opt.EnumerateObject())
         {
@@ -448,6 +562,7 @@ internal sealed class Job
                 case "nonuniform_indexing": nonUniform = ReadBool(p.Value, where); break;
                 case "capability_fixup": fixup = ReadBool(p.Value, where); break;
                 case "variant": variant = ReadString(p.Value, where); break;
+                case "mesh_limits": limits = ReadMeshLimits(p.Value, where); break;
             }
         }
 
@@ -459,7 +574,31 @@ internal sealed class Job
             NonUniformIndexing = nonUniform,
             CapabilityFixup = fixup,
             Variant = variant,
+            MeshLimits = limits,
         };
+    }
+
+    // The device's task and mesh limits (MeshLimits.Names); a name left out keeps the RTX 3060 Ti's value
+    private static MeshLimits ReadMeshLimits(JsonElement v, string where)
+    {
+        if (v.ValueKind != JsonValueKind.Object)
+        {
+            throw Bad($"{where} is not an object");
+        }
+
+        MeshLimits limits = MeshLimits.Default;
+
+        foreach (JsonProperty p in v.EnumerateObject())
+        {
+            if (Array.IndexOf(MeshLimits.Names, p.Name) < 0)
+            {
+                throw Bad($"{where}: unknown limit '{Clip(p.Name)}'");
+            }
+
+            limits = limits.With(p.Name, (int)ReadInt(p.Value, $"{where}.{p.Name}", 1, 1 << 24));
+        }
+
+        return limits;
     }
 
     private static AttributeType ReadAttributeType(JsonElement v, string where)

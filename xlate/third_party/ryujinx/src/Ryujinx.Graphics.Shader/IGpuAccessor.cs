@@ -39,10 +39,10 @@ namespace Ryujinx.Graphics.Shader
         }
 
         /// <summary>
-        /// NVN2 (Switch 2) task and mesh shaders, translated as compute: the byte offsets in shared memory of the stage memory the build reads back (dmsh_meshstage.py): the
-        /// workgroup's number, the stage input (a task's payload), the outputs (a payload, or a mesh shader's attributes) and a mesh shader's primitive bytes; null for other shaders.
+        /// oot2-native: NVN2 (Switch 2) task and mesh shaders, translated as VK_EXT_mesh_shader stages: the sizes the control section gives and the components the program
+        /// header names (the stage memory of ISBERD and ISBEWR becomes a payload, attribute lines, map bytes and a primitive count); null for other shaders.
         /// </summary>
-        int[] QueryAmpereStageMemory()
+        MeshStageInfo QueryAmpereMeshStage()
         {
             return null;
         }

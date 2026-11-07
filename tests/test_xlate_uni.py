@@ -21,7 +21,7 @@ import json
 import struct
 import unittest
 
-from test_xlate_host import Harness, ampere, bit, compute_job, EXIT, SPIRV_VAL, validate
+from test_xlate_host import Harness, ampere, bit, compute_job, mesh_fields, EXIT, SPIRV_VAL, validate
 
 # The scheduling fields of bits 104..115: a stall of one cycle and no write or read barrier (7). With
 # these bits clear an instruction names barrier 0, and the translator then gives its result to no later
@@ -70,8 +70,7 @@ class UniPlacesTest(Harness):
         code.write_bytes(buffers_program(banks, storage))
         if stage == "cs":
             return compute_job(key, code)
-        return {"key": key, "stage": stage, "arch": "sm86", "code": str(code), "c1": "",
-                "local": [32, 1, 1], "shared": 192, "stage_memory": [0, 16, 64, 128], "mesh": {}}
+        return {"key": key, "stage": stage, "arch": "sm86", "code": str(code), "c1": "", **mesh_fields(stage)}
 
     def graphics_job(self, key: str, stage: str, header_type: int) -> dict:
         header = bytearray(0x80)

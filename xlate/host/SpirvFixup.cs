@@ -172,6 +172,8 @@ internal static class SpirvFixup
             4 => "Fragment",
             5 => "GLCompute",
             6 => "Kernel",
+            5364 => "TaskEXT",
+            5365 => "MeshEXT",
             _ => $"ExecutionModel{model}",
         };
     }

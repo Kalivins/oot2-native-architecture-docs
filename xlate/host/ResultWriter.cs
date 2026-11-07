@@ -148,7 +148,8 @@ internal static class ResultWriter
             w.WriteNumber("task_set_descriptors", taskSet);
             w.WriteNumber("texture_slots", slots);
 
-            if (job.IsCompute)
+            // A task or mesh program is a stage of its own (mesh_stage below), not a compute shader
+            if (job.Stage == "cs")
             {
                 w.WriteStartObject("compute");
                 w.WriteStartArray("local_size");
@@ -171,6 +172,8 @@ internal static class ResultWriter
             {
                 w.WriteNull("mesh");
             }
+
+            WriteMeshStage(w, job);
 
             if (job.OutputsVertex != null)
             {
@@ -466,6 +469,47 @@ internal static class ResultWriter
         w.WriteString("descriptor_offset", "address & ~(alignment - 1)");
         w.WriteString("descriptor_range", "size + (address & (alignment - 1))");
         w.WriteString("shader_reads", "the low 32 bits of the address, less the descriptor offset's low 32 bits");
+        w.WriteEndObject();
+    }
+
+    // A task or mesh program as VK_EXT_mesh_shader stage (null for other stages): what the pipeline builder and the draw need to know
+    // without reading the module. payload_bytes is what the stage declares (the control section's payload, at least 8 for a task, 0
+    // for a mesh program without a task); output_bytes is Vulkan's formula for the mesh outputs (every location four scalars, counts
+    // rounded to 32); shared_bytes the staging in workgroup memory; the limits are those the program was checked against.
+    // requires_subgroup_32 is a pipeline creation flag the back end sets for these stages only (research 13 recommendation 5)
+    private static void WriteMeshStage(Utf8JsonWriter w, Job job)
+    {
+        if (job.MeshStage is not MeshStageInfo mesh)
+        {
+            w.WriteNull("mesh_stage");
+
+            return;
+        }
+
+        MeshSizes sizes = MeshChecks.Measure(mesh);
+
+        w.WriteStartObject("mesh_stage");
+        w.WriteString("kind", mesh.Kind == MeshStageKind.Task ? "task" : "mesh");
+        w.WriteNumber("threads", mesh.Threads);
+        w.WriteBoolean("has_task", mesh.HasTask);
+        w.WriteNumber("max_vertices", mesh.MaxVertices);
+        w.WriteNumber("max_primitives", mesh.MaxPrimitives);
+        w.WriteNumber("payload_bytes", sizes.PayloadBytes);
+        w.WriteNumber("output_bytes", sizes.OutputBytes);
+        w.WriteNumber("vertex_locations", sizes.VertexLocations);
+        w.WriteNumber("primitive_locations", sizes.PrimitiveLocations);
+        w.WriteNumber("vertex_components", mesh.VertexLines.Count);
+        w.WriteNumber("primitive_components", mesh.PrimitiveLines.Count);
+        w.WriteNumber("shared_bytes", sizes.SharedBytes);
+        w.WriteBoolean("requires_subgroup_32", true);
+        w.WriteStartObject("limits");
+
+        foreach (string name in MeshLimits.Names)
+        {
+            w.WriteNumber(name, job.Options.MeshLimits.Get(name));
+        }
+
+        w.WriteEndObject();
         w.WriteEndObject();
     }
 

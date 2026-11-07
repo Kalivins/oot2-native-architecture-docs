@@ -205,6 +205,18 @@ def bit(n: int, value: int = 1) -> int:
     return value << n
 
 
+def mesh_fields(stage: str, payload: int = 256, max_vertices: int = 64, max_primitives: int = 64, has_task: bool = True,
+                vertex: list | None = None, primitive: list | None = None, own_shared: bool = False) -> dict:
+    """The fields a task or mesh job carries, as split.py writes them: the thread group, the compute model's shared size and
+    stage memory layout (accepted, no longer read), the mesh object that gives the sizes and, for a mesh job, its output map."""
+    mesh = {"kind": stage, "threads": 32, "payload": payload, "own_shared": own_shared}
+    fields = {"local": [32, 1, 1], "shared": 192, "stage_memory": [0, 16, 64, 128], "mesh": mesh}
+    if stage == "ms":
+        mesh.update(has_task=has_task, max_vertices=max_vertices, max_primitives=max_primitives)
+        fields["outputs"] = {"vertex": vertex or [], "primitive": primitive or []}
+    return fields
+
+
 def builtin_module() -> bytes:
     """A vertex shader whose output block has Position, ClipDistance and CullDistance members."""
     b = Builder(0)
@@ -339,8 +351,7 @@ class AmpereHandlersTest(Harness):
     # ISBERD (0x923) in a task shader: the mode is bits 72..79, the offset 40..63.
     def task_job(self, key: str, mode: int) -> dict:
         code = self.program(key, ampere(0x923, rd=0, ra=255, low_bits=0x10 << 40, high_bits=bit(72, mode)))
-        return {"key": key, "stage": "ts", "arch": "sm86", "code": str(code), "c1": "",
-                "local": [32, 1, 1], "shared": 192, "stage_memory": [0, 16, 64, 128], "mesh": {}}
+        return {"key": key, "stage": "ts", "arch": "sm86", "code": str(code), "c1": "", **mesh_fields("ts")}
 
     def test_isberd_reads_back_the_task_payload(self):
         got = self.translate("isb", self.task_job("isb", 0xB8))
@@ -609,12 +620,11 @@ class RejectedJobTest(Harness):
 
 
 class MeshOutputMapTest(Harness):
-    """The output map of a task or mesh job (ticket 44): validated, kept on the job and echoed into res.json. The
-    translator does not read it yet (the mesh emission, ticket 71, will)."""
+    """The output map of a task or mesh job (ticket 44): validated, kept on the job and echoed into res.json. The mesh
+    emission (ticket 71) declares exactly these components; test_xlate_mesh checks that."""
 
     def stage_job(self, key: str, stage: str, **extra) -> dict:
-        job = {"key": key, "stage": stage, "arch": "sm86", "code": str(self.exit_bin), "c1": "",
-               "local": [32, 1, 1], "shared": 192, "stage_memory": [0, 16, 64, 128], "mesh": {"kind": stage}}
+        job = {"key": key, "stage": stage, "arch": "sm86", "code": str(self.exit_bin), "c1": "", **mesh_fields(stage)}
         job.update(extra)
         return job
 
@@ -638,8 +648,34 @@ class MeshOutputMapTest(Harness):
         self.assertEqual(self.result(self.stage_job("ts1", "ts", outputs=outputs))["outputs"], outputs)
 
     def test_a_job_without_a_map_has_a_null_one(self):
-        self.assertIsNone(self.result(self.stage_job("ms2", "ms"))["outputs"])
+        task = self.stage_job("ts2", "ts")
+        self.assertNotIn("outputs", task)
+        self.assertIsNone(self.result(task)["outputs"])
         self.assertIsNone(self.result(compute_job("cs1", self.exit_bin))["outputs"])
+
+    def test_a_mesh_job_needs_its_map(self):
+        job = self.stage_job("ms2", "ms")
+        del job["outputs"]
+        self.reject(job, "needs its 'outputs' map")
+
+    def test_a_task_job_takes_an_empty_map_only(self):
+        # The output of a task program is its payload; all 20 task jobs of the dump have an empty map
+        self.reject(self.stage_job("ts3", "ts", outputs={"vertex": [[0, 0]], "primitive": []}), "task job's output map must be empty")
+        self.reject(self.stage_job("ts4", "ts", outputs={"vertex": [], "primitive": [[0, 0]]}), "task job's output map must be empty")
+
+    def test_the_mesh_object_must_match_the_job(self):
+        mesh_ms = {"kind": "ms", "threads": 32, "payload": 8, "has_task": True, "max_vertices": 3, "max_primitives": 1}
+        cases = [
+            ("o1", "ms", {"mesh": {"kind": "ts", "threads": 32, "payload": 8}}, "is not the job's stage ms"),
+            ("o2", "ms", {"local": [64, 1, 1]}, "is not mesh.threads 32 by 1 by 1"),
+            ("o3", "ts", {"mesh": {"kind": "ts", "threads": 32}}, "missing field 'mesh.payload'"),
+            ("o4", "ts", {"mesh": {"kind": "ts", "payload": 8}}, "missing field 'mesh.threads'"),
+            ("o5", "ms", {"mesh": {k: v for k, v in mesh_ms.items() if k != "max_vertices"}}, "missing field 'mesh.max_vertices'"),
+            ("o6", "ms", {"mesh": {**mesh_ms, "vertex_components": 2}}, "mesh.vertex_components does not match"),
+        ]
+        for key, stage, extra, needle in cases:
+            with self.subTest(key=key):
+                self.reject(self.stage_job(key, stage, **extra), needle)
 
     def test_the_map_must_be_well_formed(self):
         cases = [

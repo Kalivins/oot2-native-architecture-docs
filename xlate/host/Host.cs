@@ -148,6 +148,9 @@ internal sealed class Host
         Job job = Job.Parse(jobElement);
         key = job.Key;
 
+        // A task or mesh program past the device's limits, or with shared memory of its own, is refused by name before any work
+        MeshChecks.Enforce(job);
+
         byte[] code = ReadCode(job);
         TranslationOutcome outcome = Translation.Run(job, code, translatorTiming);
         long p0 = Stopwatch.GetTimestamp();
@@ -269,6 +272,7 @@ internal sealed class Host
             w.WriteNumber("proto", Protocol);
             w.WriteString("translator_id", _translatorId);
             w.WriteString("spirv", "1.3");
+            w.WriteString("spirv_task_mesh", "1.4");
             w.WriteString("target", "vulkan1.3");
             w.WriteStartObject("defaults");
             w.WriteBoolean("debug", d.Debug);

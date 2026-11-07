@@ -51,6 +51,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             DeclareSamplers(context, SamplersToDeclare(context.Properties));
             DeclareImages(context, context.Properties.Images.Values);
             DeclareInputsAndOutputs(context, info);
+
+            if (context.Definitions.MeshStage != null)
+            {
+                // oot2-native: the outputs of a task or mesh stage come from its job's map, not from what the code stored
+                MeshEmission.DeclareOutputs(context);
+            }
         }
 
         private static void DeclareMemories(
@@ -61,8 +67,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             foreach ((int id, MemoryDefinition memory) in memories)
             {
-                SpvInstruction pointerType = context.TypePointer(storage, context.GetType(memory.Type, memory.ArrayLength));
-                SpvInstruction variable = context.Variable(pointerType, storage);
+                // oot2-native: a task's payload lives in its own storage class
+                StorageClass memoryStorage = memory.TaskPayload ? StorageClass.TaskPayloadWorkgroupEXT : storage;
+                SpvInstruction pointerType = context.TypePointer(memoryStorage, context.GetType(memory.Type, memory.ArrayLength));
+                SpvInstruction variable = context.Variable(pointerType, memoryStorage);
 
                 context.AddGlobalVariable(variable);
 
@@ -128,7 +136,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
                 if (decoratedTypes.Add(structType))
                 {
-                    context.Decorate(structType, isBuffer ? Decoration.BufferBlock : Decoration.Block);
+                    context.Decorate(structType, isBuffer ? context.StorageBufferBlock : Decoration.Block);
 
                     for (int fieldIndex = 0; fieldIndex < structFieldOffsets.Length; fieldIndex++)
                     {
@@ -136,8 +144,9 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     }
                 }
 
-                SpvInstruction pointerType = context.TypePointer(StorageClass.Uniform, structType);
-                SpvInstruction variable = context.Variable(pointerType, StorageClass.Uniform);
+                StorageClass bufferClass = isBuffer ? context.StorageBufferClass : StorageClass.Uniform;
+                SpvInstruction pointerType = context.TypePointer(bufferClass, structType);
+                SpvInstruction variable = context.Variable(pointerType, bufferClass);
 
                 context.Name(variable, buffer.Name);
                 context.Decorate(variable, Decoration.DescriptorSet, (LiteralInteger)setIndex);

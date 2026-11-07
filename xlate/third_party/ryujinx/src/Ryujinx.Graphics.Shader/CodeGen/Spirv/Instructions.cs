@@ -219,7 +219,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     }
 
                     pointer = context.AccessChain(
-                        context.TypePointer(StorageClass.Uniform, context.TypeFP32()),
+                        context.TypePointer(context.StorageBufferClass, context.TypeFP32()),
                         GetFloatStorageView(context, binding.Value),
                         context.Constant(context.TypeS32(), field.Value),
                         context.Get(AggregateType.S32, operation.GetSource(2)));
@@ -250,10 +250,10 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             SpvInstruction block = context.TypeStruct(true, array);
 
             context.Decorate(array, Decoration.ArrayStride, (SpvLiteralInteger)4);
-            context.Decorate(block, Decoration.BufferBlock);
+            context.Decorate(block, context.StorageBufferBlock);
             context.MemberDecorate(block, 0, Decoration.Offset, (SpvLiteralInteger)0);
 
-            view = context.Variable(context.TypePointer(StorageClass.Uniform, block), StorageClass.Uniform);
+            view = context.Variable(context.TypePointer(context.StorageBufferClass, block), context.StorageBufferClass);
 
             context.Name(view, buffer.Name + "_f32");
             context.Decorate(view, Decoration.DescriptorSet, (SpvLiteralInteger)(context.TargetApi == TargetApi.Vulkan ? buffer.Set : 0));
@@ -1209,7 +1209,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             context.MayHaveReturned = true;
 
-            if (operation.SourcesCount != 0)
+            if (context.IsMainFunction && context.Definitions.MeshStage != null)
+            {
+                // oot2-native: the one return of a task or mesh program is its epilogue (MeshEmission)
+                MeshEmission.Epilogue(context);
+            }
+            else if (operation.SourcesCount != 0)
             {
                 context.ReturnValue(context.Get(context.CurrentFunction.ReturnType, operation.GetSource(0)));
             }
@@ -1985,7 +1990,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                         : context.Properties.StorageBuffers[bindingIndex.Value];
                     StructureField field = buffer.Type.Fields[fieldIndex.Value];
 
-                    storageClass = StorageClass.Uniform;
+                    storageClass = storageKind == StorageKind.StorageBuffer ? context.StorageBufferClass : StorageClass.Uniform;
                     varType = field.Type & AggregateType.ElementTypeMask;
                     baseObj = storageKind == StorageKind.ConstantBuffer
                         ? context.ConstantBuffers[bindingIndex.Value]
@@ -2007,7 +2012,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     }
                     else
                     {
-                        storageClass = StorageClass.Workgroup;
+                        // oot2-native: a task's payload is in its own storage class
+                        storageClass = context.Properties.SharedMemories[bindingId.Value].TaskPayload ? StorageClass.TaskPayloadWorkgroupEXT : StorageClass.Workgroup;
                         varType = context.Properties.SharedMemories[bindingId.Value].Type & AggregateType.ElementTypeMask;
                         baseObj = context.SharedMemories[bindingId.Value];
                     }

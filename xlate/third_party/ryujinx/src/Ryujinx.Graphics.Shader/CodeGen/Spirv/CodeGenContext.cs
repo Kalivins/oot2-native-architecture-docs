@@ -101,7 +101,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             StructuredProgramInfo info,
             CodeGenParameters parameters,
             GeneratorPool<Instruction> instPool,
-            GeneratorPool<LiteralInteger> integerPool) : base(SpirvVersionPacked, instPool, integerPool)
+            GeneratorPool<LiteralInteger> integerPool) : base(parameters.Definitions.MeshStage != null ? MeshEmission.SpirvVersion : SpirvVersionPacked, instPool, integerPool)
         {
             WasNonUniformAccessDeclared = false;
 
@@ -162,6 +162,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
         public Instruction[] GetMainInterface()
         {
+            if (Definitions.MeshStage != null)
+            {
+                // oot2-native: from SPIR-V 1.4 the entry point lists every global variable it uses (buffers, push constants, textures, workgroup memories), not only inputs and outputs
+                return [.. GlobalVariables];
+            }
+
             List<Instruction> mainInterface = [];
 
             mainInterface.AddRange(Inputs.Values);

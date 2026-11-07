@@ -185,7 +185,8 @@ internal sealed class Accessor : IGpuAccessor
 
     public int[] QueryAmpereComputeC0Layout() => _job.Nvn2Cs;
 
-    public int[] QueryAmpereStageMemory() => _job.StageMemory;
+    // A task or mesh job, as the stage the translator emits (Job.BuildMeshStage); the job's stage_memory offsets are no longer read
+    public MeshStageInfo QueryAmpereMeshStage() => _job.MeshStage;
 
     // ---- bindings ----
 

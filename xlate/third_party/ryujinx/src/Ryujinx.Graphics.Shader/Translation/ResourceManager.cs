@@ -127,6 +127,31 @@ namespace Ryujinx.Graphics.Shader.Translation
             }
         }
 
+        // oot2-native: the stage memory of a task or mesh program (Lichii's model, see CodeGen/Spirv/MeshEmission.cs), as shared memories of their own: the payload
+        // (a task's output region, a mesh stage with a task reads it as its input; declared in TaskPayloadWorkgroupEXT), a mesh stage's attribute lines, its map (one
+        // word per map byte) and its primitive count (a one-word array, so that it is addressed like the others). -1 where a program does not have one.
+        public int MeshPayloadId { get; private set; } = -1;
+        public int MeshAttributesId { get; private set; } = -1;
+        public int MeshMapId { get; private set; } = -1;
+        public int MeshCountId { get; private set; } = -1;
+
+        public void SetMeshMemories(MeshStageInfo mesh)
+        {
+            const AggregateType Words = AggregateType.Array | AggregateType.U32;
+
+            if (mesh.ReadsPayload)
+            {
+                MeshPayloadId = Properties.AddSharedMemory(new MemoryDefinition("isbe_payload", Words, mesh.PayloadWords, taskPayload: true));
+            }
+
+            if (mesh.Kind == MeshStageKind.Mesh)
+            {
+                MeshAttributesId = Properties.AddSharedMemory(new MemoryDefinition("isbe_attributes", Words, mesh.AttributeWords));
+                MeshMapId = Properties.AddSharedMemory(new MemoryDefinition("isbe_map", Words, mesh.MapWords));
+                MeshCountId = Properties.AddSharedMemory(new MemoryDefinition("isbe_primitive_count", Words, 1));
+            }
+        }
+
         // nxnative: the scratch of Ampere HMMA (InstEmitAmpereTensor.AHmma, helper dmsh_hmma16816_f16): a shared memory of its own, 256 words for each subgroup of the
         // workgroup, made the first time an HMMA needs it
         public int HmmaScratchMemoryId { get; private set; } = -1;

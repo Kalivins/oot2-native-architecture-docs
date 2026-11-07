@@ -74,6 +74,9 @@ namespace Spv
             Kernel = 6,
             TaskNV = 5267,
             MeshNV = 5268,
+            // oot2-native: SPV_EXT_mesh_shader (numbers from the SPIR-V headers)
+            TaskEXT = 5364,
+            MeshEXT = 5365,
             RayGenerationKHR = 5313,
             RayGenerationNV = RayGenerationKHR,
             IntersectionKHR = 5314,
@@ -199,6 +202,8 @@ namespace Spv
             ShaderRecordBufferNV = ShaderRecordBufferKHR,
             PhysicalStorageBuffer = 5349,
             PhysicalStorageBufferEXT = PhysicalStorageBuffer,
+            // oot2-native: SPV_EXT_mesh_shader
+            TaskPayloadWorkgroupEXT = 5402,
             CodeSectionINTEL = 5605,
         }
 
@@ -585,6 +590,8 @@ namespace Spv
             LayerPerViewNV = 5279,
             MeshViewCountNV = 5280,
             MeshViewIndicesNV = 5281,
+            // oot2-native: SPV_EXT_mesh_shader
+            PrimitiveTriangleIndicesEXT = 5296,
             BaryCoordNV = 5286,
             BaryCoordNoPerspNV = 5287,
             FragSizeEXT = 5292,
@@ -923,6 +930,8 @@ namespace Spv
             FragmentFullyCoveredEXT = 5265,
             MeshShadingNV = 5266,
             ImageFootprintNV = 5282,
+            // oot2-native: SPV_EXT_mesh_shader
+            MeshShadingEXT = 5283,
             FragmentBarycentricNV = 5284,
             ComputeDerivativeGroupQuadsNV = 5288,
             FragmentDensityEXT = 5291,
@@ -1430,6 +1439,9 @@ namespace Spv
             OpFragmentFetchAMD = 5012,
             OpReadClockKHR = 5056,
             OpImageSampleFootprintNV = 5283,
+            // oot2-native: SPV_EXT_mesh_shader
+            OpEmitMeshTasksEXT = 5294,
+            OpSetMeshOutputsEXT = 5295,
             OpGroupNonUniformPartitionNV = 5296,
             OpWritePackedPrimitiveIndices4x8NV = 5299,
             OpReportIntersectionKHR = 5334,

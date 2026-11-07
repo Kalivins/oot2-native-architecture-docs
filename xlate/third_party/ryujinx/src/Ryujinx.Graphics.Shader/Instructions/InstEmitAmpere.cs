@@ -499,7 +499,12 @@ namespace Ryujinx.Graphics.Shader.Instructions
                 context.BranchIfFalse(lblSkip, APred(context, op, 87, 90));
             }
 
-            if (context.PrepareForReturn())
+            if (context.TranslatorContext.Definitions.MeshStage != null)
+            {
+                // oot2-native: a task or mesh program's exits all go to its one return, where the epilogue is
+                context.Branch(context.MeshExitLabel);
+            }
+            else if (context.PrepareForReturn())
             {
                 context.Return();
             }

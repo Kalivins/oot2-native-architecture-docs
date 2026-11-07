@@ -127,22 +127,11 @@ namespace Ryujinx.Graphics.Shader.Instructions
         {
             AmpereOp x = new(context.CurrOp);
 
-            int[] stage = context.TranslatorContext.GpuAccessor.QueryAmpereStageMemory();
+            MeshStageInfo mesh = context.TranslatorContext.GpuAccessor.QueryAmpereMeshStage();
 
-            if (stage != null)
+            if (mesh != null)
             {
-                // A task or mesh shader's stage input (QueryAmpereStageMemory). Mode 0x78: its workgroup's number; 0x38: a word of the payload its task wrote, [Ra + offset];
-                // oot2-native: from nxnative pull request 1300 (commit 06f47f57, MIT): 0xb8 (the payload store's mode, 0x927) is a word of the payload this task writes,
-                // read back from the outputs (stage[2]), where AStageOut stores it. Ocarina of Time's agl task shader stores a word of its payload and reads it back
-                int mode = x.Bits(72, 80);
-
-                if (mode != 0x78 && mode != 0x38 && mode != 0xb8)
-                {
-                    throw AFail(context, $"ISBERD mode {mode:x2} in a task or mesh shader");
-                }
-
-                Operand addr = mode == 0x78 ? Const(stage[0]) : context.IAdd(AGpr(x.Ra), Const((mode == 0xb8 ? stage[2] : stage[1]) + (int)x.SignedField(40, 64)));
-                EmitLoad(context, StorageKind.SharedMemory, LsSize2.B32, addr, x.Rd, 0);
+                EmitMeshStageRead(context, x, mesh);
                 return;
             }
 
@@ -152,30 +141,93 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
         }
 
-        // Task and mesh shaders' stage output (0x927), [Ra + offset], Rb, mode 72..79: 0xb8 a word of the task's payload; 0xf8 a word of a mesh shader's attributes (each component
-        // 0x80 bytes for 32 vertices or primitives); 0x88 the primitive count byte, 0x80 a primitive index byte. Bytes go through the shared memory's byte store, a compare-and-swap
-        // on the word (SharedStoreSmallIntCas), since neighbouring threads write neighbouring bytes. A mesh workgroup of 32 threads is one warp on the console, all at the same
-        // instruction, so the zero count each thread writes first (Mario Kart World: at its start) cannot pass the count one thread writes later; Metal's threads run in no such step,
-        // and the stage memory starts at zero (dmsh_meshstage.py), so that store is left out
+        // oot2-native, Lichii's model (CodeGen/Spirv/MeshEmission.cs): ISBERD in a task or mesh program, [Ra + offset] a byte address in the region. Mode 0x78: the workgroup's
+        // number; 0x38: a word of the payload the task wrote, whose word 0 is the workgroup's number; 0xb8: a word of the payload this task writes, read back (from nxnative pull
+        // request 1300, commit 06f47f57, MIT: Ocarina of Time's agl task shader stores a word of its payload and reads it back). The draw's first task is not added to the workgroup's
+        // number: it is the mesh bindings ticket's, and this is the one place it goes
+        private static void EmitMeshStageRead(EmitterContext context, AmpereOp x, MeshStageInfo mesh)
+        {
+            int mode = x.Bits(72, 80);
+            bool task = mesh.Kind == MeshStageKind.Task;
+
+            if (mode != 0x78 && mode != 0x38 && !(mode == 0xb8 && task))
+            {
+                throw AFail(context, $"ISBERD mode {mode:x2} in a {(task ? "task" : "mesh")} shader");
+            }
+
+            Operand workgroup = context.Load(StorageKind.Input, IoVariable.CtaId, null, Const(0));
+            Operand value = workgroup;
+
+            if (mode == 0xb8 || (mode == 0x38 && !task))
+            {
+                int payload = context.ResourceManager.MeshPayloadId;
+                Operand address = context.IAdd(AGpr(x.Ra), Const((int)x.SignedField(40, 64)));
+
+                // A mesh stage without a task has no payload: its words read as zero, as nxnative's stage memory does
+                Operand word = payload >= 0 ? context.Load(StorageKind.SharedMemory, payload, MeshWord(context, address, mesh.PayloadWords)) : Const(0);
+
+                value = mode == 0xb8 ? word : context.ConditionalSelect(context.ICompareEqual(address, Const(0)), workgroup, word);
+            }
+
+            if (x.Rd < RegisterConsts.RegisterZeroIndex)
+            {
+                context.Copy(Register(x.Rd, RegisterType.Gpr), value);
+            }
+        }
+
+        // The word of a stage memory region that a byte address names, held inside the region (Lichii clamps every index)
+        private static Operand MeshWord(EmitterContext context, Operand byteAddress, int words)
+        {
+            return context.IMinimumU32(context.ShiftRightU32(byteAddress, Const(2)), Const(words - 1));
+        }
+
+        // oot2-native, Lichii's model (CodeGen/Spirv/MeshEmission.cs): task and mesh shaders' stage output (0x927), [Ra + offset] a byte address in the region, Rb, mode 72..79: 0xb8 a word
+        // of a task's payload; 0xf8 a word of a mesh shader's attribute lines (each component 0x80 bytes for 32 vertices or primitives); 0x80 a map byte, kept whole in a word of its own
+        // (so that neighbouring lanes need no compare-and-swap); 0x88 the primitive count, a 32-bit store at map byte 3. A mesh workgroup of 32 invocations is one warp on the console,
+        // all at the same instruction, so the zero count each writes first (Mario Kart World: at its start) cannot pass the count one writes later; here they are not in step, so a
+        // store from the zero register is left out and the prologue zeroes the count before a barrier
         public static void AStageOut(EmitterContext context)
         {
             AmpereOp x = new(context.CurrOp);
-            int[] stage = context.TranslatorContext.GpuAccessor.QueryAmpereStageMemory();
+            MeshStageInfo mesh = context.TranslatorContext.GpuAccessor.QueryAmpereMeshStage();
             int mode = x.Bits(72, 80);
+            bool task = mesh?.Kind == MeshStageKind.Task;
 
-            if (stage == null || (mode != 0xb8 && mode != 0xf8 && mode != 0x88 && mode != 0x80))
+            if (mesh == null || !(task ? mode == 0xb8 : mode is 0xf8 or 0x88 or 0x80))
             {
-                throw AFail(context, $"stage output store mode {mode:x2} outside a task or mesh shader");
+                throw AFail(context, $"stage output store mode {mode:x2} outside a {(mesh == null ? "task or mesh" : task ? "task" : "mesh")} shader");
             }
 
-            if (mode == 0x88 && x.Rb == RegisterConsts.RegisterZeroIndex)
-            {
-                return;
-            }
+            ResourceManager resources = context.ResourceManager;
+            int offset = (int)x.SignedField(40, 64);
+            Operand address = context.IAdd(AGpr(x.Ra), Const(offset));
+            Operand value = AGpr(x.Rb);
 
-            bool word = mode == 0xb8 || mode == 0xf8;
-            Operand addr = context.IAdd(AGpr(x.Ra), Const((word ? stage[2] : stage[3]) + (int)x.SignedField(40, 64)));
-            EmitStore(context, StorageKind.SharedMemory, word ? LsSize2.B32 : LsSize2.U8, addr, x.Rb, 0);
+            switch (mode)
+            {
+                case 0xb8:
+                    context.Store(StorageKind.SharedMemory, resources.MeshPayloadId, MeshWord(context, address, mesh.PayloadWords), value);
+                    break;
+                case 0xf8:
+                    context.Store(StorageKind.SharedMemory, resources.MeshAttributesId, MeshWord(context, address, mesh.AttributeWords), value);
+                    break;
+                case 0x80:
+                    context.Store(StorageKind.SharedMemory, resources.MeshMapId, context.IMinimumU32(address, Const(mesh.MapWords - 1)), context.BitwiseAnd(value, Const(0xff)));
+                    break;
+                default:
+                    if (x.Rb == RegisterConsts.RegisterZeroIndex)
+                    {
+                        return;
+                    }
+
+                    if (x.Ra != RegisterConsts.RegisterZeroIndex || offset != 3)
+                    {
+                        throw AFail(context, "32-bit stage buffer map store at an address other than byte 3");
+                    }
+
+                    context.Store(StorageKind.SharedMemory, resources.MeshCountId, Const(0), value);
+                    break;
+            }
         }
 
         public static void ALepc(EmitterContext context)

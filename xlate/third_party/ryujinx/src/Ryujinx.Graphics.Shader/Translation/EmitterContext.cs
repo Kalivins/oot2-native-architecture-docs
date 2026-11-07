@@ -19,6 +19,11 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public bool IsNonMain { get; }
 
+        // oot2-native: where every EXIT of a task or mesh program branches, so that all invocations reach one epilogue (Translator.EmitShader marks it after the last block)
+        private Operand _meshExitLabel;
+
+        public Operand MeshExitLabel => _meshExitLabel ??= Label();
+
         public Block CurrBlock { get; set; }
         public InstOp CurrOp { get; set; }
 

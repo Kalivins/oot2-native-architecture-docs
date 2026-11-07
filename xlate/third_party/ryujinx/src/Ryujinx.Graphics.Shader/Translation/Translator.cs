@@ -79,7 +79,10 @@ namespace Ryujinx.Graphics.Shader.Translation
                 ShaderStage.Compute,
                 gpuAccessor.QueryComputeLocalSizeX(),
                 gpuAccessor.QueryComputeLocalSizeY(),
-                gpuAccessor.QueryComputeLocalSizeZ());
+                gpuAccessor.QueryComputeLocalSizeZ())
+            {
+                MeshStage = gpuAccessor.QueryAmpereMeshStage(),
+            };
         }
 
         private static ShaderDefinitions CreateGraphicsDefinitions(IGpuAccessor gpuAccessor, ShaderHeader header)
@@ -189,6 +192,13 @@ namespace Ryujinx.Graphics.Shader.Translation
                     {
                         EmitOps(context, block);
                     }
+                }
+
+                if (index == 0 && translatorContext.Definitions.MeshStage != null)
+                {
+                    // oot2-native: every EXIT of a task or mesh program branched here, to its one return (the epilogue is the generator's)
+                    context.MarkLabel(context.MeshExitLabel);
+                    context.Return();
                 }
 
                 functions[index] = new(context.GetOperations());

@@ -200,7 +200,12 @@ namespace Ryujinx.Graphics.Shader.Translation
 
             resourceManager.SetCurrentLocalMemory(_localMemorySize, usesLocalMemory);
 
-            if (Stage == ShaderStage.Compute)
+            if (Stage == ShaderStage.Compute && Definitions.MeshStage != null)
+            {
+                // oot2-native: a task or mesh program's stage memory is its payload, attribute lines, map and count, not one shared array
+                resourceManager.SetMeshMemories(Definitions.MeshStage);
+            }
+            else if (Stage == ShaderStage.Compute)
             {
                 bool usesSharedMemory = _program.UsedFeatures.HasFlag(FeatureFlags.SharedMemory);
 

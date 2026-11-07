@@ -176,6 +176,19 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 info.IoDefinitions.Add(new IoDefinition(StorageKind.Input, IoVariable.SubgroupLaneId));
             }
 
+            // oot2-native: a task or mesh stage (SPV_EXT_mesh_shader). It stays a Compute stage until here, where it takes its own execution model (MeshEmission)
+            if (context.Definitions.MeshStage != null)
+            {
+                context.AddCapability(Capability.MeshShadingEXT);
+                context.AddExtension("SPV_EXT_mesh_shader");
+
+                if (context.Definitions.MeshStage.Kind == MeshStageKind.Mesh)
+                {
+                    // the epilogue copies the lines out by invocation
+                    info.IoDefinitions.Add(new IoDefinition(StorageKind.Input, IoVariable.ThreadId));
+                }
+            }
+
             Declarations.DeclareAll(context, info);
 
             int[] callSites = CountCallSites(info);
@@ -220,6 +233,12 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                 Generate(context, info, funcIndex);
             }
 
+            if (context.Definitions.MeshStage != null)
+            {
+                // oot2-native: declared when every function exists, so that its interface can list every global variable (SPIR-V 1.4)
+                MeshEmission.AddEntryPoint(context, context.GetFunction(0).Item2);
+            }
+
             byte[] result = context.Generate();
 
             lock (_poolLock)
@@ -245,18 +264,32 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             Declarations.DeclareLocals(context, function);
 
+            bool meshMain = funcIndex == 0 && context.Definitions.MeshStage != null;
+
+            if (meshMain)
+            {
+                MeshEmission.Prologue(context);
+            }
+
             Generate(context, function.MainBlock);
 
             // Functions must always end with a return.
             if (function.MainBlock.Last is not AstOperation operation ||
                 (operation.Inst != Instruction.Return && operation.Inst != Instruction.Discard))
             {
-                context.Return();
+                if (meshMain)
+                {
+                    MeshEmission.Epilogue(context);
+                }
+                else
+                {
+                    context.Return();
+                }
             }
 
             context.FunctionEnd();
 
-            if (funcIndex == 0)
+            if (funcIndex == 0 && context.Definitions.MeshStage == null)
             {
                 context.AddEntryPoint(context.Definitions.Stage.Convert(), spvFunc, "main", context.GetMainInterface());
 
