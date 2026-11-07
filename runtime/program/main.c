@@ -263,6 +263,7 @@ int main(int argc, char **argv) {
     char gfx[RT_SETTING_TEXT];
     rt_setting_source(RT_SET_gfx, &gfx_from);
     gfx_select(rt_setting_format(RT_SET_gfx, rt_setting(RT_SET_gfx), gfx), gfx_from);
+    gfx_open_game(g_game);
 
     rt_log("oot2: main() is at %p (a host pc in a log line is read against this and the program's symbols)", (void *)&main);
     log_settings();

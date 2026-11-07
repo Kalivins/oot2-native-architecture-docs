@@ -21,10 +21,13 @@ static const struct {
     const char *name;
     const GfxBackend *table;
     void (*open)(void);
+    void (*game)(const char *folder);   // gfx_open_game
 } g_backends[] = {
-    {"null", &gfx_null_backend, NULL},
-    {"vulkan", &gfx_vulkan_backend, gpu_vk_open},   // architecture section 6
+    {"null", &gfx_null_backend, NULL, NULL},
+    {"vulkan", &gfx_vulkan_backend, gpu_vk_open, gpu_vk_open_game},   // architecture section 6
 };
+
+static int g_selected = -1;
 
 #define BACKEND_COUNT ((int)(sizeof g_backends / sizeof g_backends[0]))
 
@@ -40,9 +43,15 @@ void gfx_select(const char *name, const char *source) {
         rt_log("gfx: the %s back end (%s)", name, source);
         if (g_backends[i].open) g_backends[i].open();
         gfx_set_backend(g_backends[i].table);
+        g_selected = i;
         return;
     }
     rt_fatal("gfx: no back end is named \"%s\" (asked for by %s); the names are null and vulkan", name, source);
+}
+
+void gfx_open_game(const char *folder) {
+    if (g_selected < 0) rt_fatal("gfx: gfx_open_game before gfx_select");
+    if (g_backends[g_selected].game) g_backends[g_selected].game(folder);
 }
 
 const GpuShader *gpu_shader(const char *name) {

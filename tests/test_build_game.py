@@ -703,22 +703,34 @@ class ProgramTest(unittest.TestCase):
 
     def test_the_vulkan_back_end_opens_its_device_or_stops_the_start_by_name(self) -> None:
         # Without a device that has every item (continuous integration), the start stops by name before anything else;
-        # with one, the device opens and the program boots the SDK as on the null back end.
+        # with one, the device opens, the game folder's shader packs are opened (a folder without them stops by name)
+        # and the program boots the SDK as on the null back end.
+        sys.path.insert(0, str(ROOT / "tools" / "shaders"))
+        import cache_pack
         no_vulkan = ("there is no Vulkan loader", "there is no Vulkan device", "no Vulkan device has every item",
                      "the Vulkan loader is version")
+        packed = self.copy_game("vulkan-packs")
+        (packed / "shaders").mkdir()
+        cache_pack.write_pack(packed / "shaders" / "shader-base.bin", [], translator="0" * 64)
         for args, env, source in ((("--gfx", "vulkan"), None, "--gfx"), ((), {"OOT2_GFX": "vulkan"}, "OOT2_GFX")):
-            with self.subTest(source=source):
-                full = {"VK_LOADER_LAYERS_DISABLE": "~implicit~", **(env or {})}
-                done = run_program(self.exe, *args, env=full)
-                self.assertIn(f"[rt] gfx: the vulkan back end ({source})", done.stderr)
-                fatal = [line for line in done.stderr.splitlines() if line.startswith("FATAL")]
-                if fatal and fatal[0].startswith("FATAL: gfx: vulkan: "):
-                    self.assertEqual(done.returncode, EXIT_FATAL, done.stderr)
-                    self.assertEqual(len(fatal), 1, done.stderr)
-                    self.assertTrue(any(why in fatal[0] for why in no_vulkan), fatal[0])
-                else:
+            for game in (self.game, packed):
+                with self.subTest(source=source, packs=game == packed):
+                    full = {"VK_LOADER_LAYERS_DISABLE": "~implicit~", **(env or {})}
+                    done = run_program(game / self.exe.name, *args, env=full)
+                    self.assertIn(f"[rt] gfx: the vulkan back end ({source})", done.stderr)
+                    fatal = [line for line in done.stderr.splitlines() if line.startswith("FATAL")]
+                    if fatal and any(why in fatal[0] for why in no_vulkan):
+                        self.assertEqual(done.returncode, EXIT_FATAL, done.stderr)
+                        self.assertEqual(len(fatal), 1, done.stderr)
+                        continue
                     self.assertRegex(done.stderr, r"gfx: vulkan: .* device made with the \d+ items' features")
-                    self.assert_boots_the_sdk(done, self.game)
+                    if game == packed:
+                        self.assert_boots_the_sdk(done, packed)
+                    else:
+                        self.assertEqual(done.returncode, EXIT_FATAL, done.stderr)
+                        self.assertEqual(len(fatal), 1, done.stderr)
+                        self.assertTrue(fatal[0].startswith("FATAL: gfx: vulkan: the shader packs of the game folder "
+                                                            "cannot be opened (run oot2 prepare): "), fatal[0])
 
     def test_an_unknown_back_end_is_refused(self) -> None:
         done = run_program(self.exe, "--gfx", "metal")

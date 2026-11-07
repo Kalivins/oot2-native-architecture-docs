@@ -72,6 +72,14 @@ static void case_select_vulkan(void) {
     printf("gfx_select returned for vulkan\n");
 }
 
+// gfx_open_game after gfx_select: null reads nothing; vulkan opens the folder's packs and pipeline cache, or stops by
+// name when the base pack is not there.
+static void case_open_game(const char *backend, const char *folder) {
+    gfx_select(backend, "--gfx");
+    gfx_open_game(folder);
+    printf("gfx_open_game returned for %s\n", backend);
+}
+
 static void case_select_unknown(void) {
     gfx_select("metal", "OOT2_GFX");
     printf("gfx_select returned for metal\n");
@@ -376,6 +384,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "select_null")) case_select_null();
     else if (!strcmp(cs, "select_vulkan")) case_select_vulkan();
     else if (!strcmp(cs, "select_unknown")) case_select_unknown();
+    else if (!strcmp(cs, "open_game") && argc >= 4) case_open_game(argv[2], argv[3]);
     else if (!strcmp(cs, "volk")) case_volk();
     else if (!strcmp(cs, "settings")) case_settings();
     else if (!strcmp(cs, "choose")) case_choose();

@@ -26,6 +26,11 @@ int gfx_backend_known(const char *name);
 // start by name when there is no loader, no device, or no device with every item of oot2/vk_required.h; an unknown
 // name is a named fatal.
 void gfx_select(const char *name, const char *source);
+// After gfx_select, with the game folder: what the installed back end reads from the prepared game. Vulkan opens the
+// shader packs (shaders/shader-base.bin, and shaders/shader-variants.bin when prepare's ledger step wrote it) and the
+// pipeline cache (pipelines/pipeline.cache, seeded when it names this device and driver; an empty cache when prepare
+// skipped its pipeline step), and stops the start by name when the base pack is missing or refused. Null reads nothing.
+void gfx_open_game(const char *folder);
 
 // ---- the runtime's own shaders (runtime/gpu/shaders)
 // GLSL compute shaders, compiled by tools/build_game.py with glslang for Vulkan 1.3 and validated at every build of the

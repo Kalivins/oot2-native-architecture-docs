@@ -80,6 +80,9 @@ typedef struct GpuVk {
 extern GpuVk gpu_vk;            // valid once gpu_vk_open returned
 
 void gpu_vk_open(void);         // once; later calls return at once
+// The prepared game's shader packs and pipeline cache, for the pipeline builder (oot2/vk_pipeline.h): gfx_open_game's
+// Vulkan half, after gpu_vk_open (vk_pipeline.c).
+void gpu_vk_open_game(const char *folder);
 // Finish every submission, stop the completion thread and destroy the device and the instance (tests; a run ends
 // without it). gpu_vk_open may follow.
 void gpu_vk_close(void);

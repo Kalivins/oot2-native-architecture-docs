@@ -278,6 +278,38 @@ class GpuTest(unittest.TestCase):
                 self.assertTrue(any(why in fatal[0] for why in NO_VULKAN), fatal[0])
                 self.assertNotIn("returned", done.stdout)
 
+    def test_the_null_back_end_reads_nothing_from_the_game_folder(self) -> None:
+        done = self.run_case(LEVELS[0], "open_game", "null", str(Path(self.tmp.name) / "no-such-game"))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("gfx_open_game returned for null", done.stdout)
+
+    def test_the_vulkan_back_end_opens_the_game_folders_packs_and_cache_or_stops_by_name(self) -> None:
+        sys.path.insert(0, str(ROOT / "tools" / "shaders"))
+        import cache_pack as cp
+        game = Path(self.tmp.name) / "game-open"
+        (game / "shaders").mkdir(parents=True, exist_ok=True)
+        (game / "pipelines").mkdir(exist_ok=True)
+        done = self.run_case(LEVELS[0], "open_game", "vulkan", str(game))
+        if any(why in done.stderr for why in NO_VULKAN):
+            self.skipTest("no Vulkan device with every item here")
+        self.assertEqual(done.returncode, EXIT_FATAL, done.stdout + done.stderr)
+        fatal = fatal_lines(done.stderr)
+        self.assertEqual(len(fatal), 1, done.stderr)
+        self.assertTrue(fatal[0].startswith("FATAL: gfx: vulkan: the shader packs of the game folder cannot be opened "
+                                            "(run oot2 prepare): "), fatal[0])
+        base = game / "shaders" / "shader-base.bin"
+        cp.write_pack(base, [], translator=hashlib.sha256(b"synthetic translator of the open test").hexdigest())
+        for cache, state in ((None, "empty (no file)"), (b"not a pipeline cache" * 4, "empty (refused)")):
+            with self.subTest(state=state):
+                if cache is not None:
+                    (game / "pipelines" / "pipeline.cache").write_bytes(cache)
+                done = self.run_case(LEVELS[0], "open_game", "vulkan", str(game))
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn("gfx_open_game returned for vulkan", done.stdout)
+                self.assertEqual(fatal_lines(done.stderr), [])
+                self.assertRegex(done.stderr, r"gfx: vulkan: shader packs .*shader-base\.bin \(no variants pack\); "
+                                              r"pipeline cache " + re.escape(state))
+
     def test_a_vulkan_setting_outside_its_values_stops_the_start_by_name(self) -> None:
         for env, line in (({"OOT2_VK_VALIDATION": "loud"},
                            'gfx: vulkan: OOT2_VK_VALIDATION is "loud"; the values are off, on, sync and gpu'),

@@ -825,4 +825,23 @@ void vkp_close(void) {
     P.open = 0;
 }
 
+// The prepared folder's files, under the names tools/prepare writes: the translate step's base pack, the ledger step's
+// variants pack (absent before a first ledger) and the pipelines step's cache (absent when the step was skipped, which
+// leaves every first use a miss, served by oot2/vk_miss.h).
+void gpu_vk_open_game(const char *folder) {
+    char base[600], variants[600], cache[600], why[512];
+    if (snprintf(base, sizeof base, "%s/shaders/shader-base.bin", folder) >= (int)sizeof base ||
+        snprintf(variants, sizeof variants, "%s/shaders/shader-variants.bin", folder) >= (int)sizeof variants ||
+        snprintf(cache, sizeof cache, "%s/pipelines/pipeline.cache", folder) >= (int)sizeof cache)
+        rt_fatal("gfx: vulkan: the game folder's path is too long: %s", folder);
+    FILE *f = fopen(variants, "rb");
+    if (f) fclose(f);
+    if (!vkp_store_open(base, f ? variants : NULL, why, sizeof why))
+        rt_fatal("gfx: vulkan: the shader packs of the game folder cannot be opened (run oot2 prepare): %s", why);
+    vkp_open(cache);
+    rt_log("gfx: vulkan: shader packs %s%s%s; pipeline cache %s", base, f ? " and " : " (no variants pack)",
+           f ? variants : "", P.cache_state == VKP_CACHE_LOADED ? "seeded" :
+           P.cache_state == VKP_CACHE_NONE ? "empty (no file)" : "empty (refused)");
+}
+
 const VkpLayouts *vkp_layouts(void) { return &P.lay; }
