@@ -99,6 +99,7 @@ class Check(Step):
             ctx.reporter.warning(w)
         ctx.reporter.say(f"check: build tools: {build_tools(ctx)}")
         ctx.reporter.say(f"check: menu library: {imgui_note(ctx)}")
+        ctx.reporter.say(f"check: window library: {sdl3_note(ctx)}")
         ctx.reporter.say(f"check: lift tools: {lift_tools()}")
         ctx.reporter.say(f"check: shader tools: {shader_tools(ctx)}")
         lines, warnings = vulkan_report(host.get("vulkan"), host.get("vulkan_items") or [])
@@ -208,7 +209,8 @@ def build_tools(ctx: Context) -> str:
     from build_game import BuildError, find_toolchain, vulkan_header_version
     try:
         tools = find_toolchain(compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None),
-                               dav1d_dir=getattr(ctx.options, "dav1d_dir", None))
+                               dav1d_dir=getattr(ctx.options, "dav1d_dir", None),
+                               sdl3_dir=getattr(ctx.options, "sdl3_dir", None))
     except BuildError as e:
         raise PrepareError(f"{e}.") from None
     return (f"C++ driver {tools.cxx}, Ninja {tools.ninja}, archiver {tools.ar}, Vulkan headers "
@@ -245,6 +247,20 @@ def av1_note(tools) -> str:
     if tools.dav1d:
         return f"AV1 decoder dav1d kit {tools.dav1d}"
     return "no dav1d kit (the movies cannot play: run tools/fetch_dav1d.py and set DAV1D_DIR)"
+
+
+def sdl3_note(ctx: Context) -> str:
+    """The window layer of the game (window, Vulkan surface, input) comes from an SDL3 kit (tools/fetch_sdl3.py). Said
+    here, not refused, when there is none: the game then builds with no window, so a build for other work needs no kit.
+    Stops here when the kit named is not exactly the layout that script lays out."""
+    import build_game
+    try:
+        kit = build_game.find_sdl3(getattr(ctx.options, "sdl3_dir", None))
+    except build_game.BuildError as e:
+        raise PrepareError(f"{e}.") from None
+    if kit:
+        return f"SDL3 kit {kit}"
+    return "no SDL3 kit (the game shows no window: run tools/fetch_sdl3.py and set SDL3_DIR)"
 
 
 def lift_tools() -> str:

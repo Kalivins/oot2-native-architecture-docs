@@ -26,6 +26,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -39,11 +40,14 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests" / "lift"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import build_game  # noqa: E402
 import fetch_imgui  # noqa: E402
+import fetch_sdl3  # noqa: E402
 import layout  # noqa: E402
 import synth  # noqa: E402
+from test_fetch_sdl3 import fake_sdl3_kit  # noqa: E402
 from prepare import program as steps  # noqa: E402
 from prepare import state as statefile  # noqa: E402
 from prepare.runner import Context, Reporter, Step, run_steps  # noqa: E402
@@ -561,6 +565,164 @@ class PiecesTest(unittest.TestCase):
                                                             "tools/fetch_dav1d.py and set DAV1D_DIR)"))
             self.assertEqual(steps.toolchain(argparse.Namespace(options=argparse.Namespace(cc=exe, vulkan_sdk=sdk,
                                                                                         dav1d_dir=kit))).dav1d, kit)
+
+    def make_sdl3_kit(self, name: str = "sdl3 kit") -> Path:
+        """A folder laid out as tools/fetch_sdl3.py lays out a kit and records it (synthetic files: nothing links them)."""
+        return fake_sdl3_kit(self.dir / name)
+
+    def plan_text(self, tool: build_game.Toolchain, with_modules: bool = True) -> tuple[str, Path]:
+        gen = self.dir / "gen"
+        if not gen.exists():
+            fake_gen(gen, {"main": 1})
+        b = build_game.Build(self.dir / "build", tool, gen=gen if with_modules else None, exefs=self.dir, jobs=1)
+        _, lifted = build_game.lifted_modules(gen) if with_modules else (None, [])
+        return build_game.plan(b, lifted).text, b.out
+
+    @staticmethod
+    def flags(text: str, name: str) -> str:
+        return next(line for line in text.splitlines() if line.startswith(f"{name} = "))
+
+    def test_an_sdl3_kit_reaches_the_runtime_flags_the_libraries_and_the_link(self) -> None:
+        tool = fake_tool(self.dir)
+        kit = self.make_sdl3_kit()
+        text, out = self.plan_text(dataclasses.replace(tool, sdl3=kit))
+        include = build_game.cmd_arg(build_game.rel(kit / "include", out))
+        lib = build_game.cmd_arg(build_game.rel(kit / "lib" / "libSDL3.a", out))
+        for name in ("rtflags", "cxxflags"):   # every file of the runtime, C and C++, as the platform layer and the menu need
+            self.assertIn(f" -DOOT2_WITH_SDL3=1 -I {include}", self.flags(text, name))
+        for name in ("genflags", "glueflags", "imguiflags"):   # generated code, the glue and Dear ImGui's core never see it
+            self.assertNotIn("SDL3", self.flags(text, name))
+        libs = shlex.split(self.flags(text, "libs")[len("libs = "):], posix=False)
+        at = libs.index(lib)   # the program links the library, then the system libraries it needs, last of all
+        self.assertEqual(libs[at + 1:], list(fetch_sdl3.LINK_LIBS))
+        self.assertEqual(libs[:at], [*build_game.LINK_LIBS, *([] if WIN else ["-pthread"])])
+        link = next(line for line in text.splitlines() if line.startswith(f"build {build_game.EXE_NAME}: link "))
+        # an implicit input of the link: a new kit relinks the program
+        self.assertTrue(link.endswith(f" | {build_game.LIB_NAME} {build_game.ninja_path(kit / 'lib' / 'libSDL3.a', out)}"), link)
+        # the runtime library comes after the objects and before the libraries, which are where the kit's library goes
+        rule = text[text.index("rule link"):].splitlines()[1]
+        self.assertLess(rule.index("$lib "), rule.index("$libs"))
+
+    def test_without_an_sdl3_kit_nothing_of_it_is_in_the_plan(self) -> None:
+        text, _ = self.plan_text(fake_tool(self.dir))
+        self.assertNotIn("SDL3", text)
+        self.assertNotIn("libSDL", text)
+        lib_only, _ = self.plan_text(fake_tool(self.dir), with_modules=False)   # what --make-runtime-lib plans
+        self.assertNotIn("SDL3", lib_only)
+
+    def test_the_runtime_library_plan_takes_the_same_flags_as_the_program_plan(self) -> None:
+        tool = dataclasses.replace(fake_tool(self.dir), sdl3=self.make_sdl3_kit())
+        text, out = self.plan_text(tool, with_modules=False)   # make_runtime_lib plans with no module
+        include = build_game.cmd_arg(build_game.rel(tool.sdl3 / "include", out))
+        self.assertIn(f" -DOOT2_WITH_SDL3=1 -I {include}", self.flags(text, "rtflags"))
+        self.assertIn(f" -DOOT2_WITH_SDL3=1 -I {include}", self.flags(text, "cxxflags"))
+        self.assertIn("build obj/runtime/gpu_vk_volk.o: cc_rt ", text)
+
+    def test_both_kits_link_dav1d_first_then_sdl3_then_the_system_libraries(self) -> None:
+        tool = dataclasses.replace(fake_tool(self.dir), sdl3=self.make_sdl3_kit(), dav1d=self.make_kit())
+        text, out = self.plan_text(tool)
+        libs = shlex.split(self.flags(text, "libs")[len("libs = "):], posix=False)
+        dav1d = libs.index(build_game.cmd_arg(build_game.rel(tool.dav1d / "lib" / "libdav1d.a", out)))
+        sdl3 = libs.index(build_game.cmd_arg(build_game.rel(tool.sdl3 / "lib" / "libSDL3.a", out)))
+        self.assertLess(dav1d, sdl3)
+        self.assertEqual(libs[sdl3 + 1:], list(fetch_sdl3.LINK_LIBS))
+        self.assertEqual(libs.count("-pthread"), 0 if WIN else 1)
+
+    def test_an_sdl3_kit_is_found_by_option_or_variable_and_refused_by_name_when_it_is_not_the_layout(self) -> None:
+        kit = self.make_sdl3_kit()
+        self.assertEqual(build_game.find_sdl3(kit), kit)
+        with mock.patch.dict(os.environ, {"SDL3_DIR": str(kit)}):
+            self.assertEqual(build_game.find_sdl3(None), kit)   # else the SDL3_DIR variable
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SDL3_DIR", None)
+            self.assertIsNone(build_game.find_sdl3(None))   # a build with no window
+        with self.assertRaisesRegex(build_game.BuildError, r"SDL3 kit .*no kit here.* cannot be used: .* is not a folder"):
+            build_game.find_sdl3(self.dir / "no kit here")
+        (kit / "lib" / "libSDL3.a").write_bytes(b"another library")
+        with self.assertRaisesRegex(build_game.BuildError, r"(?s)cannot be used: lib/libSDL3\.a in .* differs.*tools/fetch_sdl3\.py"):
+            build_game.find_sdl3(kit)   # a library that is not the one laid out is no kit
+        (kit / "lib" / "libSDL3.a").write_bytes(b"!<arch>\n")
+        (kit / "include" / "SDL3" / "SDL_vulkan.h").unlink()
+        with self.assertRaisesRegex(build_game.BuildError, r"SDL_vulkan\.h is missing"):
+            build_game.find_sdl3(kit)
+        bare = self.dir / "bare"
+        (bare / "include" / "SDL3").mkdir(parents=True)   # headers and a library, and no record: not made by the script
+        (bare / "include" / "SDL3" / "SDL.h").write_text("", encoding="utf-8")
+        (bare / "lib").mkdir()
+        (bare / "lib" / "libSDL3.a").write_bytes(b"!<arch>\n")
+        with mock.patch.dict(os.environ, {"SDL3_DIR": str(bare)}):
+            with self.assertRaisesRegex(build_game.BuildError, r"fetch_sdl3\.json is missing or unreadable"):
+                build_game.find_sdl3(None)
+
+    def test_the_sdl3_inputs_of_the_link_key_are_the_library_and_the_two_headers(self) -> None:
+        kit = self.make_sdl3_kit()
+        self.assertEqual(build_game.sdl3_inputs(kit), [kit / "lib" / "libSDL3.a", kit / "include" / "SDL3" / "SDL.h",
+                                                       kit / "include" / "SDL3" / "SDL_vulkan.h"])
+        self.assertEqual(build_game.sdl3_inputs(None), ["no SDL3 kit"])
+
+    def test_the_prepare_link_key_follows_the_kit_and_the_libraries_it_adds(self) -> None:
+        from prepare.runner import PrepareError, fingerprint
+        kit = self.make_sdl3_kit()
+        ctx = argparse.Namespace(options=argparse.Namespace(sdl3_dir=kit))
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SDL3_DIR", None)
+            with_kit = steps.sdl3_key(ctx)
+            self.assertEqual(with_kit[:3], build_game.sdl3_inputs(kit))
+            without = steps.sdl3_key(argparse.Namespace(options=argparse.Namespace(sdl3_dir=None)))
+            self.assertEqual(without, ["no SDL3 kit"])
+            self.assertNotEqual(fingerprint(*with_kit), fingerprint(*without))
+            self.assertEqual(fingerprint(*steps.sdl3_key(ctx)), fingerprint(*with_kit))   # the same kit, the same key
+            with mock.patch.object(fetch_sdl3, "LINK_LIBS", (*fetch_sdl3.LINK_LIBS, "-lextra")),                     mock.patch.object(build_game, "find_sdl3", return_value=kit):   # (a real kit would refuse the new list)
+                self.assertNotEqual(fingerprint(*steps.sdl3_key(ctx)), fingerprint(*with_kit))
+            other = self.make_sdl3_kit("other kit")   # another SDL.h, recorded as laid out: a different kit
+            (other / "include" / "SDL3" / "SDL.h").write_text("// another header\n", encoding="utf-8")
+            record = json.loads((other / fetch_sdl3.RECORD).read_text(encoding="utf-8"))
+            record["files"] = fetch_sdl3.tree_hashes(other)
+            (other / fetch_sdl3.RECORD).write_text(json.dumps(record), encoding="utf-8")
+            other_key = steps.sdl3_key(argparse.Namespace(options=argparse.Namespace(sdl3_dir=other)))
+            self.assertNotEqual(fingerprint(*other_key), fingerprint(*with_kit))
+        bad = argparse.Namespace(options=argparse.Namespace(sdl3_dir=self.dir / "not a kit"))
+        with self.assertRaisesRegex(PrepareError, "cannot be used"):
+            steps.sdl3_key(bad)
+
+    def test_the_prepare_check_says_whether_there_is_an_sdl3_kit_and_refuses_a_wrong_one(self) -> None:
+        from prepare import check
+        from prepare.runner import PrepareError
+        kit = self.make_sdl3_kit()
+        with mock.patch.dict(os.environ):
+            os.environ.pop("SDL3_DIR", None)
+            self.assertEqual(check.sdl3_note(argparse.Namespace(options=argparse.Namespace(sdl3_dir=kit))),
+                             f"SDL3 kit {kit}")
+            none = check.sdl3_note(argparse.Namespace(options=argparse.Namespace()))   # no option at all: no kit
+            self.assertEqual(none, "no SDL3 kit (the game shows no window: run tools/fetch_sdl3.py and set SDL3_DIR)")
+            os.environ["SDL3_DIR"] = str(kit)
+            self.assertEqual(check.sdl3_note(argparse.Namespace(options=argparse.Namespace(sdl3_dir=None))),
+                             f"SDL3 kit {kit}")   # else the variable
+            with self.assertRaisesRegex(PrepareError, r"SDL3 kit .*gone.* cannot be used"):
+                check.sdl3_note(argparse.Namespace(options=argparse.Namespace(sdl3_dir=self.dir / "gone")))
+
+    def test_the_toolchain_carries_the_sdl3_kit_from_the_option_or_the_variable(self) -> None:
+        from prepare.runner import PrepareError
+        exe = sys.executable
+        sdk = self.dir / "SDK"
+        for rel_name in ("Include/vulkan/vulkan_core.h", "Include/Volk/volk.c", "Include/Volk/volk.h"):
+            (sdk / rel_name).parent.mkdir(parents=True, exist_ok=True)
+            (sdk / rel_name).write_text("", encoding="utf-8")
+        kit = self.make_sdl3_kit()
+        with mock.patch.dict(os.environ, {"OOT2_GLSLANG": exe, "OOT2_NINJA": exe}):
+            os.environ.pop("SDL3_DIR", None)
+            self.assertEqual(build_game.find_toolchain(exe, exe, exe, vulkan_sdk=sdk, sdl3_dir=kit).sdl3, kit)
+            self.assertIsNone(build_game.find_toolchain(exe, exe, exe, vulkan_sdk=sdk).sdl3)
+            os.environ["SDL3_DIR"] = str(kit)
+            self.assertEqual(build_game.find_toolchain(exe, exe, exe, vulkan_sdk=sdk).sdl3, kit)
+            os.environ.pop("SDL3_DIR")
+            with self.assertRaisesRegex(build_game.BuildError, "cannot be used"):
+                build_game.find_toolchain(exe, exe, exe, vulkan_sdk=sdk, sdl3_dir=self.dir / "gone")
+            ctx = argparse.Namespace(options=argparse.Namespace(cc=exe, vulkan_sdk=sdk, dav1d_dir=None, sdl3_dir=kit))
+            self.assertEqual(steps.toolchain(ctx).sdl3, kit)
+            ctx.options.sdl3_dir = self.dir / "gone"
+            with self.assertRaisesRegex(PrepareError, "cannot be used"):
+                steps.toolchain(ctx)
 
     def test_check_step_needs_the_vulkan_headers_and_volk(self) -> None:
         from prepare import check

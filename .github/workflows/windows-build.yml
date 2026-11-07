@@ -165,6 +165,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "fetch_dav1d.py failed" }
           "DAV1D_DIR=$kit" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
+      # SDL3, the window layer of the game (window, Vulkan surface, input), built by tools/fetch_sdl3.py from its release
+      # archive (checked against a pinned SHA-256) with llvm-mingw's clang, CMake and Ninja, laid out as a kit that
+      # SDL3_DIR names. The cache key is the script (which holds the pins and a hash of itself) and the compiler's tag; the
+      # script checks a restored folder against the hashes it recorded. This step has not been run on a runner when it was
+      # written: it must not stop the job, so a failure leaves the kit out (SDL3_DIR is written only after the script
+      # succeeded) and the tests that need it skip with their stated reason (no kit).
+      - name: Cache the SDL3 kit
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\sdl3-kit
+          key: sdl3-kit-${{ runner.os }}-${{ env.LLVM_MINGW }}-${{ hashFiles('tools/fetch_sdl3.py') }}
+
+      - name: Build SDL3
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP 'sdl3-kit'
+          python tools/fetch_sdl3.py --dest $kit
+          if ($LASTEXITCODE -ne 0) { throw "fetch_sdl3.py failed" }
+          "SDL3_DIR=$kit" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
       # Here a missing clang, Ninja, translator, capstone, Vulkan SDK, Dear ImGui or dav1d fails the tests instead of skipping them.
       - name: Run the unit tests
         env:

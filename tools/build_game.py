@@ -12,10 +12,10 @@
 """Compile the lifted C and link it with the runtime library into oot2.exe (architecture D4 and section 13).
 
     py -3 tools/build_game.py --gen DIR --exefs DIR --out DIR [--exe FILE] [--jobs N] [--cc CC] [--cxx CXX]
-                              [--ninja FILE] [--vulkan-sdk DIR] [--dav1d-dir DIR] [--runtime-lib FILE]
-                              [--compile-only] [--file WHAT=PATH] [--file-size WHAT=PATH]
+                              [--ninja FILE] [--vulkan-sdk DIR] [--dav1d-dir DIR] [--sdl3-dir DIR]
+                              [--runtime-lib FILE] [--compile-only] [--file WHAT=PATH] [--file-size WHAT=PATH]
     py -3 tools/build_game.py --make-runtime-lib --out DIR [--cc CC] [--cxx CXX] [--ninja FILE] [--vulkan-sdk DIR]
-                              [--dav1d-dir DIR]
+                              [--dav1d-dir DIR] [--sdl3-dir DIR]
 
 --gen is the lifter's output (tools/lift/gen.py: layout.json, layout.h, <mod>/manifest.json and the chunks it lists).
 --exefs holds the player's plain modules and main.npdm, which oot2.exe loads at each start. --out is the build folder
@@ -63,6 +63,14 @@ libdav1d.a, licence texts); --dav1d-dir, else the DAV1D_DIR variable, names it. 
 OOT2_DAV1D=1 against its headers and the program links its library; without one the runtime builds and its decoder refuses
 to open (the game then stops by name at its first movie, and the prepare check says there is no kit).
 
+The window. The runtime opens its window, its Vulkan surface and its input devices with SDL3 (runtime/platform,
+runtime/gpu). tools/fetch_sdl3.py builds SDL from its pinned release into a kit (include/SDL3, lib/libSDL3.a, licence
+texts); --sdl3-dir, else the SDL3_DIR variable, names it. A folder that is not exactly what that script lays out is refused
+by name (fetch_sdl3.problems), since a wrong build linked silently would put unchecked code in the program. With a kit every
+C and C++ file of the runtime is compiled with OOT2_WITH_SDL3=1 and the kit's include folder, and the program links
+libSDL3.a followed by the system libraries it needs (fetch_sdl3.LINK_LIBS), after the runtime library. Without a kit
+nothing else changes: the runtime builds and the game shows no window (the prepare check says there is no kit).
+
 program_glue.c, written into --out, carries what the build knows of the player's dump: the layout (checked against
 layout.h at compile time), the lifted modules' function tables, each module file to load with its whole-file SHA-256,
 the other files oot2.exe checks at each start (main.npdm and --file by SHA-256, --file-size by size only, and the
@@ -104,6 +112,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import fetch_imgui  # noqa: E402
+import fetch_sdl3  # noqa: E402
 import layout  # noqa: E402
 from check_content import GENERATED_MARKER  # noqa: E402
 
@@ -163,6 +172,7 @@ class Toolchain:
     cxx: str | None = None        # the C++ driver: compiles the runtime's .cpp files and links the program (find_cxx)
     imgui: Path | None = None     # a fetched Dear ImGui folder (find_imgui), compiled into the runtime library
     dav1d: Path | None = None     # a dav1d kit (tools/fetch_dav1d.py): include/dav1d, lib/libdav1d.a (find_dav1d)
+    sdl3: Path | None = None      # an SDL3 kit (tools/fetch_sdl3.py): include/SDL3, lib/libSDL3.a (find_sdl3)
 
 
 VOLK_FILES = ("volk.c", "volk.h")
@@ -220,6 +230,29 @@ def dav1d_inputs(kit: Path | None) -> list:
     return [kit / "lib" / "libdav1d.a", kit / "include" / "dav1d" / "dav1d.h"]
 
 
+def find_sdl3(kit: str | os.PathLike | None = None) -> Path | None:
+    """The SDL3 kit: kit, else the SDL3_DIR variable; None when neither is set, which is a build without a window. A kit
+    that was named must be exactly what tools/fetch_sdl3.py lays out (fetch_sdl3.problems); BuildError says how it is
+    not, since a wrong SDL linked silently would put unchecked code in the program."""
+    named = kit or os.environ.get(fetch_sdl3.DEFAULT_ENV)
+    if not named:
+        return None
+    root = Path(named).resolve()
+    bad = fetch_sdl3.problems(root)
+    if bad:
+        raise BuildError(f"the SDL3 kit {root} cannot be used: {bad[0]}\n"
+                         "(run tools/fetch_sdl3.py to lay it out again)")
+    return root
+
+
+def sdl3_inputs(kit: Path | None) -> list:
+    """What the runtime library and the program take from the SDL3 kit, for the link step's key: the library and the two
+    headers the runtime includes (a kit's own record is not part of the key); a placeholder text when there is no kit."""
+    if kit is None:
+        return ["no SDL3 kit"]
+    return [kit / "lib" / "libSDL3.a", kit / "include" / "SDL3" / "SDL.h", kit / "include" / "SDL3" / "SDL_vulkan.h"]
+
+
 def vulkan_header_version(include: Path) -> str:
     """The version of the Vulkan headers in include, as 1.4.357, or "unknown"."""
     try:
@@ -266,12 +299,14 @@ def find_cxx(cc_path: str, cxx: str | None = None) -> str | None:
 
 def find_toolchain(cc: str | None = None, ninja: str | None = None, ar: str | None = None,
                    vulkan_sdk: str | os.PathLike | None = None, cxx: str | None = None,
-                   imgui: Path | None = None, dav1d_dir: str | os.PathLike | None = None) -> Toolchain:
+                   imgui: Path | None = None, dav1d_dir: str | os.PathLike | None = None,
+                   sdl3_dir: str | os.PathLike | None = None) -> Toolchain:
     """The C compiler (cc, else OOT2_CC, else clang), its C++ driver (find_cxx), Ninja (ninja, else OOT2_NINJA, else
     ninja on PATH), the archiver (ar, else llvm-ar beside the compiler, else llvm-ar or ar on PATH), the Vulkan headers
     and Volk (the Vulkan SDK vulkan_sdk, else VULKAN_SDK) and glslang (find_glslang). imgui is a folder find_imgui
     returned, or None for a build without Dear ImGui. The dav1d kit (dav1d_dir, else DAV1D_DIR) is optional
-    (find_dav1d). BuildError names what is missing."""
+    (find_dav1d), and so is the SDL3 kit (sdl3_dir, else SDL3_DIR: find_sdl3, which refuses a folder that is not the
+    layout). BuildError names what is missing."""
     name = cc or os.environ.get("OOT2_CC") or "clang"
     cc_path = shutil.which(name)
     if not cc_path:
@@ -308,7 +343,8 @@ def find_toolchain(cc: str | None = None, ninja: str | None = None, ar: str | No
     if not glslang:
         raise BuildError("glslang was not found (OOT2_GLSLANG, the Vulkan SDK's Bin folder or PATH): it compiles the "
                          "runtime's own shaders (runtime/gpu/shaders)")
-    return Toolchain(cc_path, ar_path, ninja_path, include, glslang, cxx_path, imgui, find_dav1d(dav1d_dir))
+    return Toolchain(cc_path, ar_path, ninja_path, include, glslang, cxx_path, imgui, find_dav1d(dav1d_dir),
+                     find_sdl3(sdl3_dir))
 
 
 def vulkan_inputs(include: Path | None, glslang: str | None) -> list:
@@ -662,8 +698,14 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
     dav1d_lib = b.tool.dav1d / "lib" / "libdav1d.a" if b.tool.dav1d else None
     if b.tool.dav1d:
         vk += f" -DOOT2_DAV1D=1 -I {cmd_arg(rel(b.tool.dav1d / 'include', o))}"
-    libs = [*LINK_LIBS, *(["-pthread"] if dav1d_lib and not WIN else []),
-            *([cmd_arg(rel(dav1d_lib, o))] if dav1d_lib else [])]
+    # SDL3, for the runtime's window layer (runtime/platform, runtime/gpu) and the menu's backend, in C and C++ alike:
+    # OOT2_WITH_SDL3 tells them the headers are there. Its library goes after dav1d's and before the system libraries it
+    # needs, which come last.
+    sdl3_lib = b.tool.sdl3 / "lib" / "libSDL3.a" if b.tool.sdl3 else None
+    sdl = f" -DOOT2_WITH_SDL3=1 -I {cmd_arg(rel(b.tool.sdl3 / 'include', o))}" if b.tool.sdl3 else ""
+    libs = [*LINK_LIBS, *(["-pthread"] if (dav1d_lib or sdl3_lib) and not WIN else []),
+            *([cmd_arg(rel(dav1d_lib, o))] if dav1d_lib else []),
+            *([cmd_arg(rel(sdl3_lib, o)), *fetch_sdl3.LINK_LIBS] if sdl3_lib else [])]
     glue, glue_object = o / GLUE_NAME, o / "obj" / "program_glue.o"
     lines = [
         "# Written by tools/build_game.py; do not edit.",
@@ -672,8 +714,8 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
         f"cxx = {cmd_arg(b.tool.cxx)}",
         f"ar = {cmd_arg(b.tool.ar)}",
         f"genflags = {' '.join(GEN_FLAGS)} {inc}",
-        f"rtflags = {' '.join(RT_FLAGS)} {inc} -I {cmd_arg(rel(b.runtime / 'core', o))}{vk}",
-        f"cxxflags = {' '.join(CXX_FLAGS)} {inc} -I {cmd_arg(rel(b.runtime / 'core', o))}{vk}{ig}",
+        f"rtflags = {' '.join(RT_FLAGS)} {inc} -I {cmd_arg(rel(b.runtime / 'core', o))}{vk}{sdl}",
+        f"cxxflags = {' '.join(CXX_FLAGS)} {inc} -I {cmd_arg(rel(b.runtime / 'core', o))}{vk}{sdl}{ig}",
         f"imguiflags = {' '.join(THIRD_PARTY_CXX_FLAGS)}{ig}",
         f"glueflags = {' '.join(RT_FLAGS)} {inc}" + (f" -I {cmd_arg(rel(b.gen, o))}" if b.gen else ""),
         f"ldflags = {' '.join(LINK_FLAGS)}",
@@ -738,7 +780,8 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
         lines.append("build gen_objects: phony " + " ".join(ninja_path(x, o) for x in gen_list))
         lines.append(f"build {ninja_path(b.exe, o)}: link " + " ".join(ninja_path(x, o) for x in gen_list) +
                      f" {ninja_path(glue_object, o)} | {ninja_path(b.lib, o)}" +
-                     (f" {ninja_path(dav1d_lib, o)}" if dav1d_lib else ""))
+                     (f" {ninja_path(dav1d_lib, o)}" if dav1d_lib else "") +
+                     (f" {ninja_path(sdl3_lib, o)}" if sdl3_lib else ""))
         lines.append(f"default {ninja_path(b.exe, o)}")
     else:
         lines.append(f"default {ninja_path(b.lib, o)}")
@@ -1161,6 +1204,9 @@ def main(argv: list[str] | None = None) -> int:
                          "fetched/imgui when it exists, else a build without Dear ImGui)")
     ap.add_argument("--dav1d-dir", type=Path,
                     help="dav1d kit made by tools/fetch_dav1d.py (default: the DAV1D_DIR variable; none: no AV1 decoder)")
+    ap.add_argument("--sdl3-dir", type=Path,
+                    help="SDL3 kit made by tools/fetch_sdl3.py (default: the SDL3_DIR variable; none: a build with no "
+                         "window)")
     ap.add_argument("--runtime", type=Path, default=RUNTIME, help="runtime source folder (default runtime/)")
     ap.add_argument("--runtime-lib", type=Path, help=f"a prebuilt {LIB_NAME} to link instead of building one")
     ap.add_argument("--make-runtime-lib", action="store_true", help=f"build only {LIB_NAME} into --out")
@@ -1180,7 +1226,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         tool = find_toolchain(args.cc, args.ninja, vulkan_sdk=args.vulkan_sdk, cxx=args.cxx,
-                              imgui=find_imgui(args.imgui), dav1d_dir=args.dav1d_dir)
+                              imgui=find_imgui(args.imgui), dav1d_dir=args.dav1d_dir, sdl3_dir=args.sdl3_dir)
         files = [GameFile(w, p.resolve(), True) for w, p in args.file]
         files += [GameFile(w, p.resolve(), False) for w, p in args.file_size]
         b = Build(args.out, tool, gen=args.gen.resolve() if args.gen else None,
@@ -1189,6 +1235,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"build_game: {tool.cc} ({tool_id(tool.cc)}), C++ {tool.cxx}, {jobs} jobs ({why})", flush=True)
         print("build_game: " + (f"Dear ImGui {fetch_imgui.VERSION} from {tool.imgui}" if tool.imgui
                                 else "no Dear ImGui (tools/fetch_imgui.py lays it out)"), flush=True)
+        print("build_game: " + (f"SDL {fetch_sdl3.VERSION} from {tool.sdl3}" if tool.sdl3
+                                else "no SDL3 kit (tools/fetch_sdl3.py lays it out; no window)"), flush=True)
         if args.make_runtime_lib:
             r = make_runtime_lib(b, show)
             print(f"{r['lib']}: {mib(r['bytes'])}, {r['objects']} objects")

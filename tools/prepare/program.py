@@ -44,6 +44,7 @@ if str(TOOLS) not in sys.path:
 
 import build_game  # noqa: E402  (tools/build_game.py)
 import fetch_imgui  # noqa: E402  (tools/fetch_imgui.py)
+import fetch_sdl3  # noqa: E402  (tools/fetch_sdl3.py)
 import layout  # noqa: E402  (tools/layout.py)
 
 LIFTER = TOOLS / "lift"
@@ -99,7 +100,8 @@ def toolchain(ctx: Context, imgui: bool = False) -> build_game.Toolchain:
     try:
         return build_game.find_toolchain(check.compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None),
                                          imgui=imgui_folder(ctx) if imgui else None,
-                                         dav1d_dir=getattr(ctx.options, "dav1d_dir", None))
+                                         dav1d_dir=getattr(ctx.options, "dav1d_dir", None),
+                                         sdl3_dir=getattr(ctx.options, "sdl3_dir", None))
     except build_game.BuildError as e:
         raise PrepareError(str(e)) from None
 
@@ -109,6 +111,16 @@ def vulkan_key(ctx: Context) -> list:
     include = build_game.vulkan_include(getattr(ctx.options, "vulkan_sdk", None))
     kit = build_game.find_dav1d(getattr(ctx.options, "dav1d_dir", None))
     return build_game.vulkan_inputs(include, build_game.find_glslang(include)) + build_game.dav1d_inputs(kit)
+
+
+def sdl3_key(ctx: Context) -> list:
+    """The part of the link step's key that the SDL3 kit gives: its library and headers (build_game.sdl3_inputs), and the
+    system libraries the link adds with it, so that a new kit or a new list links again."""
+    try:
+        kit = build_game.find_sdl3(getattr(ctx.options, "sdl3_dir", None))
+    except build_game.BuildError as e:
+        raise PrepareError(str(e)) from None
+    return [*build_game.sdl3_inputs(kit), *(["sdl3 link libs: " + " ".join(fetch_sdl3.LINK_LIBS)] if kit else [])]
 
 
 def log_lines(ctx: Context, name: str, progress):
@@ -300,7 +312,7 @@ class Link(Step):
     def key(self, ctx: Context) -> str:
         return fingerprint("link-1", TOOLS / "build_game.py", build_game.RUNTIME, compiler_id(ctx),
                            " ".join(build_game.RT_FLAGS + build_game.LINK_FLAGS), ctx.dest / EXEFS / "main.npdm",
-                           *romfs_key(ctx), *vulkan_key(ctx), imgui_key())
+                           *romfs_key(ctx), *vulkan_key(ctx), *sdl3_key(ctx), imgui_key())
 
     def current(self, ctx: Context, record: dict) -> bool:
         exe = ctx.dest / build_game.EXE_NAME
