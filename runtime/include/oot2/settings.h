@@ -1,0 +1,196 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// The settings store (research 93 D1, D5; ticket 103): one table of every setting the runtime reads, four layers that
+// give each key its value, a file beside the game that a person edits between runs or while the game runs, and the
+// hooks that apply a live key at once. Consumers read typed values with rt_setting and never parse a file or the
+// environment; later front ends (the menu, the capture header) edit and list this same table.
+//
+// The layers, highest first: the command line (`oot2 --set key=value`, and `--gfx NAME` for gfx), the environment
+// (OOT2_<KEY>, the key in capitals), the file, the default. The value of the highest layer that sets a key is its
+// effective value, and the store says which layer and which name (the option, the variable, the file's path) hold it,
+// so a menu can grey a row the command line or the environment holds. The variables the runtime read before the store
+// existed (OOT2_GFX, OOT2_HOLD_TICKS, OOT2_PAGE_RELEASE, OOT2_CENSUS, OOT2_CENSUS_FRAMES) are the environment names of
+// keys named after them, so each keeps working as it did; a value a key does not take is refused by name, never clamped
+// and never read as the default.
+//
+// The file. oot2.ini in the game folder, beside census.tsv and ledger.jsonl, unless `oot2 --config PATH` or the
+// OOT2_CONFIG variable names another (research 93 Q2's conservative default; oot2 prepare never writes or deletes it).
+// Its lines:
+//   ; a comment, or # a comment       whole lines only; a value runs to the end of its line
+//   [pacing]                          a section: the key's group, for people; a key is found by its name in any section
+//   hold_ticks = 3                    key = value, spaces around '=' optional
+// Blank lines, comments, sections and keys this table does not have are kept as they are, and logged once when read.
+// A line that is none of these, a key named twice, or a value its key does not take refuses the file: at start-up the
+// program stops with exit code 2, naming the file, the line and the key; on a reload the file is not applied and the
+// store keeps the values it had. A save rewrites only the lines of the keys the store changed (rt_settings_set), adds a
+// key the file lacks at the end of its group's section (or in a new section at the end), writes a temporary file beside
+// the file and renames it over the file, so a failure leaves the old file whole. Nothing saves on the frame path: a
+// save happens when its caller asks. No game data and no program key ever goes into the file.
+//
+// Applying a change. Each key has a mark: live (applied while the game runs), restart (read at start-up only) or
+// prepare (built into the prepared game: `oot2 prepare` must run again). A live key's new value is published as soon as
+// it is effective, on the thread that changed it (rt_settings_load at start-up, rt_settings_set, the file watcher), and
+// the hooks of that key run on that thread, in order of registration; consumers read the published value with rt_setting
+// (an atomic load, cheap enough for the frame path) or compare rt_settings_changes, which rises once per published
+// change and not when a value is written again unchanged. A restart or prepare key keeps the value it had at start-up:
+// a later change is logged once as needing a restart (or a prepare), the hooks see it as pending, and rt_setting_pending
+// tells a menu what the next start will use.
+//
+// The file watcher (rt_settings_watch) is a host thread of its own, never a guest thread and never the present thread:
+// every RT_SETTINGS_POLL_NS it reads the file whole, and applies it when two reads in a row agree and differ from what
+// it last applied, so an editor's half-written save is never applied; an edit is seen within one to two polls (0.5 to
+// 1 s). Without the watcher (tests), rt_settings_poll does one such step.
+#pragma once
+#include <stddef.h>
+#include <stdint.h>
+
+typedef enum RtSettingType { RT_SETTING_BOOL, RT_SETTING_INT, RT_SETTING_ENUM } RtSettingType;
+typedef enum RtSettingApply { RT_APPLY_LIVE, RT_APPLY_RESTART, RT_APPLY_PREPARE } RtSettingApply;
+// Research 93 D6's groups, in menu order; each is the file's section of that name.
+typedef enum RtSettingGroup {
+    RT_GROUP_GRAPHICS,       // [graphics]
+    RT_GROUP_PACING,         // [pacing]: frame rate and pacing
+    RT_GROUP_DISPLAY,        // [display]
+    RT_GROUP_AUDIO,          // [audio]
+    RT_GROUP_INPUT,          // [input]
+    RT_GROUP_ENHANCEMENTS,   // [enhancements]
+    RT_GROUP_DEBUG,          // [debug]: debug views and measurement switches
+    RT_GROUP_COUNT
+} RtSettingGroup;
+// The layers, lowest first: a higher layer that sets a key wins.
+typedef enum RtSettingSource {
+    RT_SOURCE_DEFAULT,
+    RT_SOURCE_FILE,
+    RT_SOURCE_ENV,
+    RT_SOURCE_COMMAND,
+    RT_SOURCE_COUNT
+} RtSettingSource;
+
+// The table: X(key, group, type, apply, default, min, max, names, what), one row per key.
+//   key      lower case, digits and '_'; unique; the environment name is OOT2_ and the key in capitals, so a key never
+//            takes the name of a variable the tools read (OOT2_CC, OOT2_NINJA, OOT2_CONFIG, OOT2_REQUIRE_*,
+//            OOT2_VSYNC_P99_US)
+//   type     BOOL takes 0 or 1; INT takes a decimal integer from min to max; ENUM takes one of names, '|'-separated,
+//            and its value is the name's index (min and max unused)
+//   default  a value of the key's type (for ENUM, an index into names)
+//   what     one line for the menu and the listing
+// A key whose consumer a later ticket builds is added by that ticket, with its consumer; research/103-settings-store.md
+// lists the keys tickets in flight are to register.
+#define RT_SETTINGS(X)                                                                                                 \
+    X(gfx, GRAPHICS, ENUM, RESTART, 0, 0, 0, "null|vulkan",                                                            \
+      "the graphics back end: null draws nothing and runs every test; vulkan draws on the GPU")                      \
+    X(hold_ticks, PACING, INT, LIVE, 0, 0, 999999, NULL,                                                               \
+      "experiment E2: hold every present for this many ticks of the 60 Hz clock, whatever the game asks for; 0 is off") \
+    X(page_release, DEBUG, ENUM, RESTART, 0, 0, 0, "off|count|release",                                                \
+      "page ranges of lever L1: off, counted only, or counted and released")                                          \
+    X(census, DEBUG, BOOL, RESTART, 0, 0, 1, NULL,                                                                     \
+      "census mode: an NVN2 entry point without a body answers 0 and is listed instead of stopping; never a default run") \
+    X(census_frames, DEBUG, INT, RESTART, 0, 0, 1000000000, NULL,                                                      \
+      "census mode only: end the run at this present, after the census and the ledger are written; 0 is no limit")
+
+typedef enum RtSettingId {
+#define RT_SETTING_ID(key, group, type, apply, def, min, max, names, what) RT_SET_##key,
+    RT_SETTINGS(RT_SETTING_ID)
+#undef RT_SETTING_ID
+    RT_SETTING_COUNT
+} RtSettingId;
+#define RT_SETTING_ANY (-1)   // rt_settings_hook: every key
+
+typedef struct RtSettingRow {
+    const char *key;
+    RtSettingGroup group;
+    RtSettingType type;
+    RtSettingApply apply;
+    int64_t def, min, max;   // for ENUM: 0 and the last index
+    const char *names;       // ENUM: "a|b|c"; NULL otherwise
+    const char *what;
+    const char *env;         // OOT2_<KEY>
+} RtSettingRow;
+
+#define RT_SETTINGS_POLL_NS 500000000ull   // the file watcher's period
+#define RT_SETTING_TEXT 24                 // bytes of a value as text, with its terminator
+
+// ---- the table
+const RtSettingRow *rt_setting_row(RtSettingId id);   // NULL out of range
+int rt_setting_find(const char *key);                 // the id of key, or -1
+const char *rt_setting_group_name(RtSettingGroup g);  // "graphics", ...; the file's section name
+const char *rt_setting_apply_name(RtSettingApply a);  // "live", "restart", "prepare"
+const char *rt_setting_source_name(RtSettingSource s);   // "default", "file", "environment", "command line"
+
+// ---- reading
+// The published value: for BOOL 0 or 1, for INT the number, for ENUM the index into names. Before rt_settings_load,
+// the first read takes the environment and the defaults (a program that never loads the store, such as a test, still
+// sees its OOT2_ variables); a value there that its key does not take ends the process with exit code 2, naming it.
+int64_t rt_setting(RtSettingId id);
+// The value as text ("1", "300", "release") into out (RT_SETTING_TEXT bytes); returns out.
+const char *rt_setting_format(RtSettingId id, int64_t value, char out[RT_SETTING_TEXT]);
+// The layer that holds the published value, and in *from (when from is not NULL) its name: the option ("--set",
+// "--gfx"), the variable ("OOT2_HOLD_TICKS"), the file's path, or "the default". The string lives as long as the store.
+RtSettingSource rt_setting_source(RtSettingId id, const char **from);
+// 1 when the layers now give a restart or prepare key a value other than the one published at start-up (the next start
+// uses *value); 0 otherwise.
+int rt_setting_pending(RtSettingId id, int64_t *value);
+// Published changes since start-up, all keys together: a consumer that keeps a parsed copy compares it.
+uint64_t rt_settings_changes(void);
+
+// Every key whose published value is not its default, with its value and source, in table order: fills at most max
+// entries and returns how many such keys there are (the capture header's list, research 93 D10).
+typedef struct RtSettingNow {
+    RtSettingId id;
+    const char *key;
+    char value[RT_SETTING_TEXT];
+    RtSettingSource source;
+    const char *from;   // as rt_setting_source gives it
+} RtSettingNow;
+int rt_settings_nondefault(RtSettingNow *out, int max);
+
+// ---- start-up
+// One command-line setting: "key=value" and the option that gave it ("--set", or "--gfx" for main.c's own option).
+typedef struct RtSettingArg {
+    const char *text;
+    const char *from;
+} RtSettingArg;
+// Read the layers once at start-up, before any consumer reads a key: the command line (args, in order: a later one wins
+// over an earlier one for the same key), the environment, and the file at path (NULL: none; a path that does not exist
+// is an empty file, which a save creates). Returns 1; or 0 with one line in why naming the option, variable or
+// file line, the key and what it takes, and the caller stops with exit code 2. Every value is published, no hook runs
+// and rt_settings_changes stays 0.
+int rt_settings_load(const RtSettingArg *args, int count, const char *path, char *why, size_t why_size);
+const char *rt_settings_path(void);   // the file's path, or "" when there is none
+
+// ---- changing and saving (the menu's calls; never on the frame path)
+// Set key id's file-layer value from text, as an edit of the file would: 1, or 0 with why when the key does not take
+// it. The effective value changes only when no higher layer holds the key; a live key is applied at once.
+int rt_settings_set(RtSettingId id, const char *text, char *why, size_t why_size);
+// Write the values rt_settings_set changed into the file (see the header): 1, or 0 with why, the file as it was.
+int rt_settings_save(char *why, size_t why_size);
+// For tests: when on, a save fails after its temporary file is written and closed, as a refused rename would.
+void rt_settings_fail_rename(int on);
+
+// ---- the file watcher
+// One step of the watcher: read the file, and apply it when it matches the previous step's read and differs from what
+// was applied. Returns 0 when nothing changed, 1 when a change was seen and waits for the next step, 2 when the file
+// was applied (or refused: a refusal is logged and the old values stay).
+int rt_settings_poll(void);
+// Start the watcher thread, which runs rt_settings_poll every RT_SETTINGS_POLL_NS until the process ends: 1, or 0 when
+// there is no file path or the thread cannot start.
+int rt_settings_watch(void);
+
+// ---- hooks
+// A change of key id (RT_SETTING_ANY: of any key). value is the new value; pending is 1 for a restart or prepare key
+// whose change waits for the next start (its published value is still old_value). The hook runs on the thread that
+// made the change, with the store's lock held: it may read settings, never change, save or poll them.
+typedef struct RtSettingChange {
+    RtSettingId id;
+    int64_t old_value, value;
+    RtSettingSource source;
+    const char *from;
+    int pending;
+} RtSettingChange;
+typedef void (*RtSettingHook)(const RtSettingChange *change, void *ctx);
+void rt_settings_hook(int id, RtSettingHook fn, void *ctx);   // at most 32 hooks; fatal past that
+
+// The modules that own live keys apply them through hooks bound at start-up, after rt_settings_load and before the game
+// runs; each applies its keys' values once as it binds. runtime/nvn/nvn_settings.c: hold_ticks.
+void nvn_settings_bind(void);

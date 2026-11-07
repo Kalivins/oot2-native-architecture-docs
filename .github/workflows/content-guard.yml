@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 The oot2-native contributors
+#
+# The content guard in CI. Changes to this file, to tools/ and to .githooks/ are
+# reviewed by the code owners (.github/CODEOWNERS): a pull request can edit the
+# guard that checks it, so the review of those paths is the real protection.
+name: content-guard
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    # A push that deletes a branch has no commit to check out.
+    if: github.event_name != 'push' || github.event.deleted == false
+    runs-on: ubuntu-latest
+    steps:
+      # No "ref:" on purpose. A push checks out the pushed commit. A pull request
+      # checks out the merge ref, which holds both the base and the head commit
+      # (also for a fork), so BASE..HEAD below resolves with the full history.
+      - name: Check out the full history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Check every commit of the push
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          # A new branch, or a force push whose old tip is gone, checks all history.
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+              || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            range="$AFTER"
+          else
+            range="$BEFORE..$AFTER"
+          fi
+          echo "Checking range: $range"
+          python tools/check_content.py --range "$range"
+
+      - name: Check every commit of the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "Checking range: $BASE..$HEAD"
+          python tools/check_content.py --range "$BASE..$HEAD"
+
+      - name: Check the whole tree
+        run: python tools/check_content.py --all
+
+      # The lifter (tools/lift) needs numpy, and its spin-wait search
+      # (tools/lift/spin_waits.py) capstone, both pinned; they are the only packages
+      # outside the standard library the tools use besides Ninja below.
+      - name: Install the lifter's dependencies
+        run: python -m pip install numpy==2.5.4 capstone==5.0.7
+
+      # The build and link tests (tests/test_build_game.py) and the check step of
+      # oot2 prepare run Ninja; its PyPI package, pinned, as in windows-build.yml.
+      - name: Install Ninja
+        run: |
+          python -m pip install ninja==1.13.0
+          ninja --version
+
+      # The Vulkan headers, Volk and glslang the runtime builds with, at the pins of
+      # tools/fetch_vulkan.py, laid out as a Vulkan SDK folder outside the checkout
+      # (after the guard, which never sees them), as in windows-build.yml.
+      - name: Cache the Vulkan headers, Volk and glslang
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/vulkan-kit
+          key: vulkan-kit-${{ runner.os }}-${{ hashFiles('tools/fetch_vulkan.py') }}
+
+      - name: Fetch the Vulkan headers, Volk and glslang
+        run: |
+          python tools/fetch_vulkan.py --dest "$RUNNER_TEMP/vulkan-kit"
+          echo "VULKAN_SDK=$RUNNER_TEMP/vulkan-kit" >> "$GITHUB_ENV"
+
+      # The runtime boundary and lifter tests build C with clang (preinstalled on the
+      # runner, with the AArch64 assembler the lifter tests use); here a missing
+      # compiler, Ninja, capstone or Vulkan SDK fails them instead of skipping them.
+      - name: Run the unit tests
+        env:
+          OOT2_REQUIRE_CLANG: "1"
+          OOT2_REQUIRE_CAPSTONE: "1"
+          OOT2_REQUIRE_VULKAN: "1"
+        run: |
+          clang --version
+          python -m unittest discover -s tests -v

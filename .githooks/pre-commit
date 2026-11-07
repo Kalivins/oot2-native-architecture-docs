@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 The oot2-native contributors
+#
+# Refuse a commit that stages game content, keys or generated game code.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Never bypass it with --no-verify. If it flags a file by mistake, fix the
+# check in a separate pull request and say why.
+
+root=$(git rev-parse --show-toplevel) || exit 1
+
+for candidate in python3 python "py -3"; do
+    if $candidate -c "import sys; sys.exit(sys.version_info < (3, 9))" >/dev/null 2>&1; then
+        exec $candidate "$root/tools/check_content.py" --staged
+    fi
+done
+
+echo "pre-commit: no usable Python 3.9+ found, so the content check cannot run." >&2
+echo "Install Python 3 and try again. The commit is refused rather than unchecked." >&2
+exit 1

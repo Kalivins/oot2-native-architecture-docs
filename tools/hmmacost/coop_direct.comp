@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// The cooperative matrix ceiling of the HMMA cost measurement (tools/hmmacost/hmma_cost.py):
+// N multiply-adds of the HMMA.16816 shape (16 x 8 x 16, f16 inputs) per subgroup, the operands
+// kept in cooperative matrices from start to end, as a translator that mapped the game's
+// fragment chains onto the extension's matrices would run them (architecture D20b, alternative A).
+// Each subgroup of a 128-invocation workgroup loads four A tiles (16 x 16), four B tiles
+// (16 x 8) and four accumulators (16 x 8), then runs multiply-add i on accumulator i % 4 with
+// A tile i % 4 and B tile (i / 4) % 4, the order of the translated programs, and stores the
+// accumulators. Defines: N (a multiple of 16), ACC_F32 (f32 accumulators, else f16) and
+// BAD_B_LAYOUT (B loaded column-major, for the counter-run).
+
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+
+#ifdef ACC_F32
+#define ACC_T float
+#else
+#define ACC_T float16_t
+#endif
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+// Per subgroup of the workgroup: A tiles at 0 (4 x 256 halves), B tiles at 1024 (4 x 128),
+// f16 accumulators at 1536 (4 x 128); 2048 halves per subgroup.
+layout(set = 0, binding = 0) readonly buffer InHalves { float16_t h[]; } in_h;
+// Per subgroup: f32 accumulators, 4 x 128.
+layout(set = 0, binding = 1) readonly buffer InFloats { float f[]; } in_f;
+// Per subgroup of every workgroup: the four accumulators, 4 x 128 elements, row-major.
+layout(set = 0, binding = 2) writeonly buffer Out { ACC_T o[]; } out_acc;
+
+void main()
+{
+    uint sg = gl_SubgroupID;
+    uint hb = sg * 2048u;
+
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a[4];
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 8, gl_MatrixUseB> b[4];
+    coopmat<ACC_T, gl_ScopeSubgroup, 16, 8, gl_MatrixUseAccumulator> c[4];
+
+    [[unroll]] for (uint x = 0u; x < 4u; x++)
+    {
+        coopMatLoad(a[x], in_h.h, hb + 256u * x, 16u, gl_CooperativeMatrixLayoutRowMajor);
+#if BAD_B_LAYOUT
+        coopMatLoad(b[x], in_h.h, hb + 1024u + 128u * x, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+#else
+        coopMatLoad(b[x], in_h.h, hb + 1024u + 128u * x, 8u, gl_CooperativeMatrixLayoutRowMajor);
+#endif
+#ifdef ACC_F32
+        coopMatLoad(c[x], in_f.f, sg * 512u + 128u * x, 8u, gl_CooperativeMatrixLayoutRowMajor);
+#else
+        coopMatLoad(c[x], in_h.h, hb + 1536u + 128u * x, 8u, gl_CooperativeMatrixLayoutRowMajor);
+#endif
+    }
+
+    for (uint r = 0u; r < uint(N) / 16u; r++)
+    {
+        [[unroll]] for (uint y = 0u; y < 4u; y++)
+        {
+            [[unroll]] for (uint x = 0u; x < 4u; x++)
+            {
+                c[x] = coopMatMulAdd(a[x], b[y], c[x]);
+            }
+        }
+    }
+
+    uint ob = (gl_WorkGroupID.x * 4u + sg) * 512u;
+
+    [[unroll]] for (uint x = 0u; x < 4u; x++)
+    {
+        coopMatStore(c[x], out_acc.o, ob + 128u * x, 8u, gl_CooperativeMatrixLayoutRowMajor);
+    }
+}

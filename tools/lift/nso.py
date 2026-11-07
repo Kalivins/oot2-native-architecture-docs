@@ -1,0 +1,204 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 The oot2-native contributors
+#
+# Adapted from LAS Recomp tools/nso.py @ da35b83 (MIT, Copyright (c) 2026 Peiikai).
+# Taken from DKB Recomp (https://github.com/Lucas-blip-png/dkb-pc-recomp) at 9d8fa02, recomp/nso.py. Changed in
+# oot2-native: a pure-Python LZ4 block decoder instead of the lz4 package, segment hash checks, NsoError
+# instead of asserts.
+"""NSO loader: decompress segments, build the memory image, parse MOD0/dynamic info.
+
+The generator reads plain modules (segments stored uncompressed), which ticket 25's decoding step writes. An NSO whose
+segments are LZ4-compressed is also read, through the small decoder below (under a second for the sdk). A segment
+whose header flag asks for it is checked against its SHA-256. ZBIC-compressed modules are not read here (D2a).
+"""
+import hashlib
+import struct
+import sys
+from collections import Counter
+
+DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ = 0, 1, 2, 4, 5, 6, 7, 8
+DT_STRSZ, DT_JMPREL, DT_RELACOUNT = 10, 23, 0x6FFFFFF9
+DT_RELRSZ, DT_RELR, DT_GNU_HASH = 0x23, 0x24, 0x6FFFFEF5
+R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
+
+
+class NsoError(ValueError):
+    pass
+
+
+def lz4_block(src, size):
+    """Decompress one LZ4 block (the format of NSO segments) to exactly size bytes."""
+    dst = bytearray()
+    i, n = 0, len(src)
+    while i < n:
+        token = src[i]
+        i += 1
+        lit = token >> 4
+        if lit == 15:
+            while True:
+                b = src[i]
+                i += 1
+                lit += b
+                if b != 255:
+                    break
+        if i + lit > n:
+            raise NsoError('LZ4: literals past the end of the block')
+        dst += src[i:i + lit]
+        i += lit
+        if i >= n:
+            break
+        if i + 2 > n:
+            raise NsoError('LZ4: truncated match offset')
+        off = src[i] | src[i + 1] << 8
+        i += 2
+        ml = token & 15
+        if ml == 15:
+            while True:
+                b = src[i]
+                i += 1
+                ml += b
+                if b != 255:
+                    break
+        ml += 4
+        start = len(dst) - off
+        if off == 0 or start < 0:
+            raise NsoError(f'LZ4: match offset {off} outside the output')
+        if ml <= off:
+            dst += dst[start:start + ml]
+        else:   # the match overlaps what it writes: the last off bytes repeat
+            q, r = divmod(ml, off)
+            pat = dst[start:]
+            dst += pat * q + pat[:r]
+    if len(dst) != size:
+        raise NsoError(f'LZ4: block decodes to {len(dst)} bytes, the header says {size}')
+    return bytes(dst)
+
+
+class Nso:
+    def __init__(self, path):
+        with open(path, 'rb') as f:
+            raw = f.read()
+        if raw[:4] != b'NSO0':
+            raise NsoError(f'{path}: not an NSO0 file')
+        flags = struct.unpack_from('<I', raw, 0xC)[0]
+        self.build_id = raw[0x40:0x60].rstrip(b'\0').hex()
+        self.compressed = bool(flags & 7)
+        segs = []
+        for i in range(3):
+            file_off, mem_off, dec_size = struct.unpack_from('<III', raw, 0x10 + i * 0x10)
+            comp_size = struct.unpack_from('<I', raw, 0x60 + i * 4)[0]
+            data = raw[file_off:file_off + comp_size]
+            if flags & (1 << i):
+                data = lz4_block(data, dec_size)
+            elif len(data) != dec_size:
+                raise NsoError(f'{path}: segment {i} holds {len(data)} bytes, the header says {dec_size}')
+            if flags & (8 << i) and hashlib.sha256(data).digest() != raw[0xA0 + 32 * i:0xC0 + 32 * i]:
+                raise NsoError(f'{path}: segment {i} does not match the SHA-256 in its header')
+            segs.append((mem_off, data))
+        self.bss_size = struct.unpack_from('<I', raw, 0x3C)[0]
+        self.text = (segs[0][0], len(segs[0][1]))
+        self.rodata = (segs[1][0], len(segs[1][1]))
+        self.data = (segs[2][0], len(segs[2][1]))
+        end = segs[2][0] + len(segs[2][1]) + self.bss_size
+        self.size = (end + 0xFFF) & ~0xFFF
+        img = bytearray(self.size)
+        for off, d in segs:
+            img[off:off + len(d)] = d
+        self.image = img
+        self._parse_mod0()
+
+    def u32(self, off): return struct.unpack_from('<I', self.image, off)[0]
+    def u64(self, off): return struct.unpack_from('<Q', self.image, off)[0]
+
+    def _parse_mod0(self):
+        mod0 = self.u32(4)
+        if self.image[mod0:mod0 + 4] != b'MOD0':
+            raise NsoError('no MOD0 header at the offset the image gives')
+        rel = lambda i: mod0 + struct.unpack_from('<i', self.image, mod0 + 4 + i * 4)[0]
+        self.dynamic, self.bss_start, self.bss_end = rel(0), rel(1), rel(2)
+        self.eh_start, self.eh_end, self.module_obj = rel(3), rel(4), rel(5)
+        dyn = {}
+        needed = []
+        off = self.dynamic
+        while True:
+            tag, val = self.u64(off), self.u64(off + 8)
+            off += 16
+            if tag == DT_NULL:
+                break
+            if tag == DT_NEEDED:
+                needed.append(val)
+            dyn.setdefault(tag, val)
+        self.dyn = dyn
+        strtab = dyn.get(DT_STRTAB, 0)
+        self.strtab = strtab
+        self.needed = [self.cstr(strtab + n) for n in needed]
+        # dynsym count from DT_HASH nchain, or from DT_GNU_HASH (1.4.3 sdk and subsdk0 have no DT_HASH)
+        self.syms = []
+        nsyms = self.symbol_count()
+        if nsyms and DT_SYMTAB in dyn:
+            st = dyn[DT_SYMTAB]
+            for i in range(nsyms):
+                o = st + i * 24
+                name, info, other, shndx = struct.unpack_from('<IBBH', self.image, o)
+                value, size = struct.unpack_from('<QQ', self.image, o + 8)
+                self.syms.append((self.cstr(strtab + name), info, shndx, value, size))
+        self.relocs = []
+        for base_tag, size_tag in ((DT_RELA, DT_RELASZ), (DT_JMPREL, DT_PLTRELSZ)):
+            if base_tag in dyn:
+                b, n = dyn[base_tag], dyn[size_tag] // 24
+                for i in range(n):
+                    r_off, r_info, r_add = struct.unpack_from('<QQq', self.image, b + i * 24)
+                    self.relocs.append((r_off, r_info & 0xFFFFFFFF, r_info >> 32, r_add))
+        # DT_RELR (1.4.3): packed RELATIVE relocations whose addend is the word in place. An even entry is an address
+        # (relocate it, continue after it); an odd entry is a bitmap of the next 63 words.
+        if DT_RELR in dyn:
+            where = 0
+            for i in range(dyn[DT_RELRSZ] // 8):
+                e = self.u64(dyn[DT_RELR] + i * 8)
+                if e & 1 == 0:
+                    self.relocs.append((e, R_AARCH64_RELATIVE, 0, self.u64(e)))
+                    where = e + 8
+                    continue
+                for k in range(63):
+                    if e >> (k + 1) & 1:
+                        a = where + k * 8
+                        self.relocs.append((a, R_AARCH64_RELATIVE, 0, self.u64(a)))
+                where += 63 * 8
+
+    def symbol_count(self):
+        """Number of .dynsym entries: DT_HASH nchain, else one past the last symbol a DT_GNU_HASH chain reaches."""
+        dyn = self.dyn
+        if DT_HASH in dyn:
+            return self.u32(dyn[DT_HASH] + 4)
+        if DT_GNU_HASH not in dyn:
+            return 0
+        h = dyn[DT_GNU_HASH]
+        nbuckets, symoffset, bloom_size = self.u32(h), self.u32(h + 4), self.u32(h + 8)
+        buckets = h + 16 + bloom_size * 8
+        last = max([self.u32(buckets + 4 * i) for i in range(nbuckets)] + [0])
+        if last < symoffset:
+            return symoffset
+        chains = buckets + 4 * nbuckets
+        while not self.u32(chains + 4 * (last - symoffset)) & 1:
+            last += 1
+        return last + 1
+
+    def cstr(self, off):
+        end = self.image.index(b'\0', off)
+        return self.image[off:end].decode('utf-8', 'replace')
+
+    def imports(self):
+        return [s for s in self.syms if s[0] and s[2] == 0]
+
+    def exports(self):
+        return [s for s in self.syms if s[0] and s[2] != 0]
+
+
+if __name__ == '__main__':
+    for p in sys.argv[1:]:
+        n = Nso(p)
+        print(f'== {p}  build {n.build_id[:16]}  image 0x{n.size:x}')
+        print(f'  text 0x{n.text[0]:x}+0x{n.text[1]:x}  ro 0x{n.rodata[0]:x}+0x{n.rodata[1]:x}  '
+              f'data 0x{n.data[0]:x}+0x{n.data[1]:x}  bss 0x{n.bss_size:x}')
+        print(f'  needed {n.needed}  syms {len(n.syms)}  imports {len(n.imports())}  exports {len(n.exports())}')
+        print(f'  relocs {dict(Counter(r[1] for r in n.relocs))}')

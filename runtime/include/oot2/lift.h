@@ -1,0 +1,259 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// The lifter's own helpers (tools/lift): flags, bit operations, LSE atomics and acquire/release accesses, and, through
+// lift_simd.h, the FP and SIMD lowering. Generated code includes this header; it includes cpu.h, the boundary with
+// the runtime. Nothing here calls the runtime.
+//
+// Adapted from DKB Recomp (https://github.com/Lucas-blip-png/dkb-pc-recomp) at 9d8fa02, runtime/cpu.h, whose header reads:
+// "Adapted from LAS Recomp runtime/cpu.h @ da35b83 (MIT, Copyright (c) 2026 Peiikai)." Taken: everything after the
+// exclusive monitor (which cpu.h already holds). Changed: acquire and release accesses written out of the EXCL macro,
+// no function-entry profiler.
+#pragma once
+#include <stdint.h>
+#include <string.h>
+
+#include "cpu.h"
+
+// ---- acquire loads and release stores (LDAR, STLR and their byte and halfword forms)
+#define RT_ACQREL(N, T)                                                                    \
+    static inline uint64_t lda##N(uint64_t a) {                                            \
+        return __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                       \
+    }                                                                                      \
+    static inline void stl##N(uint64_t a, uint64_t v) {                                    \
+        __atomic_store_n((T *)(uintptr_t)a, (T)v, __ATOMIC_RELEASE);                       \
+    }
+RT_ACQREL(8, uint8_t)
+RT_ACQREL(16, uint16_t)
+RT_ACQREL(32, uint32_t)
+RT_ACQREL(64, uint64_t)
+#undef RT_ACQREL
+
+// ---- LSE atomics (ARMv8.1; the A57 lacks them, the SDK carries them behind a CPU feature check).
+// Add, clear, xor, set and swap map to __atomic builtins in the lifter; min/max need a CAS loop. Return the old value.
+#define ATOMIC_MINMAX(N, T, S)                                                             \
+    static inline T atomic_smax##N(uint64_t a, T v) {                                      \
+        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, (S)o > (S)v ? o : v, 1, \
+                                            __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
+        return o;                                                                          \
+    }                                                                                      \
+    static inline T atomic_smin##N(uint64_t a, T v) {                                      \
+        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, (S)o < (S)v ? o : v, 1, \
+                                            __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
+        return o;                                                                          \
+    }                                                                                      \
+    static inline T atomic_umax##N(uint64_t a, T v) {                                      \
+        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, o > v ? o : v, 1,       \
+                                            __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
+        return o;                                                                          \
+    }                                                                                      \
+    static inline T atomic_umin##N(uint64_t a, T v) {                                      \
+        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, o < v ? o : v, 1,       \
+                                            __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
+        return o;                                                                          \
+    }
+ATOMIC_MINMAX(8, uint8_t, int8_t)
+ATOMIC_MINMAX(16, uint16_t, int16_t)
+ATOMIC_MINMAX(32, uint32_t, int32_t)
+ATOMIC_MINMAX(64, uint64_t, int64_t)
+
+// ---- flags (packed NZCV in bits 31..28)
+#define FLAG_N(c) (((c)->nzcv >> 31) & 1)
+#define FLAG_Z(c) (((c)->nzcv >> 30) & 1)
+#define FLAG_C(c) (((c)->nzcv >> 29) & 1)
+#define FLAG_V(c) (((c)->nzcv >> 28) & 1)
+#define COND_EQ(c) (FLAG_Z(c))
+#define COND_NE(c) (!FLAG_Z(c))
+#define COND_CS(c) (FLAG_C(c))
+#define COND_CC(c) (!FLAG_C(c))
+#define COND_MI(c) (FLAG_N(c))
+#define COND_PL(c) (!FLAG_N(c))
+#define COND_VS(c) (FLAG_V(c))
+#define COND_VC(c) (!FLAG_V(c))
+#define COND_HI(c) (FLAG_C(c) && !FLAG_Z(c))
+#define COND_LS(c) (!(FLAG_C(c) && !FLAG_Z(c)))
+#define COND_GE(c) (FLAG_N(c) == FLAG_V(c))
+#define COND_LT(c) (FLAG_N(c) != FLAG_V(c))
+#define COND_GT(c) (!FLAG_Z(c) && FLAG_N(c) == FLAG_V(c))
+#define COND_LE(c) (!(!FLAG_Z(c) && FLAG_N(c) == FLAG_V(c)))
+
+#define MKFLAGS(n, z, cy, v) \
+    (((uint64_t)(n) << 31) | ((uint64_t)(z) << 30) | ((uint64_t)(cy) << 29) | ((uint64_t)(v) << 28))
+
+static inline uint64_t adds64(Cpu *c, uint64_t a, uint64_t b) {
+    uint64_t r = a + b;
+    c->nzcv = MKFLAGS(r >> 63, r == 0, r < a, ((a ^ r) & (b ^ r)) >> 63);
+    return r;
+}
+static inline uint64_t subs64(Cpu *c, uint64_t a, uint64_t b) {
+    uint64_t r = a - b;
+    c->nzcv = MKFLAGS(r >> 63, r == 0, a >= b, ((a ^ b) & (a ^ r)) >> 63);
+    return r;
+}
+static inline uint32_t adds32(Cpu *c, uint32_t a, uint32_t b) {
+    uint32_t r = a + b;
+    c->nzcv = MKFLAGS(r >> 31, r == 0, r < a, ((a ^ r) & (b ^ r)) >> 31);
+    return r;
+}
+static inline uint32_t subs32(Cpu *c, uint32_t a, uint32_t b) {
+    uint32_t r = a - b;
+    c->nzcv = MKFLAGS(r >> 31, r == 0, a >= b, ((a ^ b) & (a ^ r)) >> 31);
+    return r;
+}
+static inline uint64_t logic64(Cpu *c, uint64_t r) { c->nzcv = MKFLAGS(r >> 63, r == 0, 0, 0); return r; }
+static inline uint32_t logic32(Cpu *c, uint32_t r) { c->nzcv = MKFLAGS(r >> 31, r == 0, 0, 0); return r; }
+
+#define ADC_IMPL(N, S)                                                                     \
+    static inline uint##N##_t adc##N(Cpu *c, uint##N##_t a, uint##N##_t b) {               \
+        return a + b + (uint##N##_t)FLAG_C(c);                                             \
+    }                                                                                      \
+    static inline uint##N##_t sbc##N(Cpu *c, uint##N##_t a, uint##N##_t b) {               \
+        return a - b - 1 + (uint##N##_t)FLAG_C(c);                                         \
+    }                                                                                      \
+    static inline uint##N##_t adcs##N(Cpu *c, uint##N##_t a, uint##N##_t b) {              \
+        uint##N##_t cin = FLAG_C(c), r = a + b + cin;                                      \
+        int carry = cin ? r <= a : r < a;                                                  \
+        c->nzcv = MKFLAGS(r >> (N - 1), r == 0, carry, ((a ^ r) & (b ^ r)) >> (N - 1));    \
+        return r;                                                                          \
+    }                                                                                      \
+    static inline uint##N##_t sbcs##N(Cpu *c, uint##N##_t a, uint##N##_t b) {              \
+        return adcs##N(c, a, (uint##N##_t)~b);                                             \
+    }
+ADC_IMPL(64, )
+ADC_IMPL(32, )
+
+// ---- function-local flags (recomp/flags.py)
+// Generated functions keep NZCV in a local Flags F, never in c->nzcv. A definition of a known kind stores its
+// operands (a - b, a + b, or a logic result in a); fc_<kind>(&F, CC_xx) computes a condition from them, so a compare
+// and its branch become one host compare. F.nz holds the packed form for definitions only known packed (CCMP, FCMP,
+// MSR, ADCS) and for readers that several kinds of definition reach. Every helper is always inlined with a constant
+// condition, so F stays in registers and only the condition's own arithmetic remains.
+typedef struct { uint64_t a, b, nz; } Flags;
+enum { CC_EQ, CC_NE, CC_CS, CC_CC, CC_MI, CC_PL, CC_VS, CC_VC, CC_HI, CC_LS, CC_GE, CC_LT, CC_GT, CC_LE };
+#define CPU_FL static inline __attribute__((always_inline))
+
+CPU_FL int fl_cond(int cc, int n, int z, int cy, int v) {
+    switch (cc) {
+    case CC_EQ: return z;
+    case CC_NE: return !z;
+    case CC_CS: return cy;
+    case CC_CC: return !cy;
+    case CC_MI: return n;
+    case CC_PL: return !n;
+    case CC_VS: return v;
+    case CC_VC: return !v;
+    case CC_HI: return cy && !z;
+    case CC_LS: return !cy || z;
+    case CC_GE: return n == v;
+    case CC_LT: return n != v;
+    case CC_GT: return !z && n == v;
+    default: return z || n != v;
+    }
+}
+
+// Subtract (SUBS, CMP): conditions as host compares of the operands.
+#define FL_SUB(N, U, S)                                                                    \
+    CPU_FL U fsub##N(Flags *f, U a, U b) { f->a = a; f->b = b; return (U)(a - b); }            \
+    CPU_FL int fc_sub##N(const Flags *f, int cc) {                                             \
+        U a = (U)f->a, b = (U)f->b, r = (U)(a - b);                                        \
+        switch (cc) {                                                                      \
+        case CC_EQ: return a == b;                                                         \
+        case CC_NE: return a != b;                                                         \
+        case CC_CS: return a >= b;                                                         \
+        case CC_CC: return a < b;                                                          \
+        case CC_MI: return (S)r < 0;                                                       \
+        case CC_PL: return (S)r >= 0;                                                      \
+        case CC_VS: return (S)((a ^ b) & (a ^ r)) < 0;                                     \
+        case CC_VC: return (S)((a ^ b) & (a ^ r)) >= 0;                                    \
+        case CC_HI: return a > b;                                                          \
+        case CC_LS: return a <= b;                                                         \
+        case CC_GE: return (S)a >= (S)b;                                                   \
+        case CC_LT: return (S)a < (S)b;                                                    \
+        case CC_GT: return (S)a > (S)b;                                                    \
+        default: return (S)a <= (S)b;                                                      \
+        }                                                                                  \
+    }                                                                                      \
+    CPU_FL uint64_t nz_sub##N(U a, U b) {                                                      \
+        U r = (U)(a - b);                                                                  \
+        return MKFLAGS((S)r < 0, r == 0, a >= b, (S)((a ^ b) & (a ^ r)) < 0);              \
+    }                                                                                      \
+    CPU_FL uint64_t fnz_sub##N(const Flags *f) { return nz_sub##N((U)f->a, (U)f->b); }
+FL_SUB(64, uint64_t, int64_t)
+FL_SUB(32, uint32_t, int32_t)
+
+// Add (ADDS, CMN) and logic results (ANDS, TST, BICS): conditions from N, Z, C, V.
+#define FL_ADD(N, U, S)                                                                    \
+    CPU_FL U fadd##N(Flags *f, U a, U b) { f->a = a; f->b = b; return (U)(a + b); }            \
+    CPU_FL uint64_t nz_add##N(U a, U b) {                                                      \
+        U r = (U)(a + b);                                                                  \
+        return MKFLAGS((S)r < 0, r == 0, r < a, (S)((a ^ r) & (b ^ r)) < 0);               \
+    }                                                                                      \
+    CPU_FL int fc_add##N(const Flags *f, int cc) {                                             \
+        U a = (U)f->a, b = (U)f->b, r = (U)(a + b);                                        \
+        return fl_cond(cc, (S)r < 0, r == 0, r < a, (S)((a ^ r) & (b ^ r)) < 0);           \
+    }                                                                                      \
+    CPU_FL uint64_t fnz_add##N(const Flags *f) { return nz_add##N((U)f->a, (U)f->b); }         \
+    CPU_FL U flogic##N(Flags *f, U r) { f->a = r; return r; }                                  \
+    CPU_FL int fc_logic##N(const Flags *f, int cc) {                                           \
+        U r = (U)f->a;                                                                     \
+        return fl_cond(cc, (S)r < 0, r == 0, 0, 0);                                        \
+    }                                                                                      \
+    CPU_FL uint64_t fnz_logic##N(const Flags *f) { return MKFLAGS((S)f->a < 0, (U)f->a == 0, 0, 0); }
+FL_ADD(64, uint64_t, int64_t)
+FL_ADD(32, uint32_t, int32_t)
+
+// Packed flags.
+CPU_FL int fc_nz(const Flags *f, int cc) {
+    return fl_cond(cc, f->nz >> 31 & 1, f->nz >> 30 & 1, f->nz >> 29 & 1, f->nz >> 28 & 1);
+}
+CPU_FL uint64_t fnz_nz(const Flags *f) { return f->nz; }
+
+// ADC, SBC, ADCS, SBCS with the carry in from F.
+#define FL_ADC(N, U)                                                                       \
+    CPU_FL U adc##N##f(int cin, U a, U b) { return (U)(a + b + (U)cin); }                      \
+    CPU_FL U sbc##N##f(int cin, U a, U b) { return (U)(a - b - 1 + (U)cin); }                  \
+    CPU_FL U adcs##N##f(Flags *f, int cin, U a, U b) {                                         \
+        U r = (U)(a + b + (U)cin);                                                         \
+        int carry = cin ? r <= a : r < a;                                                  \
+        f->nz = MKFLAGS(r >> (N - 1), r == 0, carry, ((a ^ r) & (b ^ r)) >> (N - 1));      \
+        return r;                                                                          \
+    }                                                                                      \
+    CPU_FL U sbcs##N##f(Flags *f, int cin, U a, U b) { return adcs##N##f(f, cin, a, (U)~b); }
+FL_ADC(64, uint64_t)
+FL_ADC(32, uint32_t)
+#undef CPU_FL
+
+// ---- bit ops
+#define ROR64(v, r) ((uint64_t)(v) >> ((r) & 63) | (uint64_t)(v) << ((64 - ((r) & 63)) & 63))
+#define ROR32(v, r) ((uint32_t)(v) >> ((r) & 31) | (uint32_t)(v) << ((32 - ((r) & 31)) & 31))
+static inline uint64_t clz64(uint64_t v) { return v ? __builtin_clzll(v) : 64; }
+static inline uint32_t clz32(uint32_t v) { return v ? __builtin_clz(v) : 32; }
+static inline uint64_t cls64(uint64_t v) { return clz64(v ^ (uint64_t)((int64_t)v >> 1)) - 1; }
+static inline uint32_t cls32(uint32_t v) { return clz32(v ^ (uint32_t)((int32_t)v >> 1)) - 1; }
+static inline uint64_t rbit64(uint64_t v) { return __builtin_bitreverse64(v); }
+static inline uint32_t rbit32(uint32_t v) { return __builtin_bitreverse32(v); }
+static inline uint32_t rev16_32(uint32_t v) { return ((v & 0x00ff00ffu) << 8) | ((v >> 8) & 0x00ff00ffu); }
+static inline uint64_t rev16_64(uint64_t v) {
+    return ((v & 0x00ff00ff00ff00ffull) << 8) | ((v >> 8) & 0x00ff00ff00ff00ffull);
+}
+static inline uint64_t rev32_64(uint64_t v) {
+    return ((uint64_t)__builtin_bswap32((uint32_t)v)) | ((uint64_t)__builtin_bswap32((uint32_t)(v >> 32)) << 32);
+}
+static inline uint64_t udiv64(uint64_t a, uint64_t b) { return b ? a / b : 0; }
+static inline uint32_t udiv32(uint32_t a, uint32_t b) { return b ? a / b : 0; }
+static inline uint64_t sdiv64(uint64_t a, uint64_t b) {
+    if (!b) return 0;
+    if ((int64_t)a == INT64_MIN && (int64_t)b == -1) return a;
+    return (uint64_t)((int64_t)a / (int64_t)b);
+}
+static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
+    if (!b) return 0;
+    if ((int32_t)a == INT32_MIN && (int32_t)b == -1) return a;
+    return (uint32_t)((int32_t)a / (int32_t)b);
+}
+
+#include "lift_simd.h"

@@ -1,0 +1,119 @@
+# Third-party code of the shader translator
+
+Code in this folder was written by others and is kept unmodified unless this
+file lists a change. Each component keeps its own licence file. The repository
+notices ([THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md)) carry one row
+per component.
+
+## ryujinx/
+
+The shader translation library of Ryujinx 1.3.2, three projects
+(`Ryujinx.Graphics.Shader`, `Ryujinx.Common`, `Spv.Generator`), as vendored by
+nxnative, which added a decoder for Ampere (sm_86) code and the other changes
+listed in [ryujinx/README.md](ryujinx/README.md).
+
+- Source: https://github.com/seedds/nxnative, folder `dm/third_party/ryujinx`.
+- Commit: `865cc35fad7034d17c2190f8ce349f61f5bcaba1` (2026-11-06).
+- Licence: MIT, [ryujinx/LICENSE.txt](ryujinx/LICENSE.txt); `Spv.Generator`
+  also carries its own copy in `src/Spv.Generator/LICENSE`.
+- Copied as is at first: every file was byte-identical to the blob at that
+  commit. The files listed below have changed since.
+
+### Changes made here
+
+A change to a file in `ryujinx/` gets a line in this list (file, function, what
+and why) and an `oot2-native:` comment at the changed code, so that the folder
+can be compared with a later nxnative commit and the changes carried over. Paths
+are under `ryujinx/src/Ryujinx.Graphics.Shader/`.
+
+Handlers ported from nxnative pull requests not merged at the commit above
+(MIT, same author and licence as the vendored tree):
+
+- `Instructions/InstEmitAmpereAlu.cs`, the ALU table and `AF2ip`: F2IP
+  (opcode 0x243), the float to 8-bit integer convert and pack, both forms the
+  game uses (round to nearest of two registers; truncation with source A `RZ`).
+  From pull request 1300, commits `06f47f57` and `e3f8ef8c`. Without it, 26
+  programs did not translate.
+- `Instructions/InstEmitAmpereMem.cs`, `AIsberd`: ISBERD mode 0xb8 in a task
+  shader, the read-back of a payload word the task itself stored (the outputs
+  at `stage[2]`, where `AStageOut` writes it). From pull request 1300, commit
+  `06f47f57`. Without it, 1 task program did not translate.
+- `Instructions/InstEmitAmpereMem.cs`, the memory table and `AAtomgCas`, and
+  `Decoders/DecoderAmpere.cs`, the store feature list: ATOMG.CAS (opcode
+  0x3a9), 32-bit compare and swap on global memory. From pull request 1275,
+  commit `8fd3a0dc` (only the ATOMG.CAS parts of that commit). Without it, 6
+  compute programs did not translate.
+
+Changes of this project:
+
+- `Instructions/InstEmitMemory.cs`, `EmitAtomicOp`;
+  `Translation/EmitterContextInsts.cs`, `AtomicAddF32`;
+  `Translation/Optimizations/GlobalToStorage.cs`, `TryGenerateStorageOp`;
+  `CodeGen/Spirv/CodeGenContext.cs`, `FloatStorageViews`;
+  `CodeGen/Spirv/Instructions.cs`, `GenerateAtomicAdd`,
+  `GenerateAtomicFloatAdd`, `GetFloatStorageView`: the float add reduction
+  (`RED.F32.FTZ.RN`, and ATOM of the same type) on global memory, which the tree
+  logged ("Invalid reduction type") and dropped, becomes `OpAtomicFAddEXT`
+  (`SPV_EXT_shader_atomic_float_add`), through a float view of the storage
+  buffer at the same set and binding, or through a physical storage buffer
+  pointer for a raw address. The device needs `shaderBufferFloat32AtomicAdd`
+  (`VK_EXT_shader_atomic_float`). 55 programs lost an operation without it.
+- `StructuredIr/ShaderProperties.cs`, `TextureVariants`;
+  `CodeGen/Spirv/CodeGenContext.cs`, `SamplerVariants`;
+  `CodeGen/Spirv/Declarations.cs`, `SamplersToDeclare`, `DeclareSamplers`;
+  `CodeGen/Spirv/Instructions.cs`, `GetSamplerDeclaration`, `GetSamplerType`:
+  a texture pool used with several types (the host binds one pool, set 0
+  binding 0, for all of them) is declared once per type, all aliasing that
+  binding, and each texture operation uses the variable of its own type. With
+  one variable, the last type served every operation, and a 2D sample of a 2D
+  array image lost its layer coordinate (3,629 invalid pixel modules).
+- `CodeGen/Spirv/Instructions.cs`, `GenerateTextureQuerySize`: a size
+  component the declared texture type does not have (component 2 of a 2D
+  texture) is the constant 1, and the translator logs the query, instead of an
+  extract past the end of the size vector (74 invalid modules). The right value
+  comes with the texture's real type (architecture D21).
+- `Instructions/AttributeMap.cs`, `GenerateAttributeStore`: a store to
+  attribute 0x5C, the variable pixel rate shading table index, is dropped on
+  purpose with its own log line, instead of the "not valid" line for unknown
+  offsets: the game enables no shading rate, so the index selects nothing.
+- `PushTextureLayout.cs` (new); `IGpuAccessor.cs`, `QuerySupportBufferSet`,
+  `QueryPushTextureLayout` (default methods: set 0, none);
+  `Translation/ResourceManager.cs`, the constructor;
+  `StructuredIr/ShaderProperties.cs`, `PushTextures`;
+  `CodeGen/Spirv/SamplerDeclaration.cs`, `PushSlot`;
+  `CodeGen/Spirv/CodeGenContext.cs`, `PushTexture*`;
+  `CodeGen/Spirv/Declarations.cs`, `DeclareSamplers`, `DeclarePushTextures`,
+  `DeclareGlobalArray`;
+  `CodeGen/Spirv/Instructions.cs`, `GenerateSampledImageLoad`,
+  `GeneratePushSlotSampledImageLoad`, `LoadPushSlotSampler`, `LoadPushSlot`,
+  `PushSlotIndex`: the descriptor layout `uni` (architecture D13, ticket 23).
+  The host names the support buffer's set, and a texture the host gives a
+  binding in `PushTextureLayout.SlotSet` is read through a push constant slot
+  instead of a descriptor of its own: the slot holds an NVN texture handle,
+  whose texture ID indexes the global image array (one view per image type,
+  sharing the pool's) and whose sampler ID indexes the global sampler array,
+  both clamped to their arrays; element i of an array of textures adds i to
+  both. Without it, every pair of programs claimed the same set 0 bindings
+  for different things in its two stages (spike S2, B3), and 13 percent of
+  pairs needed more than the 32 push descriptors of the reference GPU (B4).
+- `Translation/Optimizations/GlobalToStorage.cs`, `TryGenerateRawStorageOp`
+  and the constants before it: a raw global access (an address traced to no
+  constant buffer) is looked up in a two-level page table (one word per 2 MiB
+  chunk, then the 4 KiB page's 64-bit delta; architecture D15) instead of
+  nxnative's sorted pool table, and a store or an atomic sets its leaf slot's
+  store bit instead of inserting its page in a hash set. The table's device
+  address and span are the first four push constant words, and the table holds
+  the store bits and a miss log that names the address of every miss, a load's
+  too (`RawTableAbi.cs`, mirrored by `runtime/include/oot2/raw_table.h`; no
+  storage buffer is bound, nxnative's sentinel slot 255 is gone).
+  `StorageKind.PushConstant`, `Declarations.DeclarePushConstants` and
+  `Instructions.PushWordPointer`: a load of a word of the push constant block
+  by constant index, one block shared by the raw words and the texture slots.
+  `CodeGen/Spirv/SpirvGenerator.cs`, `Generate` and `CountCallSites`: a raw
+  helper (its name ends with `GlobalToStorage.RawHelperSuffix`) called from 64
+  sites or more is declared `DontInline`. Most raw-access programs call it 253
+  times and the driver inlined every call: the 12-step search made the helper
+  893 SPIR-V instructions and such a module about 240,000 once inlined, 7 to
+  10 s to build on the reference GPU; the walk is 167 instructions, and kept a
+  call the module builds in about 0.5 s. Under 52 sites the call made builds
+  slower, so those helpers are left to inline.

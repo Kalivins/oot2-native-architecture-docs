@@ -1,0 +1,22 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 The oot2-native contributors
+#
+# Refuse a push of any commit that is not authored and committed under the
+# project identity, or that does not descend from the root commit.
+# Enable once per clone:  git config core.hooksPath .githooks
+#                         git config oot2.rootCommit "$(git rev-list --max-parents=0 HEAD)"
+# Never bypass it with --no-verify. git hands the pushed refs over on standard
+# input, so the check is exec'd and keeps it.
+
+root=$(git rev-parse --show-toplevel) || exit 1
+
+for candidate in python3 python "py -3"; do
+    if $candidate -c "import sys; sys.exit(sys.version_info < (3, 9))" >/dev/null 2>&1; then
+        exec $candidate "$root/tools/check_push.py" "$@"
+    fi
+done
+
+echo "pre-push: no usable Python 3.9+ found, so the identity check cannot run." >&2
+echo "Install Python 3 and try again. The push is refused rather than unchecked." >&2
+exit 1

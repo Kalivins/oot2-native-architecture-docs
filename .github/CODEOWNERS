@@ -1,0 +1,10 @@
+# The content guard protects the repository from game material, and a pull
+# request can edit the guard itself. These paths therefore need an owner's review.
+/tools/                 @RealZotto
+/tests/                 @RealZotto
+/.githooks/             @RealZotto
+/.github/               @RealZotto
+/.gitignore             @RealZotto
+/.gitattributes         @RealZotto
+/LICENSE                @RealZotto
+/THIRD_PARTY_NOTICES.md @RealZotto

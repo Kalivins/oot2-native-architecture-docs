@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// The translator's HMMA helper with a cooperative matrix body, for the HMMA cost measurement
+// (tools/hmmacost/hmma_cost.py). The translator turns HMMA.16816 with an f16 accumulator into
+// a call of dmsh_hmma16816_f16 (HelperFunctionManager.GenerateHmma16816F16): every lane stores
+// its A, B and C fragments into its subgroup's 256-word block of scratch shared memory (A
+// row-major, 8 words a row; B transposed, a row of 8 words of k per column; C row-major, 4
+// words a row), the subgroup synchronises, each lane computes its own D words from the block,
+// and the subgroup synchronises again. This kernel keeps that contract and replaces only the
+// middle: one cooperative multiply-add of the 16 x 8 x 16 shape over the block, stored back
+// where C was, which is the smallest change that moves HMMA to VK_KHR_cooperative_matrix
+// (architecture D20b). The program around it is the one hmma_cost.py assembles for the
+// translator: per lane four A fragments, four B fragments and four f16 accumulators read from
+// the input buffer, then N HMMA with the operands perturbed by the same masks, then the
+// accumulators stored. Defines: N, PERTURB (1 or 0), BAD_B_LAYOUT (a wrong load, for the
+// counter-run).
+
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+// Per invocation of the workgroup: 40 words (A 0..15, B 16..23, f16 accumulators 24..31).
+layout(set = 0, binding = 0) readonly buffer In { uint w[]; } in_w;
+// Per invocation of every workgroup: the four accumulators, 8 words.
+layout(set = 0, binding = 1) writeonly buffer Out { uint w[]; } out_w;
+
+// The subgroup's block, in halves: A at 0 (16 rows of 16), B at 256 (8 columns of 16 k),
+// C and D at 384 (16 rows of 8).
+shared float16_t scratch[4 * 512];
+
+void put(uint at, uint word)
+{
+    f16vec2 v = unpackFloat2x16(word);
+    scratch[at] = v.x;
+    scratch[at + 1u] = v.y;
+}
+
+uint get(uint at)
+{
+    return packFloat2x16(f16vec2(scratch[at], scratch[at + 1u]));
+}
+
+// The masks of hmma_cost.py's mask(i, salt): 5 low mantissa bits of both halves, never zero.
+uint mask(uint i, uint salt)
+{
+    uint h = (((i + 1u) * salt) >> 11) & 0x1Fu;
+    h = h == 0u ? 1u : h;
+    return h | (h << 16);
+}
+
+uvec2 hmma(uint base, uint lane, uvec4 a, uvec2 b, uvec2 c)
+{
+    uint g = lane >> 2, t = lane & 3u;
+
+    put(base + 2u * (g * 8u + t), a.x);
+    put(base + 2u * ((g + 8u) * 8u + t), a.y);
+    put(base + 2u * (g * 8u + t + 4u), a.z);
+    put(base + 2u * ((g + 8u) * 8u + t + 4u), a.w);
+    put(base + 2u * (128u + g * 8u + t), b.x);
+    put(base + 2u * (128u + g * 8u + t + 4u), b.y);
+    put(base + 2u * (192u + g * 4u + t), c.x);
+    put(base + 2u * (192u + (g + 8u) * 4u + t), c.y);
+
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
+
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> ma;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 8, gl_MatrixUseB> mb;
+    coopmat<float16_t, gl_ScopeSubgroup, 16, 8, gl_MatrixUseAccumulator> mc;
+    coopMatLoad(ma, scratch, base, 16u, gl_CooperativeMatrixLayoutRowMajor);
+#if BAD_B_LAYOUT
+    coopMatLoad(mb, scratch, base + 256u, 8u, gl_CooperativeMatrixLayoutRowMajor);
+#else
+    coopMatLoad(mb, scratch, base + 256u, 16u, gl_CooperativeMatrixLayoutColumnMajor);
+#endif
+    coopMatLoad(mc, scratch, base + 384u, 8u, gl_CooperativeMatrixLayoutRowMajor);
+    mc = coopMatMulAdd(ma, mb, mc);
+    coopMatStore(mc, scratch, base + 384u, 8u, gl_CooperativeMatrixLayoutRowMajor);
+
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
+
+    uvec2 d = uvec2(get(base + 2u * (192u + g * 4u + t)), get(base + 2u * (192u + (g + 8u) * 4u + t)));
+
+    // The next call overwrites the block: every lane has read it by then.
+    subgroupBarrier();
+    return d;
+}
+
+void main()
+{
+    uint tid = gl_LocalInvocationID.x;
+    uint lane = gl_SubgroupInvocationID;
+    uint base = gl_SubgroupID * 512u;
+    uint w0 = tid * 40u;
+
+    uvec4 a[4];
+    uvec2 b[4];
+    uvec2 c[4];
+
+    [[unroll]] for (uint s = 0u; s < 4u; s++)
+    {
+        a[s] = uvec4(in_w.w[w0 + 4u * s], in_w.w[w0 + 4u * s + 1u], in_w.w[w0 + 4u * s + 2u], in_w.w[w0 + 4u * s + 3u]);
+        b[s] = uvec2(in_w.w[w0 + 16u + 2u * s], in_w.w[w0 + 17u + 2u * s]);
+        c[s] = uvec2(in_w.w[w0 + 24u + 2u * s], in_w.w[w0 + 25u + 2u * s]);
+    }
+
+    [[unroll]] for (uint i = 0u; i < uint(N); i++)
+    {
+        uint s = i & 3u, y = (i >> 2) & 3u;
+#if PERTURB
+        uint ma = mask(i, 0x9E3779B1u), mb = mask(i, 0x85EBCA77u);
+        c[s] = hmma(base, lane, a[s] ^ uvec4(ma), b[y] ^ uvec2(mb), c[s]);
+#else
+        c[s] = hmma(base, lane, a[s], b[y], c[s]);
+#endif
+    }
+
+    uint o = (gl_WorkGroupID.x * 128u + tid) * 8u;
+
+    [[unroll]] for (uint s = 0u; s < 4u; s++)
+    {
+        out_w.w[o + 2u * s] = c[s].x;
+        out_w.w[o + 2u * s + 1u] = c[s].y;
+    }
+}
