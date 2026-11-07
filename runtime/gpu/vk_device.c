@@ -23,6 +23,7 @@
 
 #include "oot2/gpu_vk.h"
 #include "oot2/runtime.h"
+#include "oot2/vk_bindless.h"
 #include "plat.h"
 
 GpuVk gpu_vk;
@@ -415,6 +416,7 @@ void gpu_vk_open(void) {
     gpu_vk_start_timeline(after);
     backing_open(&gpu_vk_backing_ops);
     gpu_vk_mirror_policy();
+    vkb_open();
     g_open = 1;
     plat_mutex_unlock(&g_open_lock);
 }
@@ -425,6 +427,7 @@ void gpu_vk_close(void) {
     plat_mutex_lock(&g_open_lock);
     if (g_open) {
         gpu_sync_finish();
+        vkb_close();
         backing_close();
         gpu_vk_stop_timeline();
         GPU_VK_OK(vkDeviceWaitIdle(gpu_vk.device), "vkDeviceWaitIdle");

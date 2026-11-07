@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// Images of the Vulkan back end (architecture D19, without the uploads and the transcode): what a texture the GPU writes
+// stands on, the sampled views of it that the bindless tables hold, and the texel copies of linear data.
+//
+// One image per (storage, description). A texture whose storage lies in a pool the CPU cannot see (a render target or a
+// GPU-written texture) gets an image bound at its pool offset into the backing map's VRAM extent (oot2/backing.h, the
+// extent is made when the first image over the pool asks for it), so that textures the game aliases over one storage see
+// each other's writes: images of the same shape are one image whose views may differ in format inside the format's
+// compatibility class (a texture rendered as RGBA8 and sampled as RGBA8_SRGB, or written as R32_UINT and read as RGBA8,
+// is one image: MUTABLE_FORMAT, the image in the linear twin of an sRGB format), and images of different shapes over one
+// range alias each other (VK_IMAGE_CREATE_ALIAS_BIT; what one reads of the other's writes is the specification's
+// undefined content unless the parameters match). Every image lives in VK_IMAGE_LAYOUT_GENERAL. An image whose placement
+// is impossible (the storage is not at the alignment the driver asks, or the driver wants more bytes than the game's
+// storage holds, which would overwrite a neighbour) gets memory of its own and is counted as unaliased. Storage the CPU
+// can see (textures the CPU writes) gets no image here: those are the texture arena's (ticket 65), and the entry shows
+// the table's placeholder until then. A format with no image (the formats of oot2/vk_format.h that need an upload
+// expansion or a transcode, or that the device lacks) is counted and logged once per format.
+//
+// Lifetime. A view holds its image; an image is destroyed when no view holds it and the newest submission that used it
+// is done, after its pool was finalized (vkb_image_pool_gone) or its texture was released with no view on it. Submissions
+// stamp the pools that hold images (vkb_image_stamp_pools), so that pool_fini waits for what could read them.
+#pragma once
+#include <stdint.h>
+
+#include "volk.h"
+
+#include "oot2/bindless.h"
+
+typedef struct VkbImage VkbImage;
+
+// The image standing on texture t's storage, made when none is, or NULL when this layer makes none for it (see above).
+VkbImage *vkb_image_get(const tex_t *t);
+VkImage vkb_image_handle(const VkbImage *i);
+VkFormat vkb_image_format(const VkbImage *i);
+int vkb_image_placed(const VkbImage *i);      // 1 when it is bound into its pool's extent
+// The submission that will signal `value` uses the image: its pool and the image itself wait for it.
+void vkb_image_use(VkbImage *i, uint64_t value);
+
+// The sampled view of texture t seen through v as view type `type` (BindlessOps.view_make): a VkImageView wrapped with
+// its image; NULL when there is none. Formats, swizzles, aspect and ranges follow the texture's description composed
+// with the view's.
+void *vkb_view_make(const tex_t *t, const view_t *v, int type);
+void vkb_view_free(void *view);
+VkImageView vkb_view_handle(const void *view);
+void vkb_image_release(const tex_t *t);       // BindlessOps.texture_release: the serial's image may go when nothing holds it
+
+// Record into cmd the barrier that brings every image made since the last call from UNDEFINED to GENERAL.
+void vkb_image_flush(VkCommandBuffer cmd);
+// Stamp every pool that holds an image with value (a resolve per pool, or per image outside the front end's pools).
+void vkb_image_stamp_pools(uint64_t value);
+// The pool [lo, hi) is finalized: the images over it can no longer be reached by a new view.
+void vkb_image_pool_gone(uint64_t lo, uint64_t hi);
+// Destroy the images that can go.
+void vkb_image_reap(void);
+// Every image (no submission in flight).
+void vkb_image_close(void);
+
+// ---- texel copies of linear data (gfx.h read_texels and write_texels): row is the bytes per row of the host data and
+// img the bytes per two-dimensional image of the region; a copy goes through a staging buffer and waits for it.
+void vkb_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row, uint64_t img);
+void vkb_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, uint64_t row,
+                      uint64_t img);
+
+typedef struct VkbImageStats {
+    uint64_t made, live, placed, unaliased, destroyed;
+    uint64_t skipped_cpu, skipped_format;      // textures with no image: CPU-visible storage; no format
+    uint64_t views_made, views_live;
+    uint64_t transitions, texel_reads, texel_writes;
+} VkbImageStats;
+void vkb_image_stats(VkbImageStats *out);

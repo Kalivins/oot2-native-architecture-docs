@@ -28,8 +28,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "oot2/bindless.h"
 #include "oot2/gpu_vk.h"
 #include "oot2/runtime.h"
+#include "oot2/vk_image.h"
 #include "plat.h"
 
 // ---------- the timeline's source: the device's timeline semaphore
@@ -209,7 +211,14 @@ void gpu_check_recording(uint64_t value, int index, uint64_t handle) {
 // ---------- the back-end table
 // Pools are the backing map's (oot2/backing.h): pool_fini returns once no submission in flight used the pool.
 static int vk_pool_init(pool_t *p) { return backing_pool_init(p); }
-static void vk_pool_fini(pool_t *p) { backing_pool_fini(p); }
+// The entries over the pool's storage show the placeholder and its images can no longer be reached, before the pool's
+// extent goes back to its block (the images are destroyed once no submission can read them).
+static void vk_pool_fini(pool_t *p) {
+    uint64_t lo = (uint64_t)(uintptr_t)p->mem;
+    bindless_storage_gone(lo, lo + p->size);
+    vkb_image_pool_gone(lo, lo + p->size);
+    backing_pool_fini(p);
+}
 static int vk_pool_map_virtual(pool_t *v, int n, const void *requests) {
     return backing_pool_map_virtual(v, n, requests);
 }
@@ -233,18 +242,13 @@ static void vk_finish(void) { gpu_sync_finish(); }
 __attribute__((noreturn)) static void not_built(const char *what) {
     rt_fatal("gfx: vulkan: %s is not built yet in the Vulkan back end", what);
 }
+// The bindless tables (oot2/bindless.h): a registration changes one entry of its pool's shadow table and appends one
+// record to the change log; the copies of set 0 take it when a submission does.
 static void vk_texture_register(const dpool_ref *pool, int id, const tex_t *t, const view_t *v) {
-    (void)pool;
-    (void)id;
-    (void)t;
-    (void)v;
-    not_built("a texture registration (texture_register)");
+    bindless_texture_register(pool, id, t, v);
 }
 static void vk_sampler_register(const dpool_ref *pool, int id, const samp_par *s) {
-    (void)pool;
-    (void)id;
-    (void)s;
-    not_built("a sampler registration (sampler_register)");
+    bindless_sampler_register(pool, id, s);
 }
 static void vk_present(const tex_t *t, const int crop[4]) {
     (void)t;
@@ -253,26 +257,16 @@ static void vk_present(const tex_t *t, const int crop[4]) {
 }
 static void vk_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row,
                            uint64_t img) {
-    (void)t;
-    (void)v;
-    (void)r;
-    (void)dst;
-    (void)row;
-    (void)img;
-    not_built("a texel read (read_texels)");
+    vkb_read_texels(t, v, r, dst, row, img);
 }
 static void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src,
                             uint64_t row, uint64_t img) {
-    (void)t;
-    (void)v;
-    (void)r;
-    (void)src;
-    (void)row;
-    (void)img;
-    not_built("a texel write (write_texels)");
+    vkb_write_texels(t, v, r, src, row, img);
 }
-// Nothing is kept for textures or programs yet: these have nothing to do.
-static void vk_texture_release(const tex_t *t) { (void)t; }
+// The serial's host objects may go: the image when nothing holds it. The entry at its ID stays (oot2/bindless.h).
+static void vk_texture_release(const tex_t *t) { bindless_texture_release(t); }
+// Nothing is kept for programs, no copy of pool storage exists and the GPU writes nothing the CPU reads: these have
+// nothing to do yet.
 static void vk_program_release(const prog_t *p) { (void)p; }
 // The CPU's view of mirrored pool storage (oot2/backing.h, Mirrors).
 static void vk_guest_written(uint64_t addr, uint64_t size) { backing_guest_written(addr, size); }

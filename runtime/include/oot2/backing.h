@@ -9,8 +9,10 @@
 //
 // Pools are named by their GPU range, as gfx.h names them. A page of a pool is, from the first bind that reaches it:
 //   extent   VRAM. A pool the CPU cannot see (CPU_NO_ACCESS, physical) gets one extent over the whole pool at its first
-//            bind, so no bind inside the pool spans two extents; a pool no bind reaches (render targets, which are
-//            images) gets none. Up to BACKING_BLOCK bytes it is a part of a VRAM block; past that, a block of its own.
+//            bind, so no bind inside the pool spans two extents; a pool no bind and no image reaches gets none.
+//            An image placed over a pool's storage (render targets and GPU-written textures, vk_image.c) resolves
+//            the same way, so it makes the extent. Up to BACKING_BLOCK bytes it is a part of a VRAM block; past that,
+//            a block of its own.
 //   import   host memory imported over committed guest pages: a pool the CPU can see whose mirror the rule refused.
 //   mirror   VRAM kept current from the guest's pages, in the place an import would take (Mirrors below).
 //   none     before that first bind, and for pages of a pool the CPU can see that no import or mirror covers.
@@ -114,6 +116,7 @@ typedef struct BackingMem {
     uint64_t memory;    // the allocation (a VkDeviceMemory handle on a device); the ops' own
     uint64_t address;   // the buffer's device address
     uint64_t size;
+    uint32_t type;      // the allocation's memory type index (a block's, for an image placed in it)
 } BackingMem;
 // A copy between host memory and backing memory: size bytes at offset in mem, and host's bytes (an upload) or the
 // place they are read from (a readback).
@@ -163,6 +166,8 @@ int backing_pool_map_virtual(const pool_t *v, int n, const nvn_mapping_t *reques
 // one of a mirror brings it current for the submission (Mirrors above). Value 0 only reads the map.
 typedef struct BackingRef {
     uint64_t buffer, offset, address;
+    uint64_t memory;   // the allocation behind the buffer: an image placed at `offset` binds to it (vk_image.c)
+    uint32_t type;     // its memory type index
     int kind;   // BACKING_EXTENT, BACKING_IMPORT or BACKING_MIRROR
 } BackingRef;
 void backing_resolve(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out);

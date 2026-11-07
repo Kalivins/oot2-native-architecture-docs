@@ -17,7 +17,10 @@
 uint32_t vkp_set0_bindings(VkDescriptorSetLayoutBinding out[2], VkDescriptorBindingFlags flags[2]) {
     out[0] = (VkDescriptorSetLayoutBinding){0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VKP_GLOBAL_IMAGES, ALL_STAGES, NULL};
     out[1] = (VkDescriptorSetLayoutBinding){1, VK_DESCRIPTOR_TYPE_SAMPLER, VKP_GLOBAL_SAMPLERS, ALL_STAGES, NULL};
-    flags[0] = flags[1] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    // Update-unused-while-pending: the bindless tables write the slot of a second view into a copy that earlier
+    // submissions still read, which none of their handles names (oot2/vk_bindless.h).
+    flags[0] = flags[1] = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
+                          VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
     return 2;
 }
 

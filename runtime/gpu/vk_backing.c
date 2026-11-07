@@ -59,7 +59,8 @@ static int finish(VkBuffer buf, const VkMemoryAllocateInfo *alloc, uint64_t size
     GPU_VK_OK(vkBindBufferMemory(gpu_vk.device, buf, mem, 0), "vkBindBufferMemory (a backing)");
     VkBufferDeviceAddressInfo di = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buf};
     *out = (BackingMem){.buffer = (uint64_t)(uintptr_t)buf, .memory = (uint64_t)(uintptr_t)mem,
-                        .address = vkGetBufferDeviceAddress(gpu_vk.device, &di), .size = size};
+                        .address = vkGetBufferDeviceAddress(gpu_vk.device, &di), .size = size,
+                        .type = alloc->memoryTypeIndex};
     return 1;
 }
 

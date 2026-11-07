@@ -105,7 +105,11 @@
       (e->features.shaderStorageImageReadWithoutFormat = e->features.shaderStorageImageWriteWithoutFormat = VK_TRUE)) \
     X(cube_array_images, "cube array images", f->features.imageCubeArray, (e->features.imageCubeArray = VK_TRUE))     \
     X(storage_image_array_indexing, "non-uniform indexing of storage image arrays",                                   \
-      f->f12.shaderStorageImageArrayNonUniformIndexing, (e->f12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE))
+      f->f12.shaderStorageImageArrayNonUniformIndexing, (e->f12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE)) \
+    X(sampler_features, "anisotropic filtering, mirror clamp to edge and min and max reduction in samplers",          \
+      f->features.samplerAnisotropy && f->f12.samplerMirrorClampToEdge && f->f12.samplerFilterMinmax,                \
+      (e->features.samplerAnisotropy = VK_TRUE, e->f12.samplerMirrorClampToEdge = VK_TRUE,                            \
+       e->f12.samplerFilterMinmax = VK_TRUE))
 
 // The device extensions the items read, E(id, name), and the ones they depend on below Vulkan 1.4 (pipeline_library
 // for graphics_pipeline_library, maintenance5 for pipeline_binary). The device the back end creates enables every one

@@ -812,6 +812,8 @@ static void fill(BackingRef *out, const Backing *b, uint64_t addr) {
     out->buffer = b->mem.buffer;
     out->offset = b->offset + (addr - b->gpu_lo);
     out->address = b->mem.address + out->offset;
+    out->memory = b->mem.memory;
+    out->type = b->mem.type;
     out->kind = b->kind;
 }
 

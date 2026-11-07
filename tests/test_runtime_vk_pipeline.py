@@ -218,9 +218,9 @@ class TablesTest(unittest.TestCase):
         heap = int(re.search(r"DefaultHeapImages = (\d+)", JOB_CS.read_text(encoding="utf-8")).group(1))
         self.assertEqual([int(rows[0][1]), int(rows[0][2]), int(rows[0][3])], [0, VK_SAMPLED_IMAGE, heap])
         self.assertEqual([int(rows[1][1]), int(rows[1][2]), int(rows[1][3])], [1, VK_SAMPLER, 4096])
-        for r in rows:   # every stage, update-after-bind and partially bound
+        for r in rows:   # every stage, update-after-bind, update-unused-while-pending (ticket 61) and partially bound
             self.assertEqual(int(r[4], 16), GFX_STAGES | STAGE_COMPUTE)
-            self.assertEqual(int(r[5], 16), 0x1 | 0x4)   # UPDATE_AFTER_BIND (1) | PARTIALLY_BOUND (4)
+            self.assertEqual(int(r[5], 16), 0x1 | 0x2 | 0x4)   # UPDATE_AFTER_BIND (1) | UPDATE_UNUSED_WHILE_PENDING (2) | PARTIALLY_BOUND (4)
 
     def test_the_graphics_push_set_holds_the_translators_slots(self) -> None:
         b = self.set1("graphics")
