@@ -1911,7 +1911,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             SpvInstruction pointer = GetStoragePointer(context, operation, out AggregateType varType);
 
             // nxnative: a load or store through a physical storage buffer pointer must state its alignment (a 32-bit word)
-            bool physical = operation.StorageKind == StorageKind.GlobalMemory;
+            bool physical = operation.StorageKind is StorageKind.GlobalMemory or StorageKind.DeviceMemory;
 
             if (isStore)
             {
@@ -1948,9 +1948,11 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
 
             switch (storageKind)
             {
+                case StorageKind.DeviceMemory:
                 case StorageKind.GlobalMemory:
                     // nxnative: an address traced to no storage buffer, already moved to the host's GPU address (GlobalToStorage.TryGenerateRawStorageOp):
-                    // a physical storage buffer pointer to its 32-bit word, from the address's low and high words
+                    // a physical storage buffer pointer to its 32-bit word, from the address's low and high words. oot2-native: DeviceMemory is the same
+                    // access for an address the host gave (the draw's first task, MeshAbi), which no pass moves
                     SpvInstruction addressWords = context.CompositeConstruct(
                         context.TypeVector(context.TypeU32(), 2),
                         context.Get(AggregateType.U32, operation.GetSource(0)),

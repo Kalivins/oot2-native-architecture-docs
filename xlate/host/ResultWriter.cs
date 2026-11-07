@@ -173,7 +173,7 @@ internal static class ResultWriter
                 w.WriteNull("mesh");
             }
 
-            WriteMeshStage(w, job);
+            WriteMeshStage(w, job, info);
 
             if (job.OutputsVertex != null)
             {
@@ -412,7 +412,8 @@ internal static class ResultWriter
         w.WriteNumber("push_constant_bytes", UniLayout.PushConstantBytes);
         w.WriteNumber("texture_slots_offset", UniLayout.SlotsOffset);
         WriteRange(w, "texture_slots", layout.Slots);
-        // Push constant bytes kept for the draw's first task (task and mesh), read by no module yet
+        // Push constant bytes kept for the draw's first task (task and mesh): words 6 and 7 are the device address of the word that holds it
+        // (MeshAbi), read by a task and by a mesh stage without a task (mesh_stage.first_task)
         WriteRange(w, "first_task_bytes", layout.FirstTask);
         w.WriteBoolean("fits", layout.Overflow.Count == 0);
         WriteStringArray(w, "overflow", layout.Overflow, s => s);
@@ -477,7 +478,7 @@ internal static class ResultWriter
     // for a mesh program without a task); output_bytes is Vulkan's formula for the mesh outputs (every location four scalars, counts
     // rounded to 32); shared_bytes the staging in workgroup memory; the limits are those the program was checked against.
     // requires_subgroup_32 is a pipeline creation flag the back end sets for these stages only (research 13 recommendation 5)
-    private static void WriteMeshStage(Utf8JsonWriter w, Job job)
+    private static void WriteMeshStage(Utf8JsonWriter w, Job job, ShaderProgramInfo info)
     {
         if (job.MeshStage is not MeshStageInfo mesh)
         {
@@ -502,6 +503,17 @@ internal static class ResultWriter
         w.WriteNumber("primitive_components", mesh.PrimitiveLines.Count);
         w.WriteNumber("shared_bytes", sizes.SharedBytes);
         w.WriteBoolean("requires_subgroup_32", true);
+
+        // The draw's first task (MeshAbi): carried as the device address of one 32-bit word, in the push constants at push_offset; read is whether this module
+        // adds it to its workgroup number (a task, or a mesh stage without a task, that reads the number), in which case it also carries physical addressing
+        w.WriteStartObject("first_task");
+        w.WriteBoolean("read", info.UsesFirstTask);
+        w.WriteString("form", "device_address");
+        w.WriteNumber("push_offset", MeshAbi.FirstTaskPushOffset);
+        w.WriteNumber("address_bytes", MeshAbi.FirstTaskAddressBytes);
+        w.WriteNumber("word_bytes", MeshAbi.FirstTaskWordBytes);
+        w.WriteEndObject();
+
         w.WriteStartObject("limits");
 
         foreach (string name in MeshLimits.Names)

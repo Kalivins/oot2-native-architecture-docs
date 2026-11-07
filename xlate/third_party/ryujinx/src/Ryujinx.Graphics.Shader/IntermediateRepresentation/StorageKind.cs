@@ -19,6 +19,7 @@ namespace Ryujinx.Graphics.Shader.IntermediateRepresentation
         GlobalMemoryU8, // TODO: Remove this and store type as a field on the Operation class itself.
         GlobalMemoryU16, // TODO: Remove this and store type as a field on the Operation class itself.
         PushConstant, // oot2-native: a 32-bit word of the push constant block, by constant word index (RawTableAbi, PushTextureLayout)
+        DeviceMemory, // oot2-native: a 32-bit word at a device address (low word, high word), a physical storage buffer access that GlobalToStorage never routes through the page table (MeshAbi)
     }
 
     static class StorageKindExtensions

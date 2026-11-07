@@ -143,8 +143,8 @@ namespace Ryujinx.Graphics.Shader.Instructions
 
         // oot2-native, Lichii's model (CodeGen/Spirv/MeshEmission.cs): ISBERD in a task or mesh program, [Ra + offset] a byte address in the region. Mode 0x78: the workgroup's
         // number; 0x38: a word of the payload the task wrote, whose word 0 is the workgroup's number; 0xb8: a word of the payload this task writes, read back (from nxnative pull
-        // request 1300, commit 06f47f57, MIT: Ocarina of Time's agl task shader stores a word of its payload and reads it back). The draw's first task is not added to the workgroup's
-        // number: it is the mesh bindings ticket's, and this is the one place it goes
+        // request 1300, commit 06f47f57, MIT: Ocarina of Time's agl task shader stores a word of its payload and reads it back). The draw's first task (MeshAbi) is added to the
+        // workgroup's number in a task, or in a mesh stage without a task: this is the one place it goes
         private static void EmitMeshStageRead(EmitterContext context, AmpereOp x, MeshStageInfo mesh)
         {
             int mode = x.Bits(72, 80);
@@ -156,6 +156,14 @@ namespace Ryujinx.Graphics.Shader.Instructions
             }
 
             Operand workgroup = context.Load(StorageKind.Input, IoVariable.CtaId, null, Const(0));
+
+            // The draw's first task counts in the number of a task workgroup, and in a mesh workgroup's when there is no task stage: a mesh
+            // workgroup under a task is numbered within its task's launch
+            if (mode != 0xb8 && (task || !mesh.HasTask))
+            {
+                workgroup = context.IAdd(workgroup, FirstTask(context));
+            }
+
             Operand value = workgroup;
 
             if (mode == 0xb8 || (mode == 0x38 && !task))
@@ -173,6 +181,19 @@ namespace Ryujinx.Graphics.Shader.Instructions
             {
                 context.Copy(Register(x.Rd, RegisterType.Gpr), value);
             }
+        }
+
+        // oot2-native: the draw's first task, one 32-bit word at the device address in push constant words 6 and 7 (MeshAbi). A direct draw points the address at a word it
+        // wrote, an indirect draw at the word its conversion pass wrote beside the record, so one module serves both forms; the access is a plain load that no pass rewrites
+        // (DeviceMemory), not a guest access through the page table
+        private static Operand FirstTask(EmitterContext context)
+        {
+            context.ResourceManager.Properties.UsesFirstTask = true;
+
+            Operand low = context.Load(StorageKind.PushConstant, MeshAbi.FirstTaskPushWord);
+            Operand high = context.Load(StorageKind.PushConstant, MeshAbi.FirstTaskPushWord + 1);
+
+            return context.Load(StorageKind.DeviceMemory, low, high);
         }
 
         // The word of a stage memory region that a byte address names, held inside the region (Lichii clamps every index)

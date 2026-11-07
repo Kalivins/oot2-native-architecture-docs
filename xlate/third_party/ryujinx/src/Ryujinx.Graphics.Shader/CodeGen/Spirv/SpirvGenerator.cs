@@ -85,7 +85,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             context.AddCapability(Capability.Shader);
 
             // nxnative: raw global memory goes through physical storage buffer pointers (ShaderProperties.UsesPhysicalPointers), which take 64-bit physical addressing
-            if (context.Properties.UsesPhysicalPointers)
+            // oot2-native: the draw's first task is read by device address too (MeshAbi)
+            if (context.Properties.UsesPhysicalPointers || context.Properties.UsesFirstTask)
             {
                 context.AddCapability(Capability.PhysicalStorageBufferAddresses);
                 context.AddCapability(Capability.Int64);

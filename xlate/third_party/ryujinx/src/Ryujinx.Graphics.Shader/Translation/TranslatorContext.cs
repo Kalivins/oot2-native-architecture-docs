@@ -364,6 +364,7 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 UsesRawTable = resourceManager.Properties.UsesRawTable,
                 RawStores = resourceManager.Properties.RawStores,
+                UsesFirstTask = resourceManager.Properties.UsesFirstTask,
             };
 
             HostCapabilities hostCapabilities = new HostCapabilities(

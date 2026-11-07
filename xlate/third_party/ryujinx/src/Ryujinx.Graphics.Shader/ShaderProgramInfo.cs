@@ -25,6 +25,9 @@ namespace Ryujinx.Graphics.Shader
         public bool UsesRawTable { get; init; }
         public bool RawStores { get; init; }
 
+        // oot2-native: a task, or a mesh stage without a task, reads the draw's first task by device address (push constant words 6 and 7, MeshAbi)
+        public bool UsesFirstTask { get; init; }
+
         public ShaderProgramInfo(
             BufferDescriptor[] cBuffers,
             BufferDescriptor[] sBuffers,

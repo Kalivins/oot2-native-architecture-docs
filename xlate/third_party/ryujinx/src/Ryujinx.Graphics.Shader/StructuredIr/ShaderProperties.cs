@@ -32,6 +32,9 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
         public bool UsesRawTable { get; set; }
         public bool RawStores { get; set; }
 
+        // oot2-native: the module adds the draw's first task to the workgroup number it reads, from the word at the device address in push constant words 6 and 7 (MeshAbi)
+        public bool UsesFirstTask { get; set; }
+
         // oot2-native: textures read through push constant slots (IGpuAccessor.QueryPushTextureLayout), or null
         public PushTextureLayout PushTextures { get; set; }
 

@@ -26,8 +26,13 @@ OP_TYPE_ARRAY, OP_TYPE_POINTER, OP_CONSTANT, OP_FUNCTION, OP_FUNCTION_END = 28, 
 OP_VARIABLE, OP_LOAD, OP_STORE, OP_ACCESS_CHAIN, OP_DECORATE, OP_RETURN = 59, 61, 62, 65, 71, 253
 OP_SELECT, OP_CONTROL_BARRIER = 169, 224
 OP_EMIT_MESH_TASKS, OP_SET_MESH_OUTPUTS = 5294, 5295
+OP_MEMORY_MODEL, OP_COMPOSITE_CONSTRUCT, OP_COMPOSITE_EXTRACT, OP_CONVERT_U_TO_PTR, OP_BITCAST, OP_IADD = 14, 80, 81, 120, 124, 128
+OP_FUNCTION_CALL = 57
 
 CAPABILITY_MESH_SHADING = 5283
+CAPABILITY_INT64, CAPABILITY_PHYSICAL_STORAGE = 11, 5347
+ADDRESSING_PHYSICAL_STORAGE_64, STORAGE_PUSH_CONSTANT, STORAGE_PHYSICAL, STORAGE_FUNCTION = 5348, 9, 5349, 7
+BUILTIN_WORKGROUP_ID, MEMORY_ACCESS_ALIGNED = 26, 2
 MODEL_TASK, MODEL_MESH = 5364, 5365
 STORAGE_OUTPUT, STORAGE_PAYLOAD = 3, 5402
 DECORATION_BUILTIN, DECORATION_LOCATION, DECORATION_COMPONENT, DECORATION_PER_PRIMITIVE = 11, 30, 31, 5271
@@ -79,13 +84,24 @@ class Module:
         self.pointers = {ops[0]: (ops[1], ops[2]) for op, ops in self.insts if op == OP_TYPE_POINTER}
         self.arrays = {ops[0]: (ops[1], ops[2]) for op, ops in self.insts if op == OP_TYPE_ARRAY}
         # What defines a result id, for the instructions whose result is the second operand
-        self.defs = {ops[1]: (op, ops) for op, ops in self.insts if op in (OP_CONSTANT, OP_VARIABLE, OP_LOAD, OP_ACCESS_CHAIN, OP_SELECT)}
+        self.defs = {ops[1]: (op, ops) for op, ops in self.insts
+                     if op in (OP_CONSTANT, OP_VARIABLE, OP_LOAD, OP_ACCESS_CHAIN, OP_SELECT, OP_COMPOSITE_CONSTRUCT, OP_COMPOSITE_EXTRACT,
+                               OP_CONVERT_U_TO_PTR, OP_BITCAST, OP_IADD)}
         first = next(n for n, (op, _) in enumerate(self.insts) if op == OP_FUNCTION)
         # A global variable: before the first function; (result type, id, storage class)
         self.variables = {ops[1]: (ops[0], ops[2]) for op, ops in self.insts[:first] if op == OP_VARIABLE}
 
     def ops(self, code: int) -> list[list[int]]:
         return [ops for op, ops in self.insts if op == code]
+
+    def local_stores(self) -> dict[int, int]:
+        """The value stored to each function-local variable that is stored to exactly once: the generator keeps the program's temporaries there."""
+        local = {ops[1] for op, ops in self.insts if op == OP_VARIABLE and ops[2] == STORAGE_FUNCTION}
+        stored: dict[int, list[int]] = {}
+        for op, ops in self.insts:
+            if op == OP_STORE and ops[0] in local:
+                stored.setdefault(ops[0], []).append(ops[1])
+        return {pointer: values[0] for pointer, values in stored.items() if len(values) == 1}
 
     @staticmethod
     def text(words: list[int]) -> tuple[str, int]:
@@ -400,3 +416,126 @@ class MeshDescriptionTest(MeshHarness):
         res = json.loads((self.out / "c1.res.json").read_text(encoding="utf-8"))
         self.assertIsNone(res["mesh_stage"])
         self.assertEqual(res["exec_model"], "GLCompute")
+
+
+# A task program that reads its workgroup number (ISBERD 0x78) and stores it as payload word 4; a mesh program that reads it and
+# writes it to the first component of vertex 0. A mesh program under a task reads the payload word the task wrote.
+TASK_NUMBER = [isberd(0x78, 2, 0), isbewr(0xB8, 0x10, 2), mov_cbuf(3, 3, 0x10), isbewr(0xB8, 4, 3), EXIT]
+MESH_NUMBER = [isberd(0x78, 4, 0), isbewr(0xF8, 0, 4), mov_cbuf(5, 3, 0x14), isbewr(0x88, 3, 5), EXIT]
+
+
+class FirstTaskTest(MeshHarness):
+    """The draw's first task (ticket 72): the word at the device address in push constant words 6 and 7, added to the workgroup number of a
+    task, or of a mesh stage that has no task. One mechanism for the direct and the indirect draw: the module only knows an address."""
+
+    def first_task(self, module: Module) -> tuple[int, list[int]]:
+        """The one load that reads the first task, as (its result id, the push words of its address): found by structure, from the load through
+        a physical storage buffer pointer back to the two push constant words that make the address."""
+        (push,) = module.variables_in(STORAGE_PUSH_CONSTANT)
+        found = []
+        for op, ops in module.insts:
+            if op != OP_LOAD or ops[2] not in module.defs:
+                continue
+            kind, pointer = module.defs[ops[2]]
+            if kind != OP_CONVERT_U_TO_PTR:
+                continue
+            self.assertEqual(module.pointers[pointer[0]][0], STORAGE_PHYSICAL)
+            self.assertEqual(ops[3:5], [MEMORY_ACCESS_ALIGNED, 4], "a physical load states its alignment")
+            kind, pair = self.value(module, pointer[2])
+            self.assertEqual(kind, OP_COMPOSITE_CONSTRUCT)
+            words = []
+            for part in pair[2:]:
+                kind, load = self.value(module, part)
+                self.assertEqual(kind, OP_LOAD)
+                kind, chain = module.defs[load[2]]
+                self.assertEqual((kind, chain[2]), (OP_ACCESS_CHAIN, push))
+                member, vector, component = (module.constants[i] for i in chain[3:])
+                self.assertEqual(member, 0)
+                words.append(4 * vector + component)
+            found.append((ops[1], words))
+        self.assertEqual(len(found), 1, "one load of the first task per ISBERD of the workgroup number")
+        return found[0]
+
+    @staticmethod
+    def value(module: Module, ident: int) -> tuple[int, list[int]]:
+        """The instruction that made a value, through bitcasts and the function-local variables the generator keeps its temporaries in."""
+        stores = module.local_stores()
+        while True:
+            if ident not in module.defs:
+                return 0, [0, ident]            # made by an instruction this reader does not follow
+            kind, ops = module.defs[ident]
+            if kind == OP_BITCAST:
+                ident = ops[2]
+            elif kind == OP_LOAD and ops[2] in stores:
+                ident = stores[ops[2]]
+            else:
+                return kind, ops
+
+    def adds_to_workgroup_number(self, module: Module, first: int) -> None:
+        function = module.entry()[1]
+        sums = []
+        for op, ops in module.body(function):
+            if op == OP_IADD:
+                terms = [self.value(module, ops[2]), self.value(module, ops[3])]
+                if first in [ops_[1] for _, ops_ in terms]:
+                    sums.append(terms)
+        self.assertEqual(len(sums), 1)
+        (kind, ops), = [t for t in sums[0] if t[1][1] != first]
+        self.assertEqual(kind, OP_LOAD)
+        kind, chain = module.defs[ops[2]]
+        self.assertEqual(module.decorations(chain[2]).get(DECORATION_BUILTIN), [BUILTIN_WORKGROUP_ID], "the other term is the workgroup id")
+
+    def physical(self, module: Module) -> bool:
+        return CAPABILITY_PHYSICAL_STORAGE in module.capabilities()
+
+    def test_a_task_adds_the_first_task_to_its_workgroup_number(self):
+        module, res = self.translate(self.job("f1", "ts", TASK_NUMBER))
+        first, words = self.first_task(module)
+        self.assertEqual(words, [6, 7])
+        self.adds_to_workgroup_number(module, first)
+        self.assertEqual(module.ops(OP_MEMORY_MODEL)[0][0], ADDRESSING_PHYSICAL_STORAGE_64)
+        self.assertLessEqual({CAPABILITY_PHYSICAL_STORAGE, CAPABILITY_INT64}, module.capabilities())
+        self.assertIn("SPV_KHR_physical_storage_buffer", module.extensions())
+        # Not a guest access: no helper function, no page table
+        self.assertEqual([op for op, _ in module.body(module.entry()[1]) if op == OP_FUNCTION_CALL], [])
+        self.assertFalse(res["raw_access"]["page_table"])
+        self.assertTrue(res["raw_access"]["physical_pointers"])
+
+    def test_a_mesh_without_a_task_adds_it_too(self):
+        module, res = self.translate(self.job("f2", "ms", MESH_NUMBER, payload=8, max_vertices=3, max_primitives=1, has_task=False,
+                                              vertex=POSITION))
+        first, words = self.first_task(module)
+        self.assertEqual(words, [6, 7])
+        self.adds_to_workgroup_number(module, first)
+        self.assertTrue(res["mesh_stage"]["first_task"]["read"])
+
+    def test_a_mesh_under_a_task_adds_nothing(self):
+        # Its number is within its task's launch; the task has the first task
+        module, res = self.translate(self.job("f3", "ms", MESH_NUMBER, payload=8, max_vertices=3, max_primitives=1, has_task=True,
+                                              vertex=POSITION))
+        self.assertFalse(self.physical(module))
+        self.assertEqual(module.variables_in(STORAGE_PUSH_CONSTANT), [])
+        self.assertFalse(res["mesh_stage"]["first_task"]["read"])
+        self.assertEqual(module.ops(OP_MEMORY_MODEL)[0][0], 0)       # Logical addressing, as before
+
+    def test_a_program_that_never_reads_its_number_carries_no_physical_addressing(self):
+        module, res = self.translate(self.job("f4", "ts", TASK))
+        self.assertFalse(self.physical(module))
+        self.assertFalse(res["raw_access"]["physical_pointers"])
+        self.assertFalse(res["mesh_stage"]["first_task"]["read"])
+
+    def test_a_task_that_reads_its_own_payload_back_does_not_read_the_first_task(self):
+        code = [isbewr(0xB8, 0x10, 255), isberd(0xB8, 4, 0x10), isbewr(0xB8, 0x14, 4), EXIT]
+        module, res = self.translate(self.job("f5", "ts", code))
+        self.assertFalse(self.physical(module))
+        self.assertFalse(res["mesh_stage"]["first_task"]["read"])
+
+    def test_the_description_names_where_the_first_task_goes(self):
+        _, res = self.translate(self.job("f6", "ts", TASK_NUMBER))
+        self.assertEqual(res["mesh_stage"]["first_task"], {"read": True, "form": "device_address", "push_offset": 24,
+                                                           "address_bytes": 8, "word_bytes": 4})
+        # Inside the 12 bytes the uni layout keeps for it, and clear of the page table words
+        first, length = res["layout"]["first_task_bytes"]
+        self.assertEqual((first, length), (24, 12))
+        self.assertLessEqual(res["mesh_stage"]["first_task"]["push_offset"] + res["mesh_stage"]["first_task"]["address_bytes"], first + length)
+        self.assertGreaterEqual(res["mesh_stage"]["first_task"]["push_offset"], res["raw_access"]["push_offset"] + res["raw_access"]["push_bytes"])

@@ -291,7 +291,7 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
         {
             PushTextureLayout push = context.Properties.PushTextures;
 
-            if (context.PushTextureBlock != null || (!context.Properties.UsesRawTable && !PushSlotsUsed(context)))
+            if (context.PushTextureBlock != null || (!context.Properties.UsesRawTable && !context.Properties.UsesFirstTask && !PushSlotsUsed(context)))
             {
                 return;
             }
