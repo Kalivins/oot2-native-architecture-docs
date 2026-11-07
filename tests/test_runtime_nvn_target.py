@@ -149,7 +149,7 @@ class TargetTest(unittest.TestCase):
         self.assertEqual(after, before)
 
     # ---- identity with the acquire gate where the target is a whole number of ticks
-    def test_n60_is_ticket_88s_behaviour_tick_for_tick_at_interval_1(self) -> None:
+    def test_n60_is_the_acquire_gates_behaviour_tick_for_tick_at_interval_1(self) -> None:
         target = self.digests(self.hour(60, 1, 1, WAIT_PRESENT, TEN_MINUTES, 60))
         none = self.digests(self.hour(60, 1, 1, WAIT_PRESENT, TEN_MINUTES, None))
         self.assertEqual(target, none)

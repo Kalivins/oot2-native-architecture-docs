@@ -235,7 +235,7 @@ class DeviceTest(RecorderBase):
         self.assertNotIn("ok dev_third", done.stdout)
 
     @unittest.skipUnless(os.environ.get("OOT2_TIMING"), "a timing run needs the machine alone: set OOT2_TIMING=1")
-    def test_timing_of_research_20_section_e(self) -> None:
+    def test_timing_of_the_pipeline_cost_study(self) -> None:
         for label, env in (("breadcrumbs on", {}), ("breadcrumbs off", {"OOT2_VK_FAULT_REPORT": "off"})):
             done = self.run_case("-O2", "dev_timing", self.shaders, env=env, timeout=600)
             self.assertEqual(done.returncode, 0, done.stdout + done.stderr)

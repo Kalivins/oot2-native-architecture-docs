@@ -639,7 +639,7 @@ class DesktopTestCase(unittest.TestCase):
 class ReferenceTest(DesktopTestCase):
     """The CPU side alone (no device): the first draw study's reference of S2's base scenario."""
 
-    def test_the_reference_of_s2s_base_scenario_is_research_19s(self) -> None:
+    def test_the_reference_of_s2s_base_scenario_is_the_first_draw_studys(self) -> None:
         exp = reference_image(self.case(self.s2, "base"))
         counts = {k: exp.kind.count(k) for k in (ref.COLOR, ref.KILLED, ref.OUTSIDE, ref.EDGE, ref.AMBIGUOUS)}
         print("\nreference of s2 base:", counts)

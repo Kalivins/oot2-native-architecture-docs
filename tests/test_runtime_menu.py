@@ -185,7 +185,7 @@ class MenuTest(unittest.TestCase):
             self.skipTest("no fetched Dear ImGui (tools/fetch_imgui.py lays it out)")
 
     # ---- the rows
-    def test_every_row_research_106_names_is_there_with_its_state(self) -> None:
+    def test_every_row_the_menu_answers_name_is_there_with_its_state(self) -> None:
         rows = rows_of(self.passes("rows", str(self.ini())).stdout)
         by_label = {r["label"]: r for r in rows}
         for label, (group, state, key) in ROWS.items():

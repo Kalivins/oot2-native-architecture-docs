@@ -1046,7 +1046,7 @@ class PlayerPackTest(DeviceTestCase):
         mod, _ = pack.read(pack.find(key))
         return mod
 
-    def test_the_pair_ticket_23_drew_builds_from_the_pack_and_draws_the_same_pixels(self) -> None:
+    def test_the_pair_the_stage_bindings_work_drew_builds_from_the_pack_and_draws_the_same_pixels(self) -> None:
         spec_path = os.environ.get("OOT2_T60_FIRSTDRAW_SPEC")
         draw_dir = os.environ.get("OOT2_T60_FIRSTDRAW_DIR")
         if not spec_path or not draw_dir:

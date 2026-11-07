@@ -544,7 +544,7 @@ class OpListTest(ReplayBase):
             if what == "replayed":
                 continue
             with self.subTest(op=name):
-                self.assertRegex(what, r"\((ticket \d+|no ticket[^)]*|the front end inlines every one)\)$")
+                self.assertRegex(what, r"\([^()]+\)$")   # "<what> (<the work that brings it, or why it stays a stop>)"
                 line = self.stopping("stop", str(op))
                 if name in ("JUMP", "CALL"):
                     self.assertEqual(line, "FATAL: gfx: vulkan: replay of submission 1, after 0 draws and dispatches: "
