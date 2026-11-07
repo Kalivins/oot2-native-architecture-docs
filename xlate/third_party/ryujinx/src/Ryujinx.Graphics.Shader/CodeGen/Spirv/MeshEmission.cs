@@ -265,6 +265,8 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
                     CopyLines(context, state, primitive, mesh.PrimitiveBase, primitiveLines, state.PrimitiveTargets);
                 });
             }
+
+            context.Return();
         }
 
         private static SpvInstruction CountPointer(CodeGenContext context)
