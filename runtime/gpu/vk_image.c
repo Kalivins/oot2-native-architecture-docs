@@ -5,7 +5,9 @@
 // rule that an image the GPU wrote is the content follow DKB Recomp's runtime/vk_texture.c (GPL-3.0-or-later; its
 // behaviour was ported there from MacNativeGames d2r_gfx and LAS Recomp, MIT): changed here, an image is placed at its
 // pool offset in a VRAM extent of the backing map instead of owning memory, images of one format class are one image
-// with mutable formats, and the uploads and the transcode are not here.
+// with mutable formats, and the transcode is not here. The images of textures the CPU writes live in the texture arena
+// (oot2/texmem.h) and are uploaded by runtime/gpu/vk_texture.c: made when the replay binds the texture for the first time
+// (vkb_view_demand), made current for each submission that binds it (vkb_view_use).
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,8 +15,10 @@
 #include "oot2/gpu_vk.h"
 #include "oot2/nvn_tex.h"
 #include "oot2/runtime.h"
+#include "oot2/texmem.h"
 #include "oot2/vk_format.h"
 #include "oot2/vk_image.h"
+#include "oot2/vk_texture.h"
 #include "plat.h"
 
 typedef unsigned long long ull;
@@ -23,6 +27,7 @@ typedef unsigned long long ull;
 typedef struct ImgKey {
     uint64_t storage;
     uint32_t type, w, h, d, layers, levels, samples, cls, linear;
+    uint32_t pkg, layout_flags, stride;   // what else decides where the texels lie in storage the CPU wrote
 } ImgKey;
 
 struct VkbImage {
@@ -34,6 +39,10 @@ struct VkbImage {
     VkImageCreateFlags flags;
     uint64_t size;                // the game's storage bytes
     int placed, doomed, refs, pending;
+    int arena;                    // its memory is an extent of the texture arena: the CPU writes its texels (vk_texture.c)
+    TexExtent ext;
+    nvn_texdesc desc;             // the texture it was made for (an arena image uploads by it)
+    VktState up;
     uint64_t last_use;            // newest submission value that used it directly (atomic)
     struct VkbImage *next, *next_aux, *next_doom;   // the bucket chain; the pending list; the doomed list
 };
@@ -139,16 +148,26 @@ static uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryP
 
 // ---------- images
 
-static VkbImage *image_make(const tex_t *t, const VkfRow *row, VkFormat vk, const ImgKey *key, const Shape *sh) {
+// The usage of an arena image: sampled, and copies in (the upload) and out (the checks).
+static VkImageUsageFlags arena_usage(VkFormat f) {
+    VkFormatFeatureFlags ft = features(f);
+    VkImageUsageFlags u = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (ft & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) u |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (ft & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) u |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    return u;
+}
+
+static VkbImage *image_make(const tex_t *t, const VkfRow *row, VkFormat vk, const ImgKey *key, const Shape *sh, int arena) {
     VkFormat fmt = vkf_linear_twin(vk);
-    VkImageUsageFlags usage = usage_of(fmt);
-    VkImageCreateFlags flags = sh->flags | VK_IMAGE_CREATE_ALIAS_BIT;
+    VkImageUsageFlags usage = arena ? arena_usage(fmt) : usage_of(fmt);
+    VkImageCreateFlags flags = sh->flags | (arena ? 0 : VK_IMAGE_CREATE_ALIAS_BIT);
     if (!(row->flags & (VKF_DEPTH | VKF_STENCIL))) flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     VkImageFormatProperties fp;
     VkResult r;
     for (;;) {
         r = vkGetPhysicalDeviceImageFormatProperties(gpu_vk.phys, fmt, sh->type, VK_IMAGE_TILING_OPTIMAL, usage, flags, &fp);
         if (r == VK_SUCCESS) break;
+        if (arena) break;
         if (usage & VK_IMAGE_USAGE_STORAGE_BIT) usage &= ~(VkImageUsageFlags)VK_IMAGE_USAGE_STORAGE_BIT;
         else if (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) usage &= ~(VkImageUsageFlags)VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         else break;
@@ -177,14 +196,25 @@ static VkbImage *image_make(const tex_t *t, const VkfRow *row, VkFormat vk, cons
     nvn_texlayout L;
     nvn_tex_layout(&t->d, &L);
 
-    // Placed at the pool offset: bound into the extent (the extent is made here when no bind made it), where the game's
-    // storage lies, when the offset has the alignment the driver asks, the memory type fits and the image takes no more
-    // than the game's storage (it would overwrite the neighbour otherwise).
-    BackingRef ref;
-    backing_resolve(key->storage, L.size ? L.size : 1, 0, &ref);
-    int placed = ref.memory && ref.offset % mr.alignment == 0 && mr.size <= L.size && (mr.memoryTypeBits >> ref.type & 1);
+    // An image of the arena is bound into an extent of it, which the texture arena takes from its blocks (and stops by name
+    // when it has none to give). Any other is placed at the pool offset: bound into the extent (the extent is made here
+    // when no bind made it), where the game's storage lies, when the offset has the alignment the driver asks, the memory
+    // type fits and the image takes no more than the game's storage (it would overwrite the neighbour otherwise).
+    BackingRef ref = {0};
+    TexExtent ext = {0};
+    int placed = 0;
+    if (arena) {
+        texarena_alloc(mr.size, mr.alignment, mr.memoryTypeBits, &ext);
+        GPU_VK_OK(vkBindImageMemory(gpu_vk.device, image, (VkDeviceMemory)(uintptr_t)ext.block, ext.offset),
+                  "vkBindImageMemory (an image of the texture arena)");
+    } else {
+        backing_resolve(key->storage, L.size ? L.size : 1, 0, &ref);
+        placed = ref.memory && ref.offset % mr.alignment == 0 && mr.size <= L.size && (mr.memoryTypeBits >> ref.type & 1);
+    }
     VkDeviceMemory dedicated = VK_NULL_HANDLE;
-    if (placed) {
+    if (arena) {
+        // nothing more: its memory is the extent
+    } else if (placed) {
         GPU_VK_OK(vkBindImageMemory(gpu_vk.device, image, (VkDeviceMemory)(uintptr_t)ref.memory, ref.offset),
                   "vkBindImageMemory (an image in its pool's extent)");
     } else {
@@ -207,14 +237,29 @@ static VkbImage *image_make(const tex_t *t, const VkfRow *row, VkFormat vk, cons
                                                                                               : VK_IMAGE_ASPECT_COLOR_BIT;
     i->all_aspects = i->aspect | ((row->flags & (VKF_DEPTH | VKF_STENCIL)) == (VKF_DEPTH | VKF_STENCIL) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
     i->size = L.size, i->placed = placed;
+    if (arena) i->arena = 1, i->ext = ext, i->desc = t->d;
     g_st.made++, g_st.live++;
     if (placed) g_st.placed++;
+    if (arena) g_st.arena++;
     return i;
 }
 
-VkbImage *vkb_image_get(const tex_t *t) {
+// The image standing on texture t's storage. demand: the replay binds the texture now, so a texture the CPU writes gets
+// its arena image (the formats this layer cannot upload stop here by name); without it such a texture gets none and its
+// entry shows the placeholder until a submission binds it.
+static VkbImage *image_get(const tex_t *t, int demand) {
     const nvn_texdesc *d = &t->d;
     const VkfRow *row = vkf_row(d->format);
+    uint64_t storage = (uint64_t)(uintptr_t)t->mem;
+    int cpu_written = !gfx_gpu_only(storage);
+    if (demand && cpu_written && row) {
+        const char *what = (row->flags & VKF_ASTC) ? "an ASTC texture, which the transcode to BC brings (ticket 66)"
+                           : (row->flags & (VKF_DEPTH | VKF_STENCIL)) ? "a depth or stencil texture"
+                           : (row->flags & VKF_EXPAND_RGB) ? "a three-component texture, which an upload would expand to four" : NULL;
+        if (what)
+            rt_fatal("gfx: vulkan: the texture at %#llx (target %d, NVN format %#x, %ux%u) is written by the CPU and is %s; the "
+                     "arena's upload does not serve it yet", (ull)storage, d->target, d->format, d->width, d->height, what);
+    }
     uint8_t swz[4];
     const char *why;
     VkFormat vk = vkf_pick(row, supported, NULL, swz, &why);
@@ -226,8 +271,7 @@ VkbImage *vkb_image_get(const tex_t *t) {
         plat_mutex_unlock(&g_mu);
         return NULL;
     }
-    uint64_t storage = (uint64_t)(uintptr_t)t->mem;
-    if (!gfx_gpu_only(storage)) {
+    if (cpu_written && !demand) {
         plat_mutex_lock(&g_mu);
         g_st.skipped_cpu++;
         plat_mutex_unlock(&g_mu);
@@ -238,6 +282,11 @@ VkbImage *vkb_image_get(const tex_t *t) {
     ImgKey key = {.storage = storage, .type = (uint32_t)sh.type, .w = sh.w, .h = sh.h, .d = sh.d, .layers = sh.layers,
                   .levels = sh.levels, .samples = sh.samples, .cls = (uint32_t)vkf_class(vkf_linear_twin(vk)),
                   .linear = nvn_tex_is_linear(d)};
+    if (cpu_written) {
+        key.pkg = (uint32_t)(d->pkg_block_h & 0xff);
+        key.layout_flags = (uint32_t)d->flags & (NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT);
+        key.stride = d->stride;
+    }
     plat_mutex_lock(&g_mu);
     VkbImage *i = NULL;
     for (VkbImage *c = g_hash[bucket(storage)]; c; c = c->next)
@@ -246,18 +295,23 @@ VkbImage *vkb_image_get(const tex_t *t) {
             break;
         }
     if (!i) {
-        i = image_make(t, row, vk, &key, &sh);
+        i = image_make(t, row, vk, &key, &sh, cpu_written);
         if (i) {
             i->next = g_hash[bucket(storage)];
             g_hash[bucket(storage)] = i;
-            i->pending = 1;
-            i->next_aux = g_pending;
-            g_pending = i;
+            if (!i->arena) {   // an arena image is brought to its layout by its first upload
+                i->pending = 1;
+                i->next_aux = g_pending;
+                g_pending = i;
+            }
         }
     }
     plat_mutex_unlock(&g_mu);
     return i;
 }
+
+VkbImage *vkb_image_get(const tex_t *t) { return image_get(t, 0); }
+VkbImage *vkb_image_demand(const tex_t *t) { return image_get(t, 1); }
 
 VkImage vkb_image_handle(const VkbImage *i) { return i->image; }
 VkFormat vkb_image_format(const VkbImage *i) { return i->format; }
@@ -280,6 +334,7 @@ void vkb_image_use(VkbImage *i, uint64_t value) {
 static void image_destroy(VkbImage *i) {
     vkDestroyImage(gpu_vk.device, i->image, NULL);
     if (i->dedicated) vkFreeMemory(gpu_vk.device, i->dedicated, NULL);
+    if (i->arena) texarena_free(&i->ext);
     g_st.destroyed++, g_st.live--;
     free(i);
 }
@@ -483,8 +538,8 @@ static VkComponentMapping components(const tex_t *t, const view_t *v, const VkfR
     return (VkComponentMapping){res[0], res[1], res[2], res[3]};
 }
 
-void *vkb_view_make(const tex_t *t, const view_t *v, int type) {
-    VkbImage *img = vkb_image_get(t);
+static void *view_make(const tex_t *t, const view_t *v, int type, int demand) {
+    VkbImage *img = image_get(t, demand);
     if (!img || !view_ok(img, type)) return NULL;
     int nvn_format = v && v->set_format ? (int)v->format : t->d.format;
     const VkfRow *row = vkf_row(nvn_format);
@@ -527,6 +582,22 @@ void *vkb_view_make(const tex_t *t, const view_t *v, int type) {
     return w;
 }
 
+void *vkb_view_make(const tex_t *t, const view_t *v, int type) { return view_make(t, v, type, 0); }
+void *vkb_view_demand(const tex_t *t, const view_t *v, int type) { return view_make(t, v, type, 1); }
+
+// A submission that is being recorded reads this view: the image of a texture the CPU writes is made current for it
+// (queried and uploaded again if the CPU rewrote it, in the submission's prologue), once a submission however many slots
+// of it bind the image.
+void vkb_view_use(void *view, uint64_t value) {
+    VkbImage *img = ((Vw *)view)->img;
+    if (!img->arena) return;
+    vkb_image_use(img, value);
+    uint64_t seen = __atomic_load_n(&img->up.current_for, __ATOMIC_ACQUIRE);
+    if (seen == value) return;
+    __atomic_store_n(&img->up.current_for, value, __ATOMIC_RELEASE);
+    vkt_upload(&img->desc, img->key.storage, img->image, img->aspect, &img->up, value);
+}
+
 VkImageView vkb_view_handle(const void *view) { return ((const Vw *)view)->view; }
 
 void vkb_view_free(void *view) {
@@ -535,6 +606,10 @@ void vkb_view_free(void *view) {
     plat_mutex_lock(&g_mu);
     w->img->refs--;
     g_st.views_live--;
+    // An arena image no view holds goes (its memory is the arena's, 3.4 GiB at most, and an extent nothing can reach would
+    // stay until the pool ends): the texture registered again makes it again, and uploads it again. It is destroyed once the
+    // newest submission that read it is done (vkb_image_reap).
+    if (w->img->arena && !w->img->refs) doom(w->img);
     plat_mutex_unlock(&g_mu);
     free(w);
 }

@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// Untile: one level of one layer of a texture's block-linear storage to rows of blocks (oot2/untile.h; architecture D19).
+// One invocation moves one 16-byte piece of a row: the storage bytes sit in a staging buffer, the rows go to a buffer the
+// copy into the image reads, both through their device addresses. Every uncompressed and every block-compressed format
+// is the same move, since a block or a texel is a whole number of 16-byte pieces or sits inside one; the format only
+// sets row_bytes. The geometry is the CPU untiler's (untile_geom), and the GOB order is its function's: order 1 is the
+// Switch 2's, offset bits 5 and 6 of the byte offset exchanged against the Tegra X1's (order 0).
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+layout(local_size_x = 16, local_size_y = 4, local_size_z = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Src { uvec4 piece[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) writeonly buffer Dst { uvec4 piece[]; };
+
+layout(push_constant) uniform Untile {
+    Src src;           // the region's bytes: the level of the layer, from its first byte
+    Dst dst;           // the rows
+    uint row_bytes;    // bytes of a row of blocks
+    uint rows;         // rows of blocks
+    uint slices;       // depth slices
+    uint gobs_x;       // GOB columns of a row as laid out
+    uint tile_h;       // log2 of the GOBs high of a block
+    uint tile_d;       // log2 of the GOBs deep of a block
+    uint pitch;        // bytes between two rows of dst (a multiple of 16)
+    uint order;        // 0: the Tegra X1's order of the pieces in a GOB, 1: the Switch 2's
+} pc;
+
+// Where byte x of row y lies inside its GOB.
+uint gob_offset(uint x, uint y) {
+    uint x4 = (x >> 4) & 1u, x5 = (x >> 5) & 1u, y0 = y & 1u, y1 = (y >> 1) & 1u, y2 = (y >> 2) & 1u;
+    uint pieces = pc.order == 1u ? ((x4 << 6) | (y1 << 5)) : ((y1 << 6) | (x4 << 5));
+    return (x5 << 8) | (y2 << 7) | pieces | (y0 << 4) | (x & 15u);
+}
+
+void main() {
+    uint seg = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint z = gl_GlobalInvocationID.z;
+    if (seg >= ((pc.row_bytes + 15u) >> 4) || y >= pc.rows || z >= pc.slices) return;
+    uint x = seg << 4;
+    uint th = pc.tile_h, td = pc.tile_d;
+    uint block = 512u << (th + td);
+    uint blocks_y = (pc.rows + (8u << th) - 1u) >> (3u + th);
+    uint at = (z >> td) * pc.gobs_x * blocks_y * block
+            + ((z & ((1u << td) - 1u)) << th) * 512u
+            + (y >> (3u + th)) * pc.gobs_x * block
+            + ((y & ((8u << th) - 1u)) >> 3u) * 512u
+            + (x >> 6u) * block
+            + gob_offset(x, y);
+    pc.dst.piece[((z * pc.rows + y) * pc.pitch + x) >> 4] = pc.src.piece[at >> 4];
+}

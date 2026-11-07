@@ -36,6 +36,11 @@
 //   Samplers. A host sampler is shared by its state (the samp_par bytes): the sampler pool's 4,096 IDs against the
 //   device's 4,000 sampler allocations (D13). A state no entry and no copy holds any more is freed.
 //
+//   A view the host makes when the replay binds the texture (BindlessOps.view_demand) is written into the copy being replayed at
+//   the game's own ID, which a copy a pending submission still reads may show as the placeholder: a submission that read that ID
+//   through a handle held in memory, before anything bound it, can see the new descriptor (the second-view slots avoid this by
+//   taking only slots no copy shows; the game's own ID cannot move). Handles read from memory are a stated limit of this table.
+//
 //   Retirement. A view or a sampler that no entry and no copy holds is freed once the newest submission that used a
 //   copy holding it is done, so a released serial or an overwritten entry never clears what a pending submission reads
 //   (gfx.h texture_release: the host objects of that serial may go, never the entry at its ID).
@@ -58,6 +63,7 @@ int bindless_view_type(const tex_t *t, const view_t *v);
 typedef struct BindlessKey {
     uint64_t storage;
     uint32_t target, format, flags, samples, width, height, depth, levels, swizzle;
+    uint32_t pkg, layout_flags, stride;   // where the texels lie in storage the CPU wrote: the packaged layout byte, SPARSE and MINIMAL_LAYOUT, the stride
     uint32_t v_set, v_format, v_target, v_base_level, v_levels, v_min_layer, v_layers;
     uint8_t v_swz[4];
     int32_t want;   // BV_* asked for
@@ -83,6 +89,12 @@ typedef struct BindlessOps {
     void (*set_free)(void *set);
     void (*write)(void *set, const BindlessWrite *w, int n);
     void (*texture_release)(const tex_t *t);          // optional: the serial's host objects may go
+    // optional, together: a host view of a texture that view_make made none of because its texels are the CPU's (the
+    // texture arena of ticket 65: registering thousands of textures must take no memory), asked for at the moment the replay
+    // binds the texture (bindless_image_slot); and the submission being recorded, `value`, reads that view (any view the
+    // replay binds), once per call of bindless_image_slot.
+    void *(*view_demand)(const tex_t *t, const view_t *v, int type);
+    void (*view_use)(void *view, uint64_t value);
 } BindlessOps;
 
 typedef struct BindlessConfig {
@@ -119,7 +131,9 @@ void bindless_storage_gone(uint64_t lo, uint64_t hi);
 void *bindless_acquire(uint64_t value, const dpool_ref *textures, const dpool_ref *samplers);
 // The index into binding 0 that reads texture ID `id` of the pool acquired as a view of `type` (BV_NONE: the type its
 // texture asks for): `id` itself, or a second slot written into the copy being replayed; UINT32_MAX for an ID no
-// texture was registered at, or one that cannot be seen as `type`. The caller then pushes slot | sampler << 20.
+// texture was registered at, or one that cannot be seen as `type`. The caller then pushes slot | sampler << 20. An entry
+// whose texture the host made no view of at registration gets it now (view_demand), and the view about to be read is
+// told to the host (view_use, with the value of the submission the copy was acquired for).
 uint32_t bindless_image_slot(uint32_t id, int type);
 // The index into binding 1 for sampler ID `id`: `id`, after the check against the array.
 uint32_t bindless_sampler_slot(uint32_t id);

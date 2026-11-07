@@ -14,8 +14,8 @@
 // undefined content unless the parameters match). Every image lives in VK_IMAGE_LAYOUT_GENERAL. An image whose placement
 // is impossible (the storage is not at the alignment the driver asks, or the driver wants more bytes than the game's
 // storage holds, which would overwrite a neighbour) gets memory of its own and is counted as unaliased. Storage the CPU
-// can see (textures the CPU writes) gets no image here: those are the texture arena's (ticket 65), and the entry shows
-// the table's placeholder until then. A format with no image (the formats of oot2/vk_format.h that need an upload
+// can see (textures the CPU writes) gets no image at registration: its image is made in the texture arena when the replay
+// binds the texture (vkb_view_demand), and the entry shows the table's placeholder until then. A format with no image (the formats of oot2/vk_format.h that need an upload
 // expansion or a transcode, or that the device lacks) is counted and logged once per format.
 //
 // Lifetime. A view holds its image; an image is destroyed when no view holds it and the newest submission that used it
@@ -32,6 +32,8 @@ typedef struct VkbImage VkbImage;
 
 // The image standing on texture t's storage, made when none is, or NULL when this layer makes none for it (see above).
 VkbImage *vkb_image_get(const tex_t *t);
+// Likewise for a texture in storage the CPU can see: its arena image, made when none is (the checks read it back).
+VkbImage *vkb_image_demand(const tex_t *t);
 VkImage vkb_image_handle(const VkbImage *i);
 VkFormat vkb_image_format(const VkbImage *i);
 int vkb_image_placed(const VkbImage *i);      // 1 when it is bound into its pool's extent
@@ -51,6 +53,11 @@ void vkb_image_use(VkbImage *i, uint64_t value);
 // its image; NULL when there is none. Formats, swizzles, aspect and ranges follow the texture's description composed
 // with the view's.
 void *vkb_view_make(const tex_t *t, const view_t *v, int type);
+// Likewise, for a texture the replay binds now (BindlessOps.view_demand): a texture the CPU writes gets its arena image,
+// whose memory is taken now; vkb_view_make makes none for it, so that registering thousands of textures takes no memory.
+void *vkb_view_demand(const tex_t *t, const view_t *v, int type);
+// The submission being recorded, `value`, reads the view (BindlessOps.view_use): an arena image is made current for it.
+void vkb_view_use(void *view, uint64_t value);
 void vkb_view_free(void *view);
 VkImageView vkb_view_handle(const void *view);
 void vkb_image_release(const tex_t *t);       // BindlessOps.texture_release: the serial's image may go when nothing holds it
@@ -73,7 +80,7 @@ void vkb_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, c
                       uint64_t img);
 
 typedef struct VkbImageStats {
-    uint64_t made, live, placed, unaliased, destroyed;
+    uint64_t made, live, placed, unaliased, destroyed, arena;   // arena: images made in the texture arena
     uint64_t skipped_cpu, skipped_format;      // textures with no image: CPU-visible storage; no format
     uint64_t views_made, views_live;
     uint64_t transitions, texel_reads, texel_writes;

@@ -14,6 +14,10 @@
 //                    slots, are written into the copy of the submission that asked and reach the others through the log;
 //                    two pools; a copy behind by more than the log holds is brought up by a full sync; a view is freed
 //                    only after the newest submission that used a copy holding it; close frees everything
+//   demand           a host that makes no view at registration (the texture arena's CPU-written textures) is asked for it when the
+//                    replay binds the texture: registering takes nothing, the first bind asks the host (view_demand) and tells it which
+//                    submission reads the view (view_use), every copy gets the view through the log, a second view type is asked for
+//                    too, and registering another texture at the ID puts the placeholder back until the next bind
 //   id_fatal         a texture registered past the game's part of the array is a named fatal (exit 70)
 // On a device with every item of oot2/vk_required.h (the driver skips them without one):
 //   device           ...
@@ -134,17 +138,36 @@ static struct {
     int last_type;
     FakeSet *sets[16];
     int fail_views;   // view_make answers NULL
+    int lazy;         // view_make answers NULL and view_demand makes the view: a texture the CPU writes
+    int demands, uses;
+    uint64_t last_use_value;
+    void *last_use_view;
 } fk;
 
 static void *fk_view_make(const tex_t *t, const view_t *v, int type) {
     (void)v;
-    if (fk.fail_views) return NULL;
+    if (fk.fail_views || fk.lazy) return NULL;
     fk.views_made++;
     fk.last_type = type;
     uint64_t *o = malloc(sizeof *o * 2);
     o[0] = (uint64_t)(uintptr_t)t->mem;
     o[1] = (uint64_t)type;
     return o;
+}
+static void *fk_view_demand(const tex_t *t, const view_t *v, int type) {
+    if (fk.fail_views) return NULL;   // a host that cannot make the view cannot when asked later either
+    fk.demands++;
+    uint64_t *o = malloc(sizeof *o * 2);
+    (void)v;
+    fk.views_made++;
+    o[0] = (uint64_t)(uintptr_t)t->mem;
+    o[1] = (uint64_t)type;
+    return o;
+}
+static void fk_view_use(void *view, uint64_t value) {
+    fk.uses++;
+    fk.last_use_value = value;
+    fk.last_use_view = view;
 }
 static void fk_view_free(void *view) {
     fk.views_freed++;
@@ -187,8 +210,10 @@ static void fk_wait(uint64_t value) {
     if (fk.done < value) fk.done = value;   // the completion thread reaches it
 }
 
-static const BindlessOps k_fake_ops = {fk_view_make, fk_view_free, fk_sampler_make, fk_sampler_free, fk_set_make,
-                                       fk_set_free, fk_write, fk_release};
+static const BindlessOps k_fake_ops = {.view_make = fk_view_make, .view_free = fk_view_free, .sampler_make = fk_sampler_make,
+                                       .sampler_free = fk_sampler_free, .set_make = fk_set_make, .set_free = fk_set_free,
+                                       .write = fk_write, .texture_release = fk_release, .view_demand = fk_view_demand,
+                                       .view_use = fk_view_use};
 static const BindlessClock k_fake_clock = {fk_done, fk_wait};
 
 static void fake_open(void) {
@@ -392,6 +417,55 @@ static void case_tables(void) {
     bindless_key(&arr, &v2d, BV_2D, &k2);
     CHECK(memcmp(&k1, &k2, sizeof k1) != 0);
     printf("view types and keys\n");
+}
+
+static void case_demand(void) {
+    const dpool_ref pool = {0x100000, 1000, 0}, spool_ref = {0x200000, FAKE_SAMPLERS, 0};
+    fake_open();
+    fk.lazy = 1;
+    tex_t ta = tex_at(0x1000000, NVN_TEXTURE_TARGET_2D, 0x25, 64, 64, 1, 1);
+    tex_t tb = tex_at(0x2000000, NVN_TEXTURE_TARGET_2D, 0x25, 64, 64, 1, 1);
+    tex_t tc = tex_at(0x3000000, NVN_TEXTURE_TARGET_2D, 0x25, 64, 64, 1, 1);
+    bindless_texture_register(&pool, 5, &ta, NULL);
+    bindless_texture_register(&pool, 6, &tb, NULL);
+    CHECK(fk.views_made == 0 && fk.demands == 0 && fk.uses == 0);
+    void *s1 = acq(&pool, &spool_ref);
+    CHECK(shows(s1, 5) == 0 && shows(s1, 6) == 0);
+    printf("registering textures the host makes no view of took nothing: 0 views, 0 demands, placeholders in the first copy\n");
+
+    // the replay binds ID 5
+    CHECK(bindless_image_slot(5, BV_NONE) == 5);
+    CHECK(fk.demands == 1 && fk.uses == 1 && fk.last_use_value == g_val && shows(s1, 5) == 0x1000000 && shows(s1, 6) == 0);
+    CHECK(((uint64_t *)fk.last_use_view)[0] == 0x1000000);
+    // the same submission binds it again: no second view, the host is told again
+    CHECK(bindless_image_slot(5, BV_NONE) == 5);
+    CHECK(fk.demands == 1 && fk.uses == 2 && fk.views_made == 1);
+    printf("the first bind of ID 5 asked the host for the view and told it which submission reads it; the copy shows it\n");
+
+    // another copy takes the view through the log (the first submission is pending), and the unbound ID shows the placeholder
+    bindless_texture_register(&pool, 7, &tc, NULL);
+    void *s2 = acq(NULL, NULL);
+    CHECK(s2 != s1 && shows(s2, 5) == 0x1000000 && shows(s2, 6) == 0 && shows(s2, 7) == 0);
+    printf("another copy took the view through the log; the IDs nothing bound still show the placeholder\n");
+
+    // a second view type of the demanded entry is demanded too and gets its own slot
+    uint32_t slot = bindless_image_slot(5, BV_2D_ARRAY);
+    CHECK(slot != UINT32_MAX && slot >= FAKE_IMAGES - FAKE_SECOND && fk.demands == 2);
+    CHECK(shows(s2, slot) == 0x1000000 && ((uint64_t *)((FakeSet *)s2)->img[slot])[1] == (uint64_t)BV_2D_ARRAY);
+    CHECK(fk.uses == 3 && ((uint64_t *)fk.last_use_view)[1] == (uint64_t)BV_2D_ARRAY);
+    printf("a second view type of a demanded entry was demanded too and got slot %u\n", slot);
+
+    // another texture registered at the ID: the placeholder is back until the next bind
+    tex_t td = tex_at(0x4000000, NVN_TEXTURE_TARGET_2D, 0x25, 64, 64, 1, 1);
+    bindless_texture_register(&pool, 5, &td, NULL);
+    fk.done = g_val;
+    void *s3 = acq(NULL, NULL);
+    CHECK(shows(s3, 5) == 0);
+    int before = fk.demands;
+    CHECK(bindless_image_slot(5, BV_NONE) == 5);
+    CHECK(fk.demands == before + 1 && shows(s3, 5) == 0x4000000);
+    printf("registering another texture at the ID put the placeholder back until the next bind\n");
+    bindless_close();
 }
 
 static void case_id_fatal(void) {
@@ -695,6 +769,7 @@ int main(int argc, char **argv) {
     const char *cs = argv[1];
     if (!strcmp(cs, "formats")) case_formats();
     else if (!strcmp(cs, "tables")) case_tables();
+    else if (!strcmp(cs, "demand")) case_demand(), printf("ok demand\n");
     else if (!strcmp(cs, "id_fatal")) case_id_fatal();
     else if (!strcmp(cs, "usable")) case_usable();
     else if (!strcmp(cs, "device")) {

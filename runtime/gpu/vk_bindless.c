@@ -14,6 +14,7 @@
 #include "oot2/vk_bindless.h"
 #include "oot2/vk_image.h"
 #include "oot2/vk_pipeline.h"
+#include "oot2/vk_texture.h"
 #include "plat.h"
 
 static struct {
@@ -165,7 +166,8 @@ static void write(void *set, const BindlessWrite *w, int n) {
 
 static const BindlessOps k_ops = {.view_make = vkb_view_make, .view_free = vkb_view_free, .sampler_make = sampler_make,
                                   .sampler_free = sampler_free, .set_make = set_make, .set_free = set_free,
-                                  .write = write, .texture_release = vkb_image_release};
+                                  .write = write, .texture_release = vkb_image_release, .view_demand = vkb_view_demand,
+                                  .view_use = vkb_view_use};
 
 static void wait_value(uint64_t value) { gpu_sync_wait(value, UINT64_MAX); }
 static const BindlessClock k_clock = {.done = gpu_sync_done, .wait = wait_value};
@@ -256,6 +258,7 @@ void vkb_open(void) {
                           .max_copies = VKB_MAX_COPIES, .max_samplers = limit > 160 ? limit - 128 : 32};
     g.open = 1;
     plat_mutex_unlock(&g_mu);
+    vkt_open();
     bindless_open(&k_ops, &cfg, &k_clock);
 }
 
@@ -268,6 +271,7 @@ void vkb_close(void) {
     plat_mutex_unlock(&g_mu);
     bindless_close();
     vkb_image_close();
+    vkt_close();
     plat_mutex_lock(&g_mu);
     vkDestroySampler(gpu_vk.device, g.sampler, NULL);
     vkDestroyImageView(gpu_vk.device, g.view, NULL);

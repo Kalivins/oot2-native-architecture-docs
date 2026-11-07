@@ -293,6 +293,20 @@ class TablesTest(unittest.TestCase):
         self.assertRegex(done.stdout, r"slot \d+ holds the second, in every copy")
         self.assertRegex(done.stdout, r"close freed \d+ views, 300 samplers and \d+ copies")
 
+    def test_a_view_the_host_makes_only_when_the_replay_binds_the_texture(self) -> None:
+        done = run("demand")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(fatal_lines(done.stderr), [])
+        for line in (
+            "registering textures the host makes no view of took nothing: 0 views, 0 demands, placeholders in the first copy",
+            "the first bind of ID 5 asked the host for the view and told it which submission reads it; the copy shows it",
+            "another copy took the view through the log; the IDs nothing bound still show the placeholder",
+            "registering another texture at the ID put the placeholder back until the next bind",
+            "ok demand",
+        ):
+            self.assertIn(line, done.stdout)
+        self.assertRegex(done.stdout, r"a second view type of a demanded entry was demanded too and got slot \d+")
+
     def test_a_texture_past_the_games_part_of_the_array_is_a_named_fatal(self) -> None:
         done = run("id_fatal")
         self.assertEqual(done.returncode, EXIT_FATAL, done.stdout + done.stderr)

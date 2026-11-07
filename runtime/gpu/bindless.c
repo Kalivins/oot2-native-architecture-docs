@@ -135,6 +135,8 @@ void bindless_key(const tex_t *t, const view_t *v, int want, BindlessKey *k) {
     k->storage = (uint64_t)(uintptr_t)t->mem;
     k->target = (uint32_t)d->target, k->format = (uint32_t)d->format, k->samples = (uint32_t)d->samples;
     k->flags = (uint32_t)d->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET);
+    k->pkg = (uint32_t)(d->pkg_block_h & 0xff), k->stride = d->stride;
+    k->layout_flags = (uint32_t)d->flags & (NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT);
     k->width = d->width, k->height = d->height, k->depth = d->depth, k->levels = d->levels;
     k->swizzle = (uint32_t)d->swizzle_r | (uint32_t)d->swizzle_g << 3 | (uint32_t)d->swizzle_b << 6 |
                  (uint32_t)d->swizzle_a << 9 | (uint32_t)d->dsmode << 12;
@@ -172,14 +174,16 @@ static void hash_remove(Res *r) {
         }
 }
 
-// The shared view of (t, v) as `type`; NULL when the host makes none. No reference is taken.
-static Res *view_get(const tex_t *t, const view_t *v, int type) {
+// The shared view of (t, v) as `type`; NULL when the host makes none. No reference is taken. demand: the replay binds the
+// texture now, so a host that made no view at registration (view_make) is asked again with view_demand.
+static Res *view_get(const tex_t *t, const view_t *v, int type, int demand) {
     BindlessKey k;
     bindless_key(t, v, type, &k);
     uint32_t h = fnv(&k, sizeof k, 0);
     Res *r = hash_find(h, 0, &k, sizeof k);
     if (r) return r;
     void *obj = g.ops.view_make(t, v, type);
+    if (!obj && demand && g.ops.view_demand) obj = g.ops.view_demand(t, v, type);
     if (!obj) return NULL;
     r = calloc(1, sizeof *r);
     if (!r) rt_fatal("gfx: vulkan: bindless tables: out of memory for a view");
@@ -474,7 +478,7 @@ void bindless_texture_register(const dpool_ref *pool, int id, const tex_t *t, co
                  "needs a texel buffer view, which the table does not hold", id, (ull)pool->addr, t->d.target);
     TexPool *p = tpool(pool);
     Entry *e = entry_at(p, (uint32_t)id, 1);
-    Res *r = view_get(t, v, type);
+    Res *r = view_get(t, v, type, 0);
     g.st.registrations++;
     int same = e->used && e->res == r && e->type == type;
     e->t = *t;
@@ -606,15 +610,32 @@ uint32_t bindless_image_slot(uint32_t id, int type) {
         rt_fatal("gfx: vulkan: bindless tables: a texture handle of ID %u, and the table holds the game's IDs below %u",
                  id, g.primary);
     Entry *e = c->tp ? entry_at(c->tp, id, 0) : NULL;
+    void *use = NULL;   // the view this call hands the replay, for view_use once the lock is released
+    uint64_t value = c->last_value;
+    if (e && e->used && !e->res && g.ops.view_demand) {
+        // the host made no view at registration: the texture is bound now, so it makes one, and every copy gets it
+        Res *r = view_get(&e->t, &e->v, e->type, 1);
+        if (r) {
+            ref(r);
+            e->res = r;
+            log_add(R_TEX, c->tp, id);
+            Batch b = {.n = 0};
+            put(c, &b, BW_IMAGE, id, r);
+            flush(c, &b);
+            use = r->obj;   // read now, even when the second view the caller asks for next cannot be made
+        }
+    }
     if (!e || !e->used || !e->res || type == BV_NONE || type == e->type) {
+        if (e && e->used && e->res) use = e->res->obj;
         plat_mutex_unlock(&g_mu);
+        if (use && g.ops.view_use) g.ops.view_use(use, value);
         return id;
     }
     uint32_t slot = UINT32_MAX;
     if (e->second[type]) {
         slot = g.primary + e->second[type] - 1;
     } else {
-        Res *r = view_get(&e->t, &e->v, type);
+        Res *r = view_get(&e->t, &e->v, type, 1);
         if (r) {
             // A freed slot is taken again only when no copy shows its old view any more: a pending submission may have
             // resolved the slot to it, and a copy it reads is not written again for another view.
@@ -644,8 +665,10 @@ uint32_t bindless_image_slot(uint32_t id, int type) {
         Batch b = {.n = 0};
         put(c, &b, BW_IMAGE, slot, g.sec[slot - g.primary].res);
         flush(c, &b);
+        use = g.sec[slot - g.primary].res->obj;
     }
     plat_mutex_unlock(&g_mu);
+    if (use && g.ops.view_use) g.ops.view_use(use, value);
     return slot;
 }
 
