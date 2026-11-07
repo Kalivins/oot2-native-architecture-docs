@@ -3,7 +3,7 @@
 # Copyright (C) 2026 The oot2-native contributors
 """Build the Vulkan harnesses of the spikes with clang.
 
-    py -3 tools/build_vkdraw.py [--harness vkdraw|vkmesh|vkpipecost|vkcomputecost|vkmeshcost|vkhmmacost|vkwatchcost|vkpresent]
+    py -3 tools/build_vkdraw.py [--harness vkdraw|vkmesh|vkpipecost|vkcomputecost|vkmeshcost|vkhmmacost|vktensorcost|vkwatchcost|vkpresent]
                                 [--out DIR] [--sdk DIR]
                                 [--cc clang]
 
@@ -15,7 +15,8 @@ vkcomputecost is spike S6's compute pipeline build harness
 pipeline library build harness (tools/meshcost/vkmeshcost.c, Windows only);
 vkhmmacost times compute
 dispatches for the HMMA cost measurement (tools/hmmacost/vkhmmacost.c, Windows
-only); vkwatchcost is spike S5's write-watch and host-import probe
+only); vktensorcost replays the upscaler's compute chains for spike S8
+(tools/tensorcost/vktensorcost.c, Windows only); vkwatchcost is spike S5's write-watch and host-import probe
 (tools/watchcost/vkwatchcost.c, Windows only), which runs on the runtime's own
 address space, so it is built with runtime/core the way the runtime is (gnu11,
 x86-64-v3, linked without high-entropy ASLR); vkpresent is the windowed present
@@ -48,6 +49,7 @@ SOURCES = {
     "vkcomputecost": [ROOT / "tools" / "computecost" / "vkcomputecost.c"],
     "vkmeshcost": [ROOT / "tools" / "meshcost" / "vkmeshcost.c"],
     "vkhmmacost": [ROOT / "tools" / "hmmacost" / "vkhmmacost.c"],
+    "vktensorcost": [ROOT / "tools" / "tensorcost" / "vktensorcost.c"],
     "vkwatchcost": [ROOT / "tools" / "watchcost" / "vkwatchcost.c"],
     "vkpresent": [ROOT / "tools" / "presentcost" / "vkpresent.c"],
 }
