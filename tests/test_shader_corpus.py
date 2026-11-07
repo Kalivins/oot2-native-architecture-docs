@@ -176,6 +176,15 @@ class CorpusHelpersTest(unittest.TestCase):
         self.assertEqual(out["attr"], {"*": "sint"})
         self.assertEqual(job, {"key": "k", "options": {"debug": True}})
 
+    def test_nodebug_pass_turns_the_optimizer_debug_mode_off_and_keeps_the_other_options(self):
+        change, stages = corpus.VARIANTS["nodebug"]
+        self.assertEqual(set(stages), set(corpus.STAGES))
+        job = {"key": "k", "stage": "ps", "options": {"capability_fixup": True}}
+        out = corpus.variant_job(job, change)
+        self.assertEqual(out["options"], {"capability_fixup": True, "debug": False})
+        self.assertEqual(job["options"], {"capability_fixup": True})
+        self.assertIn("nodebug", corpus.PASSES)
+
     def test_repeat_sample_is_spread_and_stable(self):
         jobs = {f"k{i:05d}": {"stage": "vs"} for i in range(corpus.REPEAT_SAMPLE * 3)}
         keys = corpus.select(jobs, "repeat", corpus.STAGES, None)

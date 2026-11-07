@@ -13,12 +13,16 @@
 //   extension NAME               (a device extension the modules need; exit 2 if absent)
 //   module PATH                  (a compute module, SPIR-V)
 //   set                          bind BINDING TYPE COUNT     (appended to the last set)
+//   global                       (a set 0 shared by every pipeline: its `bind` lines follow, as after `set`)
+//   push BYTES                   (a compute push constant range of that size, for every pipeline)
 //   compute MODULE SET           warmup MODULE SET           (indices into the lists above)
 // TYPE is ubo, ssbo, tex (combined image sampler), texbuf, septex (sampled
 // image), sampler, img (storage image) or imgbuf, as in vkpipecost. A set of at
 // most maxPushDescriptors descriptors is a push-descriptor set (D13); the
 // pipeline layout is that one set and no push constants, which is what the
-// translated compute modules declare.
+// first translated compute modules declare. A job with a `global` set is the
+// layout `uni`: the pipeline layout is the global set at set 0, the
+// module's own set at set 1 and the `push` range, as the translator numbers it.
 //
 // Params: `pin32 1` requires subgroup size 32 on the stage, as oot-pc-recomp
 // does for modules with subgroup operations; `pipeline_cache PATH` is the
@@ -281,6 +285,9 @@ typedef struct {
     uint32_t nmodules;
     SetDesc *sets;
     uint32_t nsets;
+    SetDesc global;              // set 0 of the layout `uni`, shared by every pipeline
+    int has_global;
+    uint32_t push_bytes;         // the push constant range of every pipeline, 0 for none
     Item *items;
     uint32_t nitems;
     char exts[MAX_EXTS][VK_MAX_EXTENSION_NAME_SIZE];
@@ -363,6 +370,12 @@ static void job_read(const char *path, Job *job) {
         } else if (!strcmp(w, "module") && k >= 2) {
             GROW(job->modules, job->nmodules, cap_m);
             snprintf(job->modules[job->nmodules++].path, MAX_PATH_LEN, "%s", rest_after(line, 1));
+        } else if (!strcmp(w, "global") && k == 1) {
+            job->has_global = 1;
+            current = &job->global;
+            memset(current, 0, sizeof *current);
+        } else if (!strcmp(w, "push") && k == 2) {
+            job->push_bytes = (uint32_t)atoi(a);
         } else if (!strcmp(w, "set") && k == 1) {
             GROW(job->sets, job->nsets, cap_s);
             current = &job->sets[job->nsets++];
@@ -588,6 +601,7 @@ typedef struct {
     const Job *job;
     const Item *items;           // the measured pipelines, in hand-out order
     VkDescriptorSetLayout *set_layouts;
+    VkDescriptorSetLayout global_layout;   // set 0 of the layout `uni`, when the job has one
     VkPipelineLayout *layouts;   // per set description
     VkPipelineCache cache;
     int pin32;
@@ -599,26 +613,35 @@ typedef struct {
     volatile LONG stop;
 } BuildCtx;
 
+static VkDescriptorSetLayout set_layout_make(const SetDesc *d, int allow_push) {
+    VkDescriptorSetLayoutBinding lb[MAX_BINDS];
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < d->n; i++) {
+        lb[i] = (VkDescriptorSetLayoutBinding){d->b[i].binding, d->b[i].type, d->b[i].count, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+        total += d->b[i].count;
+    }
+    VkDescriptorSetLayoutCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .flags = allow_push && total <= max_push_descriptors ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
+        .bindingCount = d->n, .pBindings = lb};
+    VkDescriptorSetLayout out;
+    VK_CHECK(vkCreateDescriptorSetLayout(dev, &ci, NULL, &out));
+    return out;
+}
+
 static void layouts_create(BuildCtx *b) {
     const Job *job = b->job;
     b->set_layouts = calloc(job->nsets ? job->nsets : 1, sizeof *b->set_layouts);
     b->layouts = calloc(job->nsets ? job->nsets : 1, sizeof *b->layouts);
+    if (job->has_global) b->global_layout = set_layout_make(&job->global, 0);
+    VkPushConstantRange push = {.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = job->push_bytes};
     for (uint32_t s = 0; s < job->nsets; s++) {
-        const SetDesc *d = &job->sets[s];
-        VkDescriptorSetLayoutBinding lb[MAX_BINDS];
-        uint32_t total = 0;
-        for (uint32_t i = 0; i < d->n; i++) {
-            lb[i] = (VkDescriptorSetLayoutBinding){d->b[i].binding, d->b[i].type, d->b[i].count, VK_SHADER_STAGE_COMPUTE_BIT,
-                                                   NULL};
-            total += d->b[i].count;
-        }
-        VkDescriptorSetLayoutCreateInfo ci = {
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .flags = total <= max_push_descriptors ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
-            .bindingCount = d->n, .pBindings = lb};
-        VK_CHECK(vkCreateDescriptorSetLayout(dev, &ci, NULL, &b->set_layouts[s]));
-        VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
-                                         .pSetLayouts = &b->set_layouts[s]};
+        b->set_layouts[s] = set_layout_make(&job->sets[s], 1);
+        VkDescriptorSetLayout pair[2] = {b->global_layout, b->set_layouts[s]};
+        VkPipelineLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                         .setLayoutCount = job->has_global ? 2 : 1,
+                                         .pSetLayouts = job->has_global ? pair : &b->set_layouts[s],
+                                         .pushConstantRangeCount = job->push_bytes ? 1 : 0, .pPushConstantRanges = &push};
         VK_CHECK(vkCreatePipelineLayout(dev, &li, NULL, &b->layouts[s]));
     }
 }

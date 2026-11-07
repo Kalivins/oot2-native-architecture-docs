@@ -6,6 +6,7 @@
     py -3 tools/pipecost/pipe_cost.py census --s1 DIR --work DIR
     py -3 tools/pipecost/pipe_cost.py select --work DIR [--pairs N] [--seed S]
     py -3 tools/pipecost/pipe_cost.py prepare --s1 DIR --work DIR [--cache-pipelines N] [--compositions N]
+    py -3 tools/pipecost/pipe_cost.py unibody --spv DIR --pairs sample.json --out DIR/jobs/build.body
     py -3 tools/pipecost/pipe_cost.py builds --work DIR [--threads N] [--phases libs,mono,objects,objects-linked]
     py -3 tools/pipecost/pipe_cost.py cacheload --work DIR [--threads N] [--phases build,build-binaries,load,binaries]
     py -3 tools/pipecost/pipe_cost.py draws|replay --work DIR --variants KIND/BIND,... --tag T [--draws N]
@@ -24,6 +25,9 @@ descriptor counts follow the corpus for the per-draw tests. builds, cacheload,
 draws and replay run the harness, one process per measurement, after checking
 free RAM, CPU load and that no emulator is running; report turns the rows and
 summaries into report.json.
+
+unibody writes the build body of translated pairs on the layout `uni` (schema 2 descriptions): the census,
+select and prepare steps above read schema 1 and stay as spike S3 left them.
 
 Everything this writes goes under --work and holds program keys and modules:
 none of it may enter the repository.
@@ -316,6 +320,40 @@ def real_body(s1: Path, mods: dict[str, dict], plist: list[dict], formats_per_pa
         for f in range(formats_per_pair[n] if formats_per_pair else 1):
             pairs.append((index[p["vs"]], index[p["ps"]], set_index[s], targets(ps["rt_mask"]), f))
     return body_text(modules, sets, pairs, rebind=REBIND, global_set=1, depth="d32s8")
+
+
+# ---- translated pairs under the layout `uni` (schema 2 descriptions) -----------------
+
+def uni_set() -> tuple:
+    """The one push descriptor set every pipeline of the layout `uni` has (xlate/host/UniLayout.cs): the support buffer at
+    binding 0, then per stage fixed slots: vertex uniform 1..8 and storage 9..13, pixel uniform 14..24, storage 25..29 and
+    storage image 30..31. The pool arrays are `GLOBAL`, set 0, and the push constants are 128 bytes."""
+    s = [(0, UBO, 1, "vf")]
+    s += [(b, UBO, 1, "v") for b in range(1, 9)] + [(b, SSBO, 1, "v") for b in range(9, 14)]
+    s += [(b, UBO, 1, "f") for b in range(14, 25)] + [(b, SSBO, 1, "f") for b in range(25, 30)]
+    s += [(b, IMG, 1, "f") for b in range(30, 32)]
+    return tuple(s)
+
+
+def uni_body(spv: Path, pairs: list[dict]) -> str:
+    """Pipelines of translated vertex and pixel pairs (modules `<key>.spv` and their schema 2 `<key>.res.json` under `spv`)
+    on the layout `uni`: one set for all of them, so a module is built once whatever it is paired with, and no rebinding.
+    The colour targets of a pair come from its pixel module's output map."""
+    modules: list[tuple[str, str]] = []
+    index: dict[str, int] = {}
+    plist = []
+    for p in pairs:
+        for key, st, want in ((p["vs"], "v", "vs"), (p["ps"], "f", "ps")):
+            res = json.loads((spv / f"{key}.res.json").read_text(encoding="utf-8"))
+            if res.get("schema", 1) != 2 or res.get("stage") != want:
+                raise ValueError(f"{key}: expected a schema 2 {want} description")
+            if key not in index:
+                index[key] = len(modules)
+                modules.append((st, str(spv / f"{key}.spv")))
+            if st == "f":
+                rt = (res.get("graphics") or {}).get("frag_out_map", 0)
+        plist.append((index[p["vs"]], index[p["ps"]], 0, targets(rt), 0))
+    return body_text(modules, [uni_set()], plist, rebind=0, global_set=0, depth="d32s8")
 
 
 # ---- synthetic modules for the per-draw measurements -------------------------------
@@ -638,6 +676,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--validation", choices=("off", "on"), default="off")
     b.add_argument("--tag", default="")
     b.add_argument("--body", default="build.body")
+    u = sub.add_parser("unibody", help="write the build body of translated pairs on the layout uni (schema 2)")
+    u.add_argument("--spv", type=Path, required=True, help="a corpus pass's spv folder")
+    u.add_argument("--pairs", type=Path, required=True, help="a JSON file with a `pairs` list of {vs, ps} job keys (select's sample.json)")
+    u.add_argument("--out", type=Path, required=True)
     k = sub.add_parser("cacheload")
     k.add_argument("--work", type=Path, required=True)
     k.add_argument("--threads", type=int, default=12)
@@ -663,6 +705,12 @@ def main(argv: list[str] | None = None) -> int:
             return prepare(args.s1, args.work, args.cache_pipelines, args.compositions, args.seed)
         if args.cmd == "builds":
             return builds(args.work, args.threads, args.phases.split(","), args.validation, args.tag, args.body)
+        if args.cmd == "unibody":
+            pairs = json.loads(args.pairs.read_text(encoding="utf-8"))["pairs"]
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(uni_body(args.spv, pairs), encoding="utf-8")
+            print(f"pipe_cost: {len(pairs)} pairs written to {args.out}")
+            return 0
         if args.cmd == "cacheload":
             return cacheload(args.work, args.threads, args.phases.split(","))
         if args.cmd in ("draws", "replay"):

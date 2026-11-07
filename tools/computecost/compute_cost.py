@@ -213,7 +213,25 @@ def population_cells(rows: list[dict]) -> dict[tuple[str, str], int]:
     return dict(cells)
 
 
+# The descriptor layout `uni` (xlate/host/UniLayout.cs) for a compute pipeline: set 0 is the game's texture pool and its sampler
+# pool (the lengths pipecost's GLOBAL names), set 1 the module's own push descriptors, and 128 bytes of push constants.
+UNI_GLOBAL = ["global", "bind 0 septex 33025", "bind 1 sampler 4096", "push 128"]
+
+
+def layout_of(res: dict) -> str:
+    """`uni` for a schema 2 description, `s1` for the older one (set 0 per module)."""
+    return "uni" if res.get("schema", 1) == 2 else "s1"
+
+
 def set_lines(res: dict) -> list[str]:
+    if layout_of(res) == "uni":
+        # The push descriptors of set 1: the support buffer, the constant banks, the storage buffers and the storage images the
+        # module binds (a texture takes a push constant slot and the global pool, so it adds nothing here).
+        binds = {res["support_buffer"]["binding"]: ("ubo", 1)}
+        binds.update({c["binding"]: ("ubo", 1) for c in res["cbufs"]})
+        binds.update({s["binding"]: ("ssbo", 1) for s in res["sbufs"]})
+        binds.update({i["binding"]: ("img", max(1, i.get("array_length", 1))) for i in res["images"] if i.get("via") == "descriptor"})
+        return ["set"] + [f"bind {b} {kind} {count}" for b, (kind, count) in sorted(binds.items())]
     d = pipe_cost.describe(res)
     if d["set1"]:
         raise ValueError("the module uses set 1, which this harness does not build")
@@ -234,7 +252,7 @@ def prepare(census_path: Path, selection: Path, run: Path, work: Path) -> int:
         res = json.loads((run / "spv" / f"{key}.res.json").read_text(encoding="utf-8"))
         rows.append({"key": key, "module": str(spv), "bytes": int(c["spv_bytes"]), "kind": c["kind"], "bin": c["bin"],
                      "tier": "tail" if int(c["spv_bytes"]) >= TAIL_BYTES else "core", "group": c["group"],
-                     "container": c["container"],
+                     "container": c["container"], "layout": layout_of(res),
                      "extensions": ",".join(device_extensions([e for e in c["extensions"].split(",") if e])),
                      "set": " | ".join(set_lines(res))})
     rows.sort(key=lambda x: (x["bytes"], x["key"]))
@@ -246,7 +264,7 @@ def prepare(census_path: Path, selection: Path, run: Path, work: Path) -> int:
         raise ValueError("no plain program under 10 KB outside the sample for the warm-up")
     w = spare[len(spare) // 2]
     wres = json.loads((run / "spv" / f"{w['key']}.res.json").read_text(encoding="utf-8"))
-    warm = {"key": w["key"], "module": str(run / "spv" / f"{w['key']}.spv"), "bytes": int(w["spv_bytes"]),
+    warm = {"key": w["key"], "module": str(run / "spv" / f"{w['key']}.spv"), "bytes": int(w["spv_bytes"]), "layout": layout_of(wres),
             "extensions": ",".join(device_extensions([e for e in w["extensions"].split(",") if e])),
             "set": " | ".join(set_lines(wres))}
     work.mkdir(parents=True, exist_ok=True)
@@ -269,6 +287,11 @@ def job_body(programs: list[dict], warm: dict | None) -> list[str]:
     lines: list[str] = []
     exts = sorted({e for p in programs + ([warm] if warm else []) for e in p["extensions"].split(",") if e})
     lines += [f"extension {e}" for e in exts]
+    layouts = {p.get("layout", "s1") for p in programs + ([warm] if warm else [])}
+    if len(layouts) > 1:
+        raise ValueError(f"programs of two layouts in one job: {sorted(layouts)}")
+    if layouts == {"uni"}:
+        lines += UNI_GLOBAL
     sets: dict[str, int] = {}
     records = []
     for i, p in enumerate(([warm] if warm else []) + programs):

@@ -140,6 +140,35 @@ class LayoutTests(unittest.TestCase):
         self.assertIn("pc.pt.x", d13_fs)
         self.assertIn("layout(set = 1, binding = 5) uniform sampler2D texf0;", d13_fs)
 
+    def test_uni_set_has_the_push_descriptor_limit_and_the_translator_ranges(self):
+        s = pc.uni_set()
+        self.assertEqual(len(s), 32)
+        self.assertEqual([b for b, *_ in s], list(range(32)))
+        self.assertEqual(s[0], (0, "ubo", 1, "vf"))
+        self.assertEqual({st for b, _, _, st in s if 1 <= b <= 13}, {"v"})
+        self.assertEqual({st for b, _, _, st in s if 14 <= b <= 31}, {"f"})
+        self.assertEqual([k for b, k, _, _ in s if b in (13, 14, 29, 30)], ["ssbo", "ubo", "ssbo", "img"])
+
+    def test_uni_body_reads_schema_2_pairs_without_rebinding(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            spv = Path(d)
+            vs = {"schema": 2, "stage": "vs"}
+            ps = {"schema": 2, "stage": "ps", "graphics": {"frag_out_map": 0xF | (0xF << 4)}}
+            for key, r in (("a.1", vs), ("b.2", ps), ("c.1", vs)):
+                (spv / f"{key}.res.json").write_text(json.dumps(r), encoding="utf-8")
+            body = pc.uni_body(spv, [{"vs": "a.1", "ps": "b.2"}, {"vs": "c.1", "ps": "b.2"}])
+            lines = body.splitlines()
+            self.assertIn("global 0", lines)
+            self.assertNotIn("rebind", " ".join(lines))
+            self.assertEqual([l for l in lines if l.startswith("pair")], ["pair 0 1 0 2 0", "pair 2 1 0 2 0"])
+            self.assertEqual(sum(l.startswith("module") for l in lines), 3)
+            self.assertEqual(sum(l == "set" for l in lines), 1)
+            with self.assertRaises(ValueError):
+                (spv / "d.1.res.json").write_text(json.dumps({"schema": 1, "stage": "vs"}), encoding="utf-8")
+                pc.uni_body(spv, [{"vs": "d.1", "ps": "b.2"}])
+
     def test_body_text(self):
         text = pc.body_text([("v", "a.spv"), ("f", "b.spv")], [((0, "ubo", 1, "vf"), (129, "tex", 2, "f"))],
                             [(0, 1, 0, 1, 0)], rebind=128, global_set=1, depth="d32s8", params={"uni_set": 0})

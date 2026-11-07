@@ -46,10 +46,13 @@ internal static class Translation
             flags |= TranslationFlags.Compute;
         }
 
-        // DebugMode keeps the AST optimizer from dropping an assignment whose
-        // result is unused even when its source is an atomic or a call. With it
-        // off this tree loses such operations, so it is a correctness switch
-        // that stays on until measured otherwise (docs/architecture.md, D20).
+        // DebugMode turns the AST optimizer off: nothing is propagated or
+        // dropped, which is the form every module has had so far. With it off
+        // the optimizer follows this project's rule (AstOptimizer.cs): an
+        // operation with an effect stays where it is, and a read or a shuffle
+        // is carried only to the next statement that uses it. The job option
+        // `debug` defaults to true until that form is the default on purpose
+        // (a different default is a different module for every key).
         if (job.Options.Debug)
         {
             flags |= TranslationFlags.DebugMode;

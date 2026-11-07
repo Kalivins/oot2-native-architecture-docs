@@ -23,6 +23,9 @@ Passes:
            programs only
   fout     fragment output answers changed for every target (uint), pixel
            programs only
+  nodebug  every job, default answers, the AST optimizer's debug mode off
+           (expression propagation on); tools/shaders/opcheck.py compares it
+           with `default`
 
 The answer passes measure answer sensitivity (architecture D21): a program
 whose module changes when an answer changes needs that answer in its cache key
@@ -55,7 +58,7 @@ import validate  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 STAGES = ("vs", "ps", "cs", "ts", "ms")
-PASSES = ("default", "raw", "repeat", "tex", "attr", "fout")
+PASSES = ("default", "raw", "repeat", "tex", "attr", "fout", "nodebug")
 REPEAT_SAMPLE = 2000
 
 # The answers each sensitivity pass sets, and the stages it is run on.
@@ -66,6 +69,7 @@ VARIANTS: dict[str, tuple[dict, tuple[str, ...]]] = {
     "tex": ({"tex": {"*": "3d"}, "img": {"*": {"type": "3d", "fmt": "R32Float"}}}, STAGES),
     "attr": ({"attr": {"*": "sint"}}, ("vs",)),
     "fout": ({"fout": {"*": "uint"}}, ("ps",)),
+    "nodebug": ({"options": {"debug": False}}, STAGES),
 }
 
 RESULT_FIELDS = ("key", "status", "micros", "wall_ms", "spv_bytes", "message")
@@ -362,7 +366,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             validate_pass(name, work, tool, args.workers)
             facts["validate_wall_s"] = round(time.perf_counter() - t0, 1)
         summary = summarise_pass(name, work, jobs, meta, facts)
-        if name != "default" and name != "raw" and (work / "default" / "results.tsv").exists():
+        if name not in ("default", "raw", "nodebug") and (work / "default" / "results.tsv").exists():
             summary["compare"] = compare_with_default(name, work, jobs)
         (work / f"summary-{name}.json").write_text(json.dumps(summary, indent=1) + "\n", encoding="utf-8")
         print(f"corpus: pass {name}: {summary['status']} in {facts['wall_s']} s", flush=True)

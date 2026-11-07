@@ -130,3 +130,27 @@ Changes of this project:
   this project's. On the 56,381 programs of the corpus 132 modules change (121
   mesh and 11 compute, 72 of them in the set the updated game loads), and
   nothing else does.
+- `StructuredIr/AstOptimizer.cs`, `Optimize`, `Classify`, `CanMove`, `Mentions`:
+  with the debug mode off, Ryujinx moves every expression with one use to that
+  use and removes an assignment nobody reads. Through this translator, on the
+  56,381 programs of the corpus, 9,897 (17.6 percent) fail to translate and
+  of the 46,484 that do, 114 lose an atomic or a subgroup operation, 39 have a
+  read moved past a store and 738 have a shuffle, a vote or a sample moved
+  into a branch: an atomic or a raw-access call whose result is discarded
+  disappears, a read of shared, storage or device memory is moved past a store
+  that came between, a shuffle or a sample is moved into a branch, and an
+  expression is folded into a call's argument (the SPIR-V generator casts each
+  argument to a variable, so the translation fails). The optimizer now sorts an
+  expression into pinned (an atomic, a call, a store to memory, a barrier, an
+  image write), reading (memory a store can change) and convergent (a shuffle,
+  a vote, a derivative, a sample). A pinned one stays a statement and is never
+  removed; a reading or convergent one with a single mention moves only to the
+  next statement of its own block that uses it, over plain statements only
+  (none pinned when it reads), and never into a loop's condition or a call. The
+  default stays the debug mode on, which this file does not touch. The rule is
+  this project's code. Two public translators carry the same defects and their
+  fixes are evidence only, neither copied: TotK Recomp's own patch keeping
+  side-effect assignments, and one of Jaigner's keeping memory reads in place
+  (MIT; its patch carries no licence header and quotes a game program's
+  identifier). Hookshot's shader path is a C++ recompiler without this
+  optimizer, under no stated licence.

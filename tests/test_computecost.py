@@ -126,6 +126,30 @@ class JobBody(unittest.TestCase):
                                              "bind 4 img 1"])
 
 
+class UniLayout(unittest.TestCase):
+    """A schema 2 description is the layout `uni`: the module's push descriptors in set 1, the pool arrays and 128 push bytes in the job."""
+    RES = {"schema": 2, "stage": "cs", "support_buffer": {"binding": 0}, "cbufs": [{"binding": 1}, {"binding": 2}],
+           "sbufs": [{"binding": 9}], "textures": [{"set": 0, "binding": 0, "via": "push_slot"}],
+           "images": [{"set": 1, "binding": 25, "via": "descriptor"}, {"set": 0, "binding": 0, "via": "push_slot"}]}
+
+    def test_set_lines_are_the_push_descriptors_only(self):
+        self.assertEqual(cc.set_lines(self.RES), ["set", "bind 0 ubo 1", "bind 1 ubo 1", "bind 2 ubo 1", "bind 9 ssbo 1", "bind 25 img 1"])
+        self.assertEqual(cc.layout_of(self.RES), "uni")
+        self.assertEqual(cc.layout_of({"stage": "cs"}), "s1")
+
+    def test_the_job_names_the_global_set_and_the_push_bytes_before_any_set(self):
+        prog = {"module": "x.spv", "set": " | ".join(cc.set_lines(self.RES)), "extensions": "", "layout": "uni"}
+        lines = cc.job_body([prog], None)
+        self.assertEqual(lines[:4], cc.UNI_GLOBAL)
+        self.assertLess(lines.index("push 128"), lines.index("set"))
+
+    def test_an_older_layout_adds_nothing_and_two_layouts_are_refused(self):
+        old = {"module": "x.spv", "set": "set | bind 0 ubo 1", "extensions": ""}
+        self.assertNotIn("global", cc.job_body([old], None))
+        with self.assertRaises(ValueError):
+            cc.job_body([old, {**old, "layout": "uni"}], None)
+
+
 class Projection(unittest.TestCase):
     pop = {("P", "<10K"): 100, ("R", "1-2M"): 10}
     sample = {("P", "<10K"): [10.0, 30.0], ("R", "1-2M"): [1000.0, 3000.0, 2000.0]}
