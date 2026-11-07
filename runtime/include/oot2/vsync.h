@@ -30,9 +30,18 @@ uint64_t rt_vsync_tick(void);
 // Block the calling host thread until the current tick is n or later (it returns at once when it already is). The wait is
 // on the clock alone, never on the clock thread or its events, and never early: undriven it sleeps until the due time
 // of tick n on the host's clock, driven it follows the driver's time (a test moves it). The caller gives its virtual
-// core up around the call when it is a guest thread (rt_kernel_block_begin); the acquire gate of the NVN2 front end
-// (runtime/nvn/nvn_window.c) is the caller.
+// core up around the call when it is a guest thread (rt_kernel_block_begin); the NVN2 front end's SyncWait on a window's
+// acquire sync (runtime/nvn/nvn_queue.c) and, under the old placement, its AcquireTexture (runtime/nvn/nvn_window.c) are
+// the callers.
 void rt_vsync_wait_tick(uint64_t n);
+
+// The clock's own time in nanoseconds: the driver's when the clock is driven, plat_now_ns otherwise. A timeout that
+// belongs with a tick is measured on this clock.
+uint64_t rt_vsync_now_ns(void);
+// rt_vsync_wait_tick with a timeout (relative, on rt_vsync_now_ns's clock; UINT64_MAX: none): 1 when the current tick
+// is n or later, 0 when the timeout ran out first. A timeout of 0 never waits. The NVN2 front end's SyncWait waits on a
+// window's acquire sync this way (runtime/nvn/nvn_queue.c).
+int rt_vsync_wait_tick_for(uint64_t n, uint64_t timeout_ns);
 
 // Signal the event whose writable end this is at every tick from the next one (rt_kernel_event_create, or a system
 // event the service layer bound). The same event bound twice is signalled once per tick. At most 8 events.

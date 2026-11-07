@@ -82,6 +82,8 @@ typedef enum RtSettingSource {
       "the graphics back end: null draws nothing and runs every test; vulkan draws on the GPU")                      \
     X(hold_ticks, PACING, INT, LIVE, 0, 0, 999999, NULL,                                                               \
       "experiment E2: hold every present for this many ticks of the 60 Hz clock, whatever the game asks for; 0 is off") \
+    X(hold_placement, PACING, ENUM, LIVE, 0, 0, 0, "sync|acquire",                                                    \
+      "where AcquireTexture's pacing hold is: sync, in the sync the call returns, as on the console; acquire, in the call") \
     X(page_release, DEBUG, ENUM, RESTART, 0, 0, 0, "off|count|release",                                                \
       "page ranges of lever L1: off, counted only, or counted and released")                                          \
     X(census, DEBUG, BOOL, RESTART, 0, 0, 1, NULL,                                                                     \
@@ -192,5 +194,5 @@ typedef void (*RtSettingHook)(const RtSettingChange *change, void *ctx);
 void rt_settings_hook(int id, RtSettingHook fn, void *ctx);   // at most 32 hooks; fatal past that
 
 // The modules that own live keys apply them through hooks bound at start-up, after rt_settings_load and before the game
-// runs; each applies its keys' values once as it binds. runtime/nvn/nvn_settings.c: hold_ticks.
+// runs; each applies its keys' values once as it binds. runtime/nvn/nvn_settings.c: hold_ticks and hold_placement.
 void nvn_settings_bind(void);

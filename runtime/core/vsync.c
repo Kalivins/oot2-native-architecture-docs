@@ -74,6 +74,34 @@ void rt_vsync_wait_tick(uint64_t n) {
     }
 }
 
+uint64_t rt_vsync_now_ns(void) { return now_ns(); }
+
+// With a timeout the wait is measured on the clock the tick is (now_ns: the driver's when driven), so a test's time and
+// the deadline agree; undriven, the sleep is cut at the deadline and never runs past the due time of tick n.
+int rt_vsync_wait_tick_for(uint64_t n, uint64_t timeout_ns) {
+    if (rt_vsync_tick() >= n) return 1;
+    if (timeout_ns == UINT64_MAX) {
+        rt_vsync_wait_tick(n);
+        return 1;
+    }
+    uint64_t deadline = now_ns() + timeout_ns;
+    if (deadline < timeout_ns) deadline = UINT64_MAX;   // saturate
+    uint64_t start = plat_now_ns();
+    while (rt_vsync_tick() < n) {
+        uint64_t now = now_ns();
+        if (now >= deadline) return 0;
+        if (!driven()) {
+            uint64_t due = rt_vsync_due_ns(n);
+            host_wait_until(due < deadline ? due : deadline);
+        } else if (plat_now_ns() - start < 50000000ull) {
+            plat_yield();
+        } else {
+            plat_sleep_ns(1000000ull);
+        }
+    }
+    return 1;
+}
+
 static void clock_main(void *arg) {
     (void)arg;
     plat_thread_raise_priority();   // where the platform allows it: a wake-up on time matters more than fairness here

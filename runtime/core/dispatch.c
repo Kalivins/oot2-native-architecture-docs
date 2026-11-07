@@ -16,6 +16,7 @@
 // locks. Host functions at fixed addresses outside the modules live in a small hash that is also fixed at init.
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "core.h"
 #include "plat.h"
@@ -70,6 +71,12 @@ static GuestFn host_lookup(uint64_t addr) {
         if (!g_host[h].addr) return NULL;
     }
     return NULL;
+}
+
+uint64_t rt_module_base(const char *name) {
+    for (int i = 0; i < g_nmods; i++)
+        if (!strcmp(g_mods[i]->name, name)) return g_mods[i]->base;
+    return 0;
 }
 
 void rt_register_host(uint64_t addr, GuestFn fn) {

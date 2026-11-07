@@ -10,15 +10,20 @@
 // crop is what the game set, or the whole first texture before it sets one, as the console starts it. The swap
 // interval is stored as the game writes it, with no clamping, and answered back.
 //
-// The acquire gate (D22; oot2/nvn_pace.h has the rule). AcquireTexture, after choosing the index, blocks until the
-// virtual 60 Hz clock (runtime/core/vsync.c) has reached the previous present's due tick plus the interval, read when
-// it is called, with the guest thread's virtual core given up for the wait (rt_kernel_block_begin/end): another guest
-// thread runs meanwhile. The wait is never between the return of an acquire and the next present, and
-// QueuePresentTexture never waits: it takes the tick in progress as its due tick, writes its record, tells the back
-// end (the optional present_pace of gfx.h) and returns at once. win_t.pace holds the window's last due tick. The
-// vsync events belong to the clock thread (runtime/core); present timing and the swapchain belong to the Vulkan back
-// end. The null back end counts presents. With the M1 capture on (oot2/capture.h), the present also marks the frame
-// boundary and appends the frame's records to the capture's buffer in memory; the capture measures what that costs.
+// The acquire gate (D22; oot2/nvn_pace.h has the rule). The gate tick of an acquire is the previous present's due tick
+// plus the interval, read when it is called. By default (ticket 95, research 52 Q1) AcquireTexture, after choosing the
+// index, returns at once and hands the gate tick to the sync it returns (nvn_sync_acquire, nvn_queue.c): the sync is
+// signalled when the virtual 60 Hz clock (runtime/core/vsync.c) has reached it, and a guest thread that waits on it
+// (SyncWait) gives its virtual core up for the wait. A game that passes no sync is not held. Behind the setting
+// hold_placement = acquire (the store's key, OOT2_HOLD_PLACEMENT; nvn_acquire_wait overrides it) AcquireTexture blocks
+// until the gate tick instead, with the virtual core given up (rt_kernel_block_begin/end), and signals the sync at once:
+// ticket 88's placement. Either way the wait is never between the return of an acquire and the next present, and
+// QueuePresentTexture never waits: it takes the tick in progress as its due tick (by default also the gate tick of its
+// acquire, when the clock has not reached it and the game presents before it waits on the sync), writes its record,
+// tells the back end (the optional present_pace of gfx.h) and returns at once. win_t.pace holds the window's last due tick. The vsync events belong to the clock thread (runtime/core);
+// present timing and the swapchain belong to the Vulkan back end. The null back end counts presents. With the M1 capture
+// on (oot2/capture.h), the present also marks the frame boundary and appends the frame's records to the capture's buffer
+// in memory; the capture measures what that costs.
 //
 // Adapted from oot-pc-recomp runtime/nvn_api_obj.c at 8e09aaa (GPL-3.0-or-later), as DKB Recomp carries it at 9d8fa02,
 // which ports MacNativeGames games/totk/third_party/d2r_gfx/gfx/nvn/hle_nvn.c at b75be8cf (MIT, Copyright (c) 2026
@@ -27,9 +32,9 @@
 // handed to the back end. The crop answered before any SetCrop (the whole first texture) is nxnative's
 // dm/gfx/nvn/hle_nvn.c at 865cc35 (MIT, licenses/nxnative-MIT.txt). Changed here: the pacing is the gate above, in
 // the clock's ticks, where the donors sleep until a display time on a present thread, and there is no movie hand-over
-// in either call (D22); the acquire sync takes the fence value of the texture's last
-// present instead of being done at once; window shapes the record cannot hold, textures not initialised and a present of
-// a texture the window does not have stop by name.
+// in either call (D22); the acquire sync takes the fence value of the texture's last present, and under the default
+// placement the gate tick, instead of being done at once; window shapes the record cannot hold, textures not
+// initialised and a present of a texture the window does not have stop by name.
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,6 +43,7 @@
 #include "oot2/kernel.h"
 #include "oot2/nvn_pace.h"
 #include "oot2/nvn_tex.h"
+#include "oot2/settings.h"
 #include "oot2/vsync.h"
 #include "plat.h"
 
@@ -67,6 +73,7 @@ static NvnPresentRecord g_ring[NVN_PRESENT_RING];
 static uint64_t g_count;
 static int g_hold, g_hold_set;                    // g_hold_set: nvn_present_hold was called (the environment is not read)
 static int g_hold_log;                            // the environment hold was read and is not logged yet
+static int g_wait, g_wait_set;                    // g_wait_set: nvn_acquire_wait was called, and its mode is g_wait
 
 static int env_hold(void) {
     const char *e = getenv("OOT2_HOLD_TICKS");
@@ -84,6 +91,17 @@ static int hold_locked(void) {
     return g_hold;
 }
 
+// The placement of the hold: what nvn_acquire_wait set, else the settings store's key hold_placement (the layers, a
+// live change included; a program that never loads the store reads OOT2_HOLD_PLACEMENT and the default, and a value the
+// key does not take ends the process by name with exit code 2). Read at every acquire and present, with no lock held:
+// the store's first read may exit, and the exit path reads this file's counts.
+static int placement(void) {
+    plat_mutex_lock(&g_pace_lock);
+    int set = g_wait_set, mode = g_wait;
+    plat_mutex_unlock(&g_pace_lock);
+    return set ? mode : (int)rt_setting(RT_SET_hold_placement);
+}
+
 // Called with no lock held: the log sink never runs under g_pace_lock.
 static void hold_log(void) {
     plat_mutex_lock(&g_pace_lock);
@@ -92,6 +110,16 @@ static void hold_log(void) {
     plat_mutex_unlock(&g_pace_lock);
     if (h) rt_log("nvn: experiment E2: every present is held for %d ticks, whatever the game asks for", h);
 }
+
+void nvn_acquire_wait(int mode) {
+    if (mode != NVN_ACQUIRE_WAIT_SYNC && mode != NVN_ACQUIRE_WAIT_ACQUIRE) rt_fatal("nvn_acquire_wait: mode %d", mode);
+    plat_mutex_lock(&g_pace_lock);
+    g_wait_set = 1;
+    g_wait = mode;
+    plat_mutex_unlock(&g_pace_lock);
+}
+
+int nvn_acquire_wait_mode(void) { return placement(); }
 
 void nvn_present_hold(int ticks) {
     if (ticks < 0) rt_fatal("nvn_present_hold: %d ticks", ticks);
@@ -216,7 +244,9 @@ NVN_API(nvnWindowGetPresentInterval) {
     ret_x(c, (uint32_t)win_arg(c, 0, "WindowGetPresentInterval")->interval);
 }
 // NVNwindowAcquireTextureResult nvnWindowAcquireTexture(NVNwindow *w, NVNsync *sync, int *index): the gate. The
-// interval is the window's now, so a change applies here; the hold (experiment E2) raises it, never lowers it.
+// interval is the window's now, so a change applies here; the hold (experiment E2) raises it, never lowers it. The gate
+// tick is due + interval, read here; by default it goes to the sync (ready) and the call returns at once, under the old
+// placement the call waits for it. The placement is read at each call.
 NVN_API(nvnWindowAcquireTexture) {
     win_t *w = win_arg(c, 0, "WindowAcquireTexture");
     int *index = arg_p(c, 2);
@@ -224,22 +254,35 @@ NVN_API(nvnWindowAcquireTexture) {
     int i = w->next % w->active;
     w->next = (i + 1) % w->active;
     *index = i;
+    sync_t *s = arg_p(c, 1) ? nvn_sync_arg(c, 1, "WindowAcquireTexture") : NULL;
+    uint64_t entered = nvn_trace_on() ? plat_now_ns() : 0;
+    int mode = placement();
     plat_mutex_lock(&g_pace_lock);
     int interval = w->interval, hold = hold_locked(), presented = w->presents != 0;
     uint64_t due = w->pace;
-    plat_mutex_unlock(&g_pace_lock);
-    hold_log();
     // With the hold on, a game that asks for interval 0 is held too: effective = max(interval, hold).
     if (hold > interval) interval = hold;
-    if (presented && interval > 0) {
-        uint64_t target = due + (uint64_t)interval;
-        if (rt_vsync_tick() < target) {
+    // The gate tick; 0: no wait (the first acquire, interval 0 or less).
+    uint64_t target = presented && interval > 0 ? due + (uint64_t)interval : 0;
+    // The present of this acquire may not be due before it, where the game presents before it waits on the sync. Only
+    // the default placement has a sync to wait on, and a game that passes none is not held at all.
+    w->target = mode == NVN_ACQUIRE_WAIT_SYNC && s ? target : 0;
+    plat_mutex_unlock(&g_pace_lock);
+    hold_log();
+    if (entered) nvn_trace("acq-enter", 1, "interval %d hold %d placement %d", w->interval, hold, mode);
+    if (mode == NVN_ACQUIRE_WAIT_ACQUIRE) {
+        if (target && rt_vsync_tick() < target) {
             int token = rt_kernel_block_begin();
             rt_vsync_wait_tick(target);
             rt_kernel_block_end(token);
         }
+        if (s) nvn_sync_fence(s, 2, w->fence[i]);
+    } else if (s) {
+        nvn_sync_acquire(s, w->fence[i], target);
     }
-    if (arg_p(c, 1)) nvn_sync_fence(nvn_sync_arg(c, 1, "WindowAcquireTexture"), 2, w->fence[i]);
+    if (entered)
+        nvn_trace("acq-return", 0, "gate %llu waited_ns %llu", (unsigned long long)target,
+                  (unsigned long long)(plat_now_ns() - entered));
     ret_x(c, NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS);
 }
 // void nvnQueuePresentTexture(NVNqueue *q, NVNwindow *w, int index): shown after the work the queue submitted before it
@@ -253,17 +296,28 @@ NVN_API(nvnQueuePresentTexture) {
     int crop[4];
     crop_of(w, crop);
     uint64_t tick = rt_vsync_tick();
+    int mode = placement();
     plat_mutex_lock(&g_pace_lock);
-    // max(previous due, tick): the previous due is a tick the clock already reached, so on a monotonic clock this is
-    // just tick; it is kept as a guard (no test can reach it) so a due tick never goes back.
-    uint64_t due = w->presents && w->pace > tick ? w->pace : tick, seq = ++g_count;
+    // The tick in progress, or under the default placement the gate tick of the acquire since the last present when the
+    // clock has not reached it (a present before the wait on the sync). Under the old placement the clock is always at
+    // the gate tick, and a target left by an acquire made before a live flip to it is not taken: its due is the tick in
+    // progress, as the placement promises. And never before the previous due, which is a tick the clock already reached
+    // or an earlier gate tick: the guard only keeps a due tick from going back.
+    uint64_t due = mode == NVN_ACQUIRE_WAIT_SYNC && w->target > tick ? w->target : tick, seq = ++g_count;
+    if (w->presents && w->pace > due) due = w->pace;
+    w->target = 0;
     w->pace = due;
     w->presents++;
     w->ticket[i] = w->presents;
     g_ring[seq % NVN_PRESENT_RING] = (NvnPresentRecord){.seq = seq, .due = due, .requested = w->interval,
-                                                         .held = hold_locked(), .texture = i};
+                                                         .held = hold_locked(), .texture = i,
+                                                         .placement = mode};
+    int hold = hold_locked();
     plat_mutex_unlock(&g_pace_lock);
     hold_log();
+    if (nvn_trace_on())
+        nvn_trace("present", 1, "seq %llu due %llu interval %d hold %d placement %d", (unsigned long long)seq,
+                  (unsigned long long)due, w->interval, hold, mode);
     w->fence[i] = __atomic_load_n(&q->last, __ATOMIC_ACQUIRE);
     const GfxBackend *b = gfx_backend();
     if (b->present_pace) b->present_pace(seq, due);

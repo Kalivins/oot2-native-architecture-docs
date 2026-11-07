@@ -39,6 +39,7 @@
 #include "nvn_queue.h"
 #include "oot2/capture.h"
 #include "oot2/kernel.h"
+#include "oot2/vsync.h"
 #include "plat.h"
 
 typedef unsigned long long ull;
@@ -145,17 +146,39 @@ NVN_API(nvnQueueGetError) {
 static PlatMutex g_fenced_lock = PLAT_MUTEX_INIT;
 static PlatCond g_fenced = PLAT_COND_INIT;   // a sync was fenced
 
+// The fence value, the tick and the fenced word move together under g_fenced_lock, so a wait that reads them under it sees
+// one acquire's (or one queue's) set, never a mix.
+void nvn_sync_acquire(sync_t *s, uint64_t value, uint64_t ready) {
+    plat_mutex_lock(&g_fenced_lock);
+    __atomic_store_n(&s->fence, value, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->ready, ready, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->fenced, 2, __ATOMIC_RELEASE);
+    plat_cond_broadcast(&g_fenced);
+    plat_mutex_unlock(&g_fenced_lock);
+}
+
 void nvn_sync_fence(sync_t *s, uint32_t how, uint64_t value) {
     plat_mutex_lock(&g_fenced_lock);
     __atomic_store_n(&s->fence, value, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->ready, 0, __ATOMIC_RELAXED);   // a queue's fence has no tick: a stale one of an earlier acquire goes
     __atomic_store_n(&s->fenced, how, __ATOMIC_RELEASE);
     plat_cond_broadcast(&g_fenced);
     plat_mutex_unlock(&g_fenced_lock);
 }
 
+// The sync's state as one acquire or queue left it: fenced, fence value, tick.
+static uint32_t sync_state(const sync_t *s, uint64_t *fence, uint64_t *ready) {
+    plat_mutex_lock(&g_fenced_lock);
+    uint32_t fenced = __atomic_load_n(&s->fenced, __ATOMIC_ACQUIRE);
+    *fence = __atomic_load_n(&s->fence, __ATOMIC_RELAXED);
+    *ready = __atomic_load_n(&s->ready, __ATOMIC_RELAXED);
+    plat_mutex_unlock(&g_fenced_lock);
+    return fenced;
+}
+
 // NVNboolean nvnSyncInitialize(NVNsync *s, NVNdevice *d): not fenced yet
 NVN_API(nvnSyncInitialize) {
-    *(sync_t *)arg_p(c, 0) = (sync_t){SYNC_MAGIC, 0, 0};
+    *(sync_t *)arg_p(c, 0) = (sync_t){SYNC_MAGIC, 0, 0, 0};
     ret_x(c, 1);
 }
 // void nvnSyncFinalize(NVNsync *s)
@@ -172,9 +195,11 @@ NVN_API(nvnQueueFenceSync) {
     nvn_sync_fence(s, 1, __atomic_load_n(&q->last, __ATOMIC_ACQUIRE));
 }
 
+// The time left of a SyncWait's timeout. The one clock of the whole wait is the vsync clock's own (the driver's when a
+// test drives it, the host's otherwise), the clock the tick is on, so a host stall in a driven test spends nothing.
 static uint64_t left(uint64_t timeout, uint64_t start) {
     if (timeout == UINT64_MAX) return UINT64_MAX;
-    uint64_t spent = plat_now_ns() - start;
+    uint64_t spent = rt_vsync_now_ns() - start;
     return spent < timeout ? timeout - spent : 0;
 }
 
@@ -192,33 +217,51 @@ static int wait_fenced(const sync_t *s, uint64_t timeout, uint64_t start) {
     return fenced;
 }
 
-// NVNsyncWaitResult nvnSyncWait(const NVNsync *s, uint64_t timeout_ns): ALREADY_SIGNALED when the fence value is done
-// at the call, CONDITION_SATISFIED when it is reached while waiting, TIMEOUT_EXPIRED otherwise
+// began: the host's time at the call, for the trace's own measure of the call.
+static void sync_return(Cpu *c, uint32_t result, int traced, uint64_t began) {
+    if (traced)
+        nvn_trace("sync-return", 0, "result %u waited_ns %llu", result, (unsigned long long)(plat_now_ns() - began));
+    ret_x(c, result);
+}
+
+// NVNsyncWaitResult nvnSyncWait(const NVNsync *s, uint64_t timeout_ns): ALREADY_SIGNALED when the sync is done at the
+// call, CONDITION_SATISFIED when it is reached while waiting, TIMEOUT_EXPIRED otherwise. Done is the fence value (the
+// back end's fence_done) and, for a window's acquire sync, the tick (the virtual 60 Hz clock has reached `ready`). The
+// state is read at the call, for the answer at once, and again when the wait starts, which picks up the acquire that
+// fenced a sync not fenced yet; an acquire that fences the sync again once the wait is on (a game reuses one sync) does
+// not move it. The tick is waited for with the virtual core given up, no lock held; the timeout, from the call to the
+// end, runs on the clock's own time (rt_vsync_now_ns), the one the tick is on.
 NVN_API(nvnSyncWait) {
     const sync_t *s = nvn_sync_arg(c, 0, "SyncWait");
-    uint64_t timeout = arg_x(c, 1), start = plat_now_ns();
+    uint64_t timeout = arg_x(c, 1), start = rt_vsync_now_ns(), began = plat_now_ns();
     const GfxBackend *b = gfx_backend();
-    if (__atomic_load_n(&s->fenced, __ATOMIC_ACQUIRE)) {
-        uint64_t fence = __atomic_load_n(&s->fence, __ATOMIC_RELAXED);
-        if (b->fence_done() >= fence) {
+    uint64_t fence, ready;
+    uint32_t fenced = sync_state(s, &fence, &ready);
+    int traced = nvn_trace_on();
+    if (traced)
+        nvn_trace("sync-enter", 0, "timeout %llu ready %llu fenced %u", (unsigned long long)timeout,
+                  (unsigned long long)ready, fenced);
+    if (fenced) {
+        if (b->fence_done() >= fence && (!ready || rt_vsync_tick() >= ready)) {
             b->cpu_synced(fence);
-            ret_x(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
+            sync_return(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, traced, began);
             return;
         }
     }
     if (!timeout) {
-        ret_x(c, NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+        sync_return(c, NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, traced, began);
         return;
     }
     int token = rt_kernel_block_begin(), ok = 0;
-    uint64_t fence = 0;
     if (wait_fenced(s, timeout, start)) {
-        fence = __atomic_load_n(&s->fence, __ATOMIC_RELAXED);
-        ok = b->fence_wait(fence, left(timeout, start));
+        sync_state(s, &fence, &ready);   // the pair of the acquire or queue that fenced it
+        ok = 1;
+        if (ready) ok = rt_vsync_wait_tick_for(ready, left(timeout, start));
+        if (ok) ok = b->fence_wait(fence, left(timeout, start));
     }
     rt_kernel_block_end(token);
     if (ok) b->cpu_synced(fence);
-    ret_x(c, ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+    sync_return(c, ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, traced, began);
 }
 // NVNboolean nvnQueueWaitSync(NVNqueue *q, const NVNsync *s): later work of the queue waits for the sync on the GPU
 NVN_API(nvnQueueWaitSync) {

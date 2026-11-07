@@ -487,6 +487,9 @@ static void case_window(void) {
     const uint64_t tex[3] = {texture(1920, 1080, 1), texture(1920, 1080, 2), texture(1920, 1080, 3)};
     uint64_t w = window(3, tex);
     CHECK(LOW32(NVN(nvnWindowGetPresentInterval, w)) == 1);   // the builder's default
+    // This case is about the fence values of the acquire syncs: interval 0 keeps the clock's tick out of them (the pacing
+    // of the acquire sync is tests/runtime/nvn_sync_test.c's).
+    NVN(nvnWindowSetPresentInterval, w, 0);
     NVN(nvnWindowGetCrop, w, rect);                           // before SetCrop: the whole first texture
     CHECK(LD32(rect) == 0 && LD32(rect + 4) == 0 && LD32(rect + 8) == 1920 && LD32(rect + 12) == 1080);
     NVN(nvnWindowSetCrop, w, 0, 0, 1280, 720);
@@ -522,6 +525,7 @@ static void case_window(void) {
     CHECK(sync_wait(s, 0) == ALREADY_SIGNALED);
     gfx_null_hold(0);
     // The interval as written, with no clamping; two active textures from the next acquire.
+    NVN(nvnWindowSetPresentInterval, w, 1);
     NVN(nvnWindowSetPresentInterval, w, 2);
     CHECK(LOW32(NVN(nvnWindowGetPresentInterval, w)) == 2);
     NVN(nvnWindowSetPresentInterval, w, 0);

@@ -90,6 +90,8 @@ typedef struct RtModule {
 // past RT_MODULE_LIMIT, a host function inside a module, lifted code spread over 4 GiB of host addresses, a module
 // with no end marker, a function at or past its module's end marker.
 void rt_dispatch_init(const RtModule *mods, int count);
+// The load address of the module registered under name, or 0 when there is none (the pacing trace's probes, nvn_trace.c).
+uint64_t rt_module_base(const char *name);
 // Which module's lifted code a host address lies in: from its lowest function to the byte before its end marker.
 // The marker's own address and everything past it is host code (NULL), and so is the gap between two modules.
 const char *rt_host_pc_module(uintptr_t host_pc);

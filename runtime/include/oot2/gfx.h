@@ -21,12 +21,15 @@
 //
 // Presents and pacing. The front end's window rotates through the window's textures and hands each present to
 // present() below, which returns at once; the swap interval stays in the window, where the front end answers it. The
-// front end also holds AcquireTexture on the virtual 60 Hz clock (D22; runtime/nvn/nvn_window.c, oot2/nvn_pace.h): the
-// gate, the due tick of every present and the per-present records are its, and no back end sleeps a guest thread or
-// ticks the game's vsync events (runtime/core). What crosses this seam is two optional members. present_pace tells the
-// back end, right before the present() call it belongs to, the present's number and the tick it is due at: the tick
-// in progress when the game presented, on the clock of oot2/vsync.h (rt_vsync_due_ns turns it into host time), so
-// the back end may show the frame at the first refresh it can from then on and not before. present_shown reports the
+// front end also holds the acquire on the virtual 60 Hz clock (D22; runtime/nvn/nvn_window.c, oot2/nvn_pace.h): by
+// default AcquireTexture returns at once and its sync is signalled at the gate tick, behind a setting it blocks until
+// the gate tick; the gate, the due tick of every present and the per-present records are the front end's, and no back
+// end sleeps a guest thread or ticks the game's vsync events (runtime/core). What crosses this seam is two
+// optional members. present_pace tells the back end, right before the present() call it belongs to, the present's
+// number and the tick it is due at: the tick in progress when the game presented (or, when it presented before its wait
+// on the acquire sync, the gate tick of that acquire, which can be a tick still to come), on the clock of oot2/vsync.h
+// (rt_vsync_due_ns turns it into host time), so the back end may show the frame at the first refresh it can from then
+// on and not before. present_shown reports the
 // tick a present was actually shown at, from the back end's present timing; it never blocks and answers 0 for a
 // present not shown yet or whose time the back end cannot tell (the null back end always answers 0 at once). The
 // swapchain, the present mode and the monitor's rate are the Vulkan back end's and never feed the game's timing.

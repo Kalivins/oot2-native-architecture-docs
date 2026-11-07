@@ -86,6 +86,9 @@ class CaptureTest(unittest.TestCase):
         e = {k: v for k, v in os.environ.items() if not k.startswith("OOT2_") or k in ("OOT2_CC",)}
         if capture:
             e["OOT2_CAPTURE"] = "1"
+        # the test's game passes no sync to AcquireTexture and relies on the acquire to pace its presents on the host's
+        # clock: the old placement, the hold inside the call (ticket 95; a game that passes no sync is not held by the default)
+        e["OOT2_HOLD_PLACEMENT"] = "acquire"
         e.update(env or {})
         try:
             done = subprocess.run([str(self.exes[level]), case, str(folder)], capture_output=True, text=True,

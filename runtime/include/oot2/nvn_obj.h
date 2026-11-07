@@ -128,8 +128,9 @@ typedef struct {
 _Static_assert(sizeof(prog_t) <= 0xa0, "NVN2 program allocation stride");
 
 // A sync (runtime/nvn/nvn_queue.c): fenced 0 until a queue (1) or a window's acquire (2) gives it fence value `fence`,
-// done once the back end's fence_done reaches it
-typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;                            FITS(sync_t, NVNsync);
+// done once the back end's fence_done reaches it. A window's acquire (default placement, oot2/nvn_pace.h) also gives it
+// `ready`, a tick of the virtual 60 Hz clock: the sync is done once the clock has reached it as well (0: no tick)
+typedef struct { uint32_t magic, fenced; uint64_t fence, ready; } sync_t;                            FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
 typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
 
@@ -139,7 +140,9 @@ FITS(win_builder_t, NVNwindowBuilder);
 // not 0); avail[i] is the donors' pacing time and stays unused: the acquire gate counts ticks
 // fence[i]: the fence value the queue had reached when texture i was last presented (0: never), what its acquire sync
 // waits for (runtime/nvn/nvn_window.c)
-typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, active, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], fence[4]; } win_t;   // ticket[i]: ticket of the most recent present of image i
+// target: the tick the newest acquire since the last present made its sync ready at (0: none), where the present's due
+// tick may not be earlier (oot2/nvn_pace.h); written and read under the pace lock
+typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, active, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], fence[4], target; } win_t;   // ticket[i]: ticket of the most recent present of image i
 FITS(win_t, NVNwindow);
 
 // A command buffer (runtime/nvn/nvn_cmd.c, architecture D11). The game writes this object itself: NVN2's

@@ -13,3 +13,12 @@ sync_t *nvn_sync_arg(Cpu *c, int i, const char *fn);
 // Give sync s the fence value `value`: how is 1 for a queue's fence, 2 for a window's acquire. Wakes the SyncWaits that
 // wait for a sync to be fenced.
 void nvn_sync_fence(sync_t *s, uint32_t how, uint64_t value);
+// A window's acquire (how 2) gives the sync its fence value and, with it, the tick `ready` of the virtual 60 Hz clock
+// the sync is signalled at (0: no tick condition). Fence value and tick are set together, so a wait sees one acquire's
+// pair. nvn_sync_fence clears the tick.
+void nvn_sync_acquire(sync_t *s, uint64_t value, uint64_t ready);
+
+// The pacing trace (nvn_trace.c): off unless OOT2_PACE_TRACE names a file. nvn_trace writes one line (event, wall
+// nanoseconds, the clock's tick, then the formatted body, then the probes' values when probes is not 0).
+int nvn_trace_on(void);
+void nvn_trace(const char *event, int probes, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
