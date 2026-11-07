@@ -209,16 +209,116 @@ class PrePushHook(unittest.TestCase):
         self.assertRefused(self.push("v-tree"), "does not point to a commit")
         self.assertEqual(self.remote_refs(), "")
 
-    def test_the_whole_ancestry_is_read_not_only_what_the_remote_lacks(self):
+    # The identity rule reads only the commits the remote lacks; the root rule reads the whole ancestry.
+
+    def push_unchecked(self, *refspecs: str):
+        """Put commits on the remote the way a merged pull request does: not through this clone's hook."""
+        run_git(self.repo, "config", "--unset", "core.hooksPath")
+        try:
+            done = self.push(*refspecs)
+        finally:
+            run_git(self.repo, "config", "core.hooksPath", ".githooks")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_foreign_commit_the_remote_holds_does_not_stop_a_clean_commit_on_top(self):
         root = self.commit()
         self.pin(root)
         self.assertEqual(self.push("main").returncode, 0)
-        bad = self.commit(author=OTHER)
-        run_git(self.repo, "config", "--unset", "core.hooksPath")  # let the bad commit reach the remote for the setup
+        self.commit(author=OTHER, committer=OTHER)  # a merged pull request: on the remote, made by someone else
+        self.push_unchecked("main")
+        tip = self.commit()
+        done = self.push("main")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(run_git(self.remote, "rev-parse", "main").stdout.strip(), tip)
+
+    def test_a_held_foreign_commit_is_known_through_the_remote_tracking_refs(self):
+        # A new branch has no tip to compare with (the remote reports none): only refs/remotes/origin/* can say it is held.
+        root = self.commit()
+        self.pin(root)
         self.assertEqual(self.push("main").returncode, 0)
-        run_git(self.repo, "config", "core.hooksPath", ".githooks")
+        self.commit(author=OTHER, committer=OTHER)
+        self.push_unchecked("main")
         self.commit()
-        self.assertRefused(self.push("main"), bad[:12])
+        done = self.push("main:refs/heads/topic")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("refs/heads/topic", self.remote_refs())
+
+    def test_a_held_foreign_commit_is_known_through_the_tip_the_remote_reports(self):
+        # With no remote-tracking ref left, the tip the remote reports for the ref being updated still says what it holds.
+        root = self.commit()
+        self.pin(root)
+        self.assertEqual(self.push("main").returncode, 0)
+        self.commit(author=OTHER, committer=OTHER)
+        self.push_unchecked("main")
+        run_git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        tip = self.commit()
+        done = self.push("main")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(run_git(self.remote, "rev-parse", "main").stdout.strip(), tip)
+
+    def test_a_new_foreign_commit_on_top_of_held_history_is_refused_and_the_held_one_is_not_named(self):
+        root = self.commit()
+        self.pin(root)
+        self.assertEqual(self.push("main").returncode, 0)
+        held = self.commit(author=OTHER, committer=OTHER)
+        self.push_unchecked("main")
+        new = self.commit(author=OTHER)
+        self.commit()  # a clean commit after the bad one does not excuse it
+        remote_tip = run_git(self.remote, "rev-parse", "main").stdout.strip()
+        done = self.push("main")
+        self.assertRefused(done, new[:12])
+        self.assertNotIn(held[:12], done.stdout + done.stderr)
+        self.assertEqual(run_git(self.remote, "rev-parse", "main").stdout.strip(), remote_tip)
+
+    def test_a_push_to_a_bare_url_knows_only_the_tip_the_remote_reports(self):
+        # By URL there is no remote name, so the remote-tracking refs of origin do not count.
+        root = self.commit()
+        self.pin(root)
+        self.assertEqual(self.push("main").returncode, 0)
+        self.commit(author=OTHER, committer=OTHER)
+        self.push_unchecked("main")
+        tip = self.commit()
+        url = self.remote.as_posix()
+        done = run_git(self.repo, "push", url, "main:refs/heads/topic", check=False)  # a new ref: no tip is reported
+        self.assertRefused(done, "author is 'Someone Else <")
+        done = run_git(self.repo, "push", url, "main", check=False)  # the existing ref: its tip holds the foreign commit
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(run_git(self.remote, "rev-parse", "main").stdout.strip(), tip)
+
+    def test_a_commit_that_only_another_remote_holds_does_not_count(self):
+        # Fetching a fork leaves its commits under refs/remotes/<fork>/: the remote being pushed to still lacks them.
+        root = self.commit()
+        self.pin(root)
+        self.assertEqual(self.push("main").returncode, 0)
+        fork = self.tmp / "fork.git"
+        fork.mkdir()
+        run_git(fork, "init", "-q", "--bare", "-b", "main")
+        run_git(self.repo, "remote", "add", "fork", fork.as_posix())
+        foreign = self.commit(author=OTHER, committer=OTHER)
+        run_git(self.repo, "config", "--unset", "core.hooksPath")
+        try:
+            done = run_git(self.repo, "push", "fork", "main", check=False)
+        finally:
+            run_git(self.repo, "config", "core.hooksPath", ".githooks")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.commit()
+        done = self.push("main")  # to origin, which does not hold the foreign commit
+        self.assertRefused(done, foreign[:12])
+        self.assertEqual(run_git(self.remote, "rev-parse", "main").stdout.strip(), root)
+
+    def test_the_root_rule_still_reads_the_whole_ancestry(self):
+        root = self.commit()
+        self.pin(root)
+        self.assertEqual(self.push("main").returncode, 0)  # the remote now holds the root
+        second = self.commit()
+        self.pin(second)  # not the history's root: only the root rule can see that, the new commit is clean
+        done = self.push("main")
+        self.assertRefused(done, "not at the pinned root")
+        self.assertEqual(run_git(self.remote, "rev-parse", "main").stdout.strip(), root)
+        self.pin(root)  # the green counterpart: the right pin lets the same commit through although the remote holds the root
+        done = self.push("main")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(run_git(self.remote, "rev-parse", "main").stdout.strip(), second)
 
 
 if __name__ == "__main__":

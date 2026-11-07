@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 The oot2-native contributors
 #
-# Refuse a push of any commit that is not authored and committed under the
-# project identity, or that does not descend from the root commit.
+# Refuse a push of a commit the remote lacks that is not authored and committed
+# under the project identity, or of a history that does not descend from the root
+# commit (the whole ancestry is read for that second rule).
 # Enable once per clone:  git config core.hooksPath .githooks
 #                         git config oot2.rootCommit "$(git rev-list --max-parents=0 HEAD)"
 # Never bypass it with --no-verify. git hands the pushed refs over on standard
