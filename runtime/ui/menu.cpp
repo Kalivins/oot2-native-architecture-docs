@@ -10,6 +10,7 @@
 // Built without exceptions and without run-time type information (tools/build_game.py, CXX_FLAGS).
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <cstdio>
 #include <cstring>
 
@@ -21,6 +22,7 @@ namespace {
 std::atomic<int> g_open{0}, g_scripted{0}, g_minus{0}, g_plus{0}, g_chord{0}, g_dirty{0};
 UiCounterFn g_counters = nullptr;
 std::string g_status;
+std::mutex g_status_mu;   // set from the window thread (the open key saves), read by the thread that builds the frame
 
 // One designed row. A row whose key the store does not have (yet) is greyed with `grey`, and turns into a live row the
 // day the key is registered, so the window's rows need no change here beyond their names if those differ.
@@ -34,7 +36,7 @@ struct RowDef {
     bool advanced;
 };
 
-constexpr const char *NO_WINDOW = "Greyed until the window exists: it needs the Vulkan present path.";
+constexpr const char *NO_WINDOW = "Greyed: the window's key is not in the store.";
 
 // The first rows (the menu answers): pacing, display, overlay and counters; the rest greyed with their reason.
 const RowDef DEFS[] = {
@@ -60,6 +62,7 @@ const RowDef DEFS[] = {
      NO_WINDOW, nullptr, false},
     {RT_GROUP_DISPLAY, "Window height", "window_height", "The window's height in pixels; the window remembers it.",
      NO_WINDOW, nullptr, false},
+    {RT_GROUP_DISPLAY, "Open a window", "window", nullptr, "Greyed: the key is not in the store.", nullptr, false},
     {RT_GROUP_DISPLAY, "Output size", nullptr, "The size of the image the game draws: 2560x1440.",
      "Greyed: fixed at 2560x1440 for now; a smaller size will come later as an experimental choice.", nullptr, false},
     {RT_GROUP_DISPLAY, "Exclusive fullscreen at 60 Hz", nullptr,
@@ -70,7 +73,7 @@ const RowDef DEFS[] = {
     {RT_GROUP_AUDIO, "Audio output", nullptr, "Volume and the output device.",
      "Greyed: the audio output is not built yet.", nullptr, false},
     {RT_GROUP_INPUT, "Controls", nullptr, "Which keys and buttons do what.",
-     "Greyed: the input layer comes with the window.", nullptr, false},
+     "Greyed: the game's own input is not wired yet; the menu's keys (F1, Escape, a pad's Guide) work.", nullptr, false},
     {RT_GROUP_ENHANCEMENTS, "Enhancements", nullptr, "Changes to the game's look and behaviour.",
      "Greyed: none is built, and the game is shown as the console shows it.", nullptr, false},
 
@@ -202,8 +205,14 @@ bool commit(const Row &row, const char *text, char *why, size_t why_size) {
     return true;
 }
 
-void set_status(const char *text) { g_status = text ? text : ""; }
-const std::string &status() { return g_status; }
+void set_status(const char *text) {
+    std::lock_guard<std::mutex> hold(g_status_mu);
+    g_status = text ? text : "";
+}
+std::string status() {
+    std::lock_guard<std::mutex> hold(g_status_mu);
+    return g_status;
+}
 UiCounterFn counters() { return g_counters; }
 
 bool own_counter(int index, char *name, size_t name_size, char *value, size_t value_size) {

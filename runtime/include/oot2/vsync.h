@@ -40,6 +40,9 @@ uint64_t rt_sched_slot_of(uint64_t counter, uint32_t hz);
 // (rt_vsync_now_ns's clock) at which it reads `count`.
 uint64_t rt_vsync_counter(void);
 uint64_t rt_vsync_counter_ns(uint64_t count);
+// The system counter at the host time ns (rt_vsync_now_ns's clock), 0 before the origin: the inverse of rt_vsync_counter_ns, for a
+// time measured elsewhere (the display's first pixel out, oot2/vk_present.h).
+uint64_t rt_vsync_counter_at_ns(uint64_t ns);
 // The slot of the schedule in progress now: rt_sched_slot_of(rt_vsync_counter(), hz); at RT_VSYNC_HZ the current tick.
 uint64_t rt_sched_slot(uint32_t hz);
 

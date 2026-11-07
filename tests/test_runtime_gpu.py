@@ -113,7 +113,7 @@ def fatal_lines(stderr: str) -> list[str]:
 
 def compile_now(glslang: str, source: Path, out: Path) -> bytes:
     """source compiled by glslang with the build's flags, independently of the build."""
-    spv = out / (source.stem + ".spv")
+    spv = out / (source.name + ".spv")
     done = subprocess.run([glslang, *build_game.GLSLANG_FLAGS, "-o", str(spv), str(source)], capture_output=True,
                           text=True)
     if done.returncode:
@@ -151,16 +151,23 @@ class ShaderBuildTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def test_a_graphics_stage_is_named_after_its_file_with_the_stage(self) -> None:
+        names = {p.name: build_game.shader_name(p) for p in build_game.runtime_shaders(RUNTIME)}
+        self.assertEqual(names["fill.comp"], "fill")   # a compute shader keeps its file's name
+        self.assertEqual(names["overlay.vert"], "overlay_vert")
+        self.assertEqual(names["overlay.frag"], "overlay_frag")
+        self.assertEqual(len(set(names.values())), len(names))   # two stages of one file never share a name
+
     def test_every_shader_is_compiled_and_embedded_in_name_order(self) -> None:
         sources = build_game.runtime_shaders(RUNTIME)
         self.assertIn("fill.comp", [s.name for s in sources])
         glue = build_game.write_shader_glue(RUNTIME, self.dir / "build", self.glslang)
         self.assertEqual(glue, build_game.shader_glue_path(self.dir / "build"))
         words = embedded(glue)
-        self.assertEqual(list(words), [s.stem for s in sources])
+        self.assertEqual(list(words), [build_game.shader_name(s) for s in sources])
         (self.dir / "now").mkdir()
         for s in sources:
-            self.assertEqual(words[s.stem], compile_now(self.glslang, s, self.dir / "now"), s.name)
+            self.assertEqual(words[build_game.shader_name(s)], compile_now(self.glslang, s, self.dir / "now"), s.name)
         text = glue.read_text(encoding="utf-8")
         self.assertIn('{"fill", spirv_fill, sizeof spirv_fill},', text)
         self.assertIn(f"const int gpu_shader_count = {len(sources)};", text)
@@ -205,7 +212,7 @@ class ShaderBuildTest(unittest.TestCase):
             self.skipTest("no spirv-val (PATH or the Vulkan SDK's Bin folder); the build ran glslang's own validator")
         for s in build_game.runtime_shaders(RUNTIME):
             compile_now(self.glslang, s, self.dir)
-            done = subprocess.run([val, "--target-env", "vulkan1.3", str(self.dir / (s.stem + ".spv"))],
+            done = subprocess.run([val, "--target-env", "vulkan1.3", str(self.dir / (s.name + ".spv"))],
                                   capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, f"{s.name}: {done.stdout}{done.stderr}")
 
@@ -249,13 +256,13 @@ class GpuTest(unittest.TestCase):
         sources = build_game.runtime_shaders(RUNTIME)
         work = Path(self.tmp.name) / "now"
         work.mkdir(exist_ok=True)
-        expected = {s.stem: compile_now(self.glslang, s, work) for s in sources}
+        expected = {build_game.shader_name(s): compile_now(self.glslang, s, work) for s in sources}
         for level in LEVELS:
             with self.subTest(level=level):
                 done = self.run_case(level, "shaders")
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
                 rows = [line.split() for line in done.stdout.splitlines() if line.startswith("shader ")]
-                self.assertEqual([r[1] for r in rows], [s.stem for s in sources])
+                self.assertEqual([r[1] for r in rows], [build_game.shader_name(s) for s in sources])
                 for _, name, size, sha in rows:
                     self.assertEqual(int(size), len(expected[name]), name)
                     self.assertEqual(sha, hashlib.sha256(expected[name]).hexdigest(), name)

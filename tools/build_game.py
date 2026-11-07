@@ -44,7 +44,7 @@ the C header oot2/ui.h.
 The Vulkan back end. The runtime compiles against the Vulkan headers and Volk (runtime/gpu/vk_volk.c includes volk.c),
 which come from a Vulkan SDK: --vulkan-sdk, else the VULKAN_SDK variable, whose Include folder holds vulkan/ and Volk/
 (tools/fetch_vulkan.py lays one out at the pins continuous integration uses). Neither is in this repository. The
-runtime's own shaders (runtime/gpu/shaders/*.comp, GLSL) are compiled for Vulkan 1.3 by glslang (OOT2_GLSLANG, else the
+runtime's own shaders (runtime/gpu/shaders/*.comp, *.vert and *.frag, GLSL) are compiled for Vulkan 1.3 by glslang (OOT2_GLSLANG, else the
 SDK's Bin folder, else PATH), validated by it (--spirv-val), and embedded as spirv/gpu_shaders.c in --out, which goes
 into the runtime library (oot2/gpu.h). They are compiled at every build of the library, so an embedded shader always
 matches its source; no compiled shader is kept in the repository.
@@ -142,6 +142,9 @@ LINK_LIBS = () if WIN else ("-lm", "-ldl")   # Volk opens the Vulkan loader with
 # glslang's own SPIR-V validator, then embedded as one C file of the build folder (oot2/gpu.h, gpu_shaders).
 SHADER_DIR = Path("gpu") / "shaders"
 SHADER_SUFFIX = ".comp"
+# The overlay's graphics stages join the compute shaders: a vertex or fragment shader is named after its file with the stage
+# appended (overlay.vert is overlay_vert), a compute shader after its file alone.
+SHADER_STAGES = (".comp", ".vert", ".frag")
 SPIRV_DIR = "spirv"
 SHADER_GLUE = "gpu_shaders.c"
 GLSLANG_FLAGS = ("-V", "--target-env", "vulkan1.3", "--spirv-val", "--quiet")
@@ -587,8 +590,13 @@ def imgui_object(out: Path, src: Path) -> Path:
 # ------------------------------------------------------------------------------------------------ the runtime's shaders
 
 def runtime_shaders(runtime: Path) -> list[Path]:
-    """The runtime's own shaders, runtime/gpu/shaders/*.comp, in name order."""
-    return sorted((runtime / SHADER_DIR).glob(f"*{SHADER_SUFFIX}"))
+    """The runtime's own shaders, runtime/gpu/shaders/*.comp, *.vert and *.frag, in name order."""
+    return sorted((p for suffix in SHADER_STAGES for p in (runtime / SHADER_DIR).glob(f"*{suffix}")), key=shader_name)
+
+
+def shader_name(src: Path) -> str:
+    """The C name of a shader: its file name less .comp, or less the dot of .vert and .frag (overlay.vert: overlay_vert)."""
+    return src.stem if src.suffix == SHADER_SUFFIX else f"{src.stem}_{src.suffix[1:]}"
 
 
 def shader_glue_path(out: Path) -> Path:
@@ -603,7 +611,7 @@ def compile_shaders(runtime: Path, out: Path, glslang: str) -> list[tuple[str, b
     folder.mkdir(parents=True, exist_ok=True)
     shaders = []
     for src in runtime_shaders(runtime):
-        name = src.name[:-len(SHADER_SUFFIX)]
+        name = shader_name(src)
         if not SHADER_NAME.fullmatch(name):
             raise BuildError(f"shader {src}: its name must be lower-case letters, digits and underscores, starting "
                              "with a letter (it names a C array)")

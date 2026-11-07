@@ -62,7 +62,9 @@
 #include "oot2/settings.h"
 #include "oot2/texheap.h"
 #include "oot2/ui.h"
+#include "oot2/vk_present.h"
 #include "oot2/vk_required.h"
+#include "oot2/window.h"
 #include "plat.h"
 
 #define PATH_BYTES 4096
@@ -217,6 +219,49 @@ static int print_vulkan_items(void) {
     return fflush(stdout) ? 1 : 0;
 }
 
+// ---- the window (oot2/window.h, oot2/vk_present.h). Only the Vulkan back end presents to one, and only in a
+// build with SDL3; every other start has none and presents to nothing (null) or to the offscreen capture.
+static int menu_button(int button, int down) { return ui_menu_input((UiButton)button, down); }
+static void menu_pointer(float x, float y, int down) { ui_menu_pointer(x, y, down); }
+
+// The window's close button ends the run through the stop hooks (census.tsv, the ledger), as the capture's end does.
+static void window_closed(void) { rt_census_end(0, "the window was closed"); }
+
+// A size the player gave the window by dragging it is remembered: written to the file with the menu's own calls.
+static void window_resized(int width, int height) {
+    char why[200], text[RT_SETTING_TEXT];
+    snprintf(text, sizeof text, "%d", width);
+    int ok = rt_settings_set(RT_SET_window_width, text, why, sizeof why);
+    snprintf(text, sizeof text, "%d", height);
+    ok = rt_settings_set(RT_SET_window_height, text, why, sizeof why) && ok;
+    if (ok && !rt_settings_save(why, sizeof why)) rt_log("oot2: the window's size could not be saved: %s", why);
+}
+
+// The live window keys, applied on the thread that changed them (the menu's, or the file watcher's): a request only.
+static void window_key(const RtSettingChange *change, void *ctx) {
+    (void)change;
+    (void)ctx;
+    win_request((int)rt_setting(RT_SET_window_mode), (int)rt_setting(RT_SET_window_width), (int)rt_setting(RT_SET_window_height));
+}
+
+static const VkwUi k_menu = {ui_menu_frame, ui_menu_draw_data, ui_menu_set_texture_ops, ui_menu_prepare};
+
+static void open_window(const char *gfx) {
+    if (strcmp(gfx, "vulkan") || !rt_setting(RT_SET_window)) return;
+    WinConfig cfg = {.title = "oot2", .width = (int)rt_setting(RT_SET_window_width),
+                     .height = (int)rt_setting(RT_SET_window_height), .mode = (int)rt_setting(RT_SET_window_mode)};
+    if (!win_open(&cfg)) {
+        rt_log("oot2: no window (%s): the picture goes to the offscreen capture only", win_why());
+        return;
+    }
+    win_set_input(&(WinInput){menu_button, menu_pointer, window_resized, window_closed});
+    rt_settings_hook(RT_SET_window_mode, window_key, NULL);
+    rt_settings_hook(RT_SET_window_width, window_key, NULL);
+    rt_settings_hook(RT_SET_window_height, window_key, NULL);
+    vkw_window(&win_vulkan, &k_menu);
+    rt_log("oot2: window %dx%d, %s", cfg.width, cfg.height, cfg.mode == WIN_BORDERLESS ? "borderless" : "windowed");
+}
+
 // The texture heap instruments read the write watch through the page generations (oot2/texheap.h).
 static uint64_t pagegen_scanned_pages(void) {
     PagegenStats s;
@@ -262,7 +307,9 @@ int main(int argc, char **argv) {
     const char *gfx_from;
     char gfx[RT_SETTING_TEXT];
     rt_setting_source(RT_SET_gfx, &gfx_from);
-    gfx_select(rt_setting_format(RT_SET_gfx, rt_setting(RT_SET_gfx), gfx), gfx_from);
+    rt_setting_format(RT_SET_gfx, rt_setting(RT_SET_gfx), gfx);
+    open_window(gfx);   // before the Vulkan device, which is made able to present to the window or not made
+    gfx_select(gfx, gfx_from);
     gfx_open_game(g_game);
 
     rt_log("oot2: main() is at %p (a host pc in a log line is read against this and the program's symbols)", (void *)&main);

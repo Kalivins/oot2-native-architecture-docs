@@ -123,6 +123,12 @@ VkCommandBuffer gpu_vk_prologue(void);
 VkCommandBuffer gpu_vk_epilogue(void);
 void gpu_vk_effect(GpuEffect fn, void *arg);
 uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits);
+// gpu_vk_end that also signals extra_signal (a binary semaphore a present waits on; NULL for none) and, when present is not
+// NULL, calls vkQueuePresentKHR(present) before it releases the submission: a present needs the queue to itself as a
+// submit does. The present's own result goes to *present_result (VK_ERROR_OUT_OF_DATE_KHR and VK_SUBOPTIMAL_KHR are the
+// caller's to handle); with present_result NULL anything but VK_SUCCESS stops the run by name.
+uint64_t gpu_vk_end_present(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits, const VkSemaphoreSubmitInfo *extra_signal,
+                            const VkPresentInfoKHR *present, VkResult *present_result);
 
 // A checkpoint's marker: the value, the kind and 1 at the end of the submission's command buffer (0 at its start).
 #define GPU_VK_MARKER(value, kind, end) ((uint64_t)(value) << 4 | (uint64_t)(kind) << 1 | (uint64_t)(end))

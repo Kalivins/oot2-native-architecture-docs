@@ -5,12 +5,14 @@
 // lists and stops there. No window, no device and no back end is needed: the context says it has a renderer that takes
 // textures (ImGuiBackendFlags_RendererHasTextures), and after each frame this file answers the font atlas's requests
 // the way a back end's texture update does, with no pixels sent anywhere, so the glyphs are laid out and the draw lists
-// complete. The Vulkan present path (a later ticket) renders the same draw lists with Dear ImGui's own back end.
+// complete. The Vulkan present path (runtime/gpu/vk_overlay.c) renders the same draw lists: it takes the atlas through
+// the texture ops (ui_menu_set_texture_ops) and reads the lists through ui_menu_draw_data, flattened for it.
 //
 // Every control is bound to the store through the rows (menu.cpp): it shows the value the row was just built with and
 // changes it only through commit(), so no control holds a value of its own. Without Dear ImGui in the build
 // (OOT2_WITH_IMGUI), the frame draws nothing and says so.
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cfloat>
 #include <cstdio>
@@ -27,8 +29,8 @@ namespace {
 
 ImGuiContext *g_ctx = nullptr;
 bool g_advanced = false;                  // the menu's Advanced switch: the menu's own state, no setting
-float g_pointer_x = -FLT_MAX, g_pointer_y = -FLT_MAX;
-int g_pointer_down = 0;
+std::atomic<float> g_pointer_x{-FLT_MAX}, g_pointer_y{-FLT_MAX};   // written by the window thread, read by the frame's
+std::atomic<int> g_pointer_down{0};
 float g_sent_x = -FLT_MAX, g_sent_y = -FLT_MAX;
 int g_sent_down = 0;
 float g_frame_ms = 0.0f;                  // the overlay's smoothed frame time
@@ -49,20 +51,41 @@ void ensure_context() {
     ImGui::StyleColorsDark();
 }
 
-// What a back end does with the font atlas's requests, minus the upload.
+UiTextureOps g_ops = {};
+bool g_have_ops = false;
+
+// What a back end does with the font atlas's requests: with a renderer's texture ops (ui_menu_set_texture_ops) the
+// request goes to it, and without one the answer is the upload's absence, so the glyphs are laid out and the draw lists
+// complete with no pixels sent anywhere.
 void answer_texture_requests() {
     for (ImTextureData *tex : ImGui::GetPlatformIO().Textures) {
+        const bool alpha = tex->Format == ImTextureFormat_Alpha8;
         if (tex->Status == ImTextureStatus_WantCreate) {
-            tex->SetTexID((ImTextureID)1);
+            uint64_t id = 1;
+            if (g_have_ops) id = g_ops.create(tex->Width, tex->Height, alpha ? 1 : 0, (const uint8_t *)tex->GetPixels());
+            if (!id) continue;   // the renderer could not: Dear ImGui asks again next frame
+            tex->SetTexID((ImTextureID)id);
             tex->SetStatus(ImTextureStatus_OK);
         } else if (tex->Status == ImTextureStatus_WantUpdates) {
+            if (g_have_ops) {
+                const ImTextureRect &r = tex->UpdateRect;
+                g_ops.update((uint64_t)tex->TexID, r.x, r.y, r.w, r.h, alpha ? 1 : 0,
+                             (const uint8_t *)tex->GetPixelsAt(r.x, r.y), tex->GetPitch());
+            }
             tex->SetStatus(ImTextureStatus_OK);
-        } else if (tex->Status == ImTextureStatus_WantDestroy) {
+        } else if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= 3) {
+            if (g_have_ops) g_ops.destroy((uint64_t)tex->TexID);
             tex->SetTexID((ImTextureID)0);
             tex->SetStatus(ImTextureStatus_Destroyed);
         }
     }
 }
+
+std::vector<UiVertex> g_vertices;
+std::vector<uint32_t> g_indices;
+std::vector<UiCmd> g_cmds;
+bool g_built = false;   // the last ui_menu_frame built lists (it returned 1)
+static_assert(sizeof(ImDrawVert) == sizeof(UiVertex), "UiVertex is Dear ImGui's vertex");
 
 void pick(const Row &row, const char *text) {
     char why[300];
@@ -161,7 +184,8 @@ void draw_menu(UiDraw &d, int width, int height) {
         if (ImGui::Button("Close")) g_close = true;
         ImGui::SameLine();
         ImGui::Checkbox("Advanced", &g_advanced);
-        if (!status().empty()) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", status().c_str());
+        const std::string line = status();
+        if (!line.empty()) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", line.c_str());
         ImGui::Separator();
 
         const std::vector<Row> all = rows();
@@ -211,7 +235,54 @@ void draw_counters(int width) {
 }   // namespace
 
 extern "C" void ui_menu_pointer(float x, float y, int down) {
-    g_pointer_x = x, g_pointer_y = y, g_pointer_down = down ? 1 : 0;
+    g_pointer_x.store(x, std::memory_order_relaxed), g_pointer_y.store(y, std::memory_order_relaxed);
+    g_pointer_down.store(down ? 1 : 0, std::memory_order_relaxed);
+}
+
+extern "C" void ui_menu_set_texture_ops(const UiTextureOps *ops) {
+    g_have_ops = ops && ops->create && ops->update && ops->destroy;
+    g_ops = g_have_ops ? *ops : UiTextureOps{};
+}
+
+extern "C" int ui_menu_prepare(int width, int height) {
+    ensure_context();
+    ImGuiIO &io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)(width > 0 ? width : 1280), (float)(height > 0 ? height : 720));
+    io.DeltaTime = 1.0f / 60.0f;
+    ImGui::NewFrame();
+    ImGui::Render();
+    answer_texture_requests();
+    return 1;
+}
+
+// The last frame's draw lists, flattened (oot2/ui.h): the vertices of every list one after the other, and each command's
+// indices copied out with its vertex offset and its list's place in that array added, so the renderer needs neither.
+extern "C" void ui_menu_draw_data(UiDrawData *out) {
+    *out = UiDrawData{};
+    g_vertices.clear(), g_indices.clear(), g_cmds.clear();
+    if (!g_ctx || !g_built) return;
+    const ImDrawData *dd = ImGui::GetDrawData();
+    if (!dd || !dd->Valid) return;
+    for (int n = 0; n < dd->CmdListsCount; n++) {
+        const ImDrawList *list = dd->CmdLists[n];
+        const uint32_t base = (uint32_t)g_vertices.size();
+        const UiVertex *v = reinterpret_cast<const UiVertex *>(list->VtxBuffer.Data);
+        g_vertices.insert(g_vertices.end(), v, v + list->VtxBuffer.Size);
+        for (const ImDrawCmd &cmd : list->CmdBuffer) {
+            if (cmd.UserCallback || cmd.ElemCount == 0) continue;
+            UiCmd c = {};
+            c.clip[0] = cmd.ClipRect.x, c.clip[1] = cmd.ClipRect.y, c.clip[2] = cmd.ClipRect.z, c.clip[3] = cmd.ClipRect.w;
+            c.texture = (uint64_t)cmd.GetTexID();
+            c.first_index = (uint32_t)g_indices.size();
+            c.index_count = cmd.ElemCount;
+            for (unsigned i = 0; i < cmd.ElemCount; i++)
+                g_indices.push_back(base + cmd.VtxOffset + list->IdxBuffer.Data[cmd.IdxOffset + i]);
+            g_cmds.push_back(c);
+        }
+    }
+    out->vertices = g_vertices.data(), out->vertex_count = (uint32_t)g_vertices.size();
+    out->indices = g_indices.data(), out->index_count = (uint32_t)g_indices.size();
+    out->cmds = g_cmds.data(), out->cmd_count = (uint32_t)g_cmds.size();
 }
 
 extern "C" int ui_menu_frame(const UiFrame *frame, UiDraw *out) {
@@ -219,6 +290,7 @@ extern "C" int ui_menu_frame(const UiFrame *frame, UiDraw *out) {
     const bool menu = ui_menu_is_open() != 0;
     const bool overlay = rt_setting(RT_SET_overlay) != 0;
     const bool counters_on = rt_setting(RT_SET_counters) != 0;
+    g_built = false;
     if (!menu && !overlay && !counters_on) return 0;
     ensure_context();
     const int width = frame && frame->width > 0 ? frame->width : 1280;
@@ -227,9 +299,11 @@ extern "C" int ui_menu_frame(const UiFrame *frame, UiDraw *out) {
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)width, (float)height);
     io.DeltaTime = dt > 0.0 ? (float)dt : 1.0f / 60.0f;
-    if (g_pointer_x != g_sent_x || g_pointer_y != g_sent_y) io.AddMousePosEvent(g_pointer_x, g_pointer_y);
-    if (g_pointer_down != g_sent_down) io.AddMouseButtonEvent(0, g_pointer_down != 0);
-    g_sent_x = g_pointer_x, g_sent_y = g_pointer_y, g_sent_down = g_pointer_down;
+    const float px = g_pointer_x.load(std::memory_order_relaxed), py = g_pointer_y.load(std::memory_order_relaxed);
+    const int pdown = g_pointer_down.load(std::memory_order_relaxed);
+    if (px != g_sent_x || py != g_sent_y) io.AddMousePosEvent(px, py);
+    if (pdown != g_sent_down) io.AddMouseButtonEvent(0, pdown != 0);
+    g_sent_x = px, g_sent_y = py, g_sent_down = pdown;
 
     ImGui::NewFrame();
     UiDraw d = {};
@@ -248,6 +322,7 @@ extern "C" int ui_menu_frame(const UiFrame *frame, UiDraw *out) {
     d.indices = dd->TotalIdxCount;
     for (int i = 0; i < dd->CmdListsCount; i++) d.commands += dd->CmdLists[i]->CmdBuffer.Size;
     answer_texture_requests();
+    g_built = true;
     if (out) *out = d;
     if (g_close) {   // the Close button, or the window's own: after the frame, as the open key's close is
         g_close = false;
@@ -265,6 +340,9 @@ extern "C" int ui_menu_row_rect(int index, float rect[4]) {
 #else   // built without Dear ImGui: the model works, nothing is drawn
 
 extern "C" void ui_menu_pointer(float, float, int) {}
+extern "C" void ui_menu_set_texture_ops(const UiTextureOps *) {}
+extern "C" int ui_menu_prepare(int, int) { return 0; }
+extern "C" void ui_menu_draw_data(UiDrawData *out) { *out = UiDrawData{}; }
 extern "C" int ui_menu_frame(const UiFrame *, UiDraw *out) {
     if (out) *out = UiDraw{};
     return 0;

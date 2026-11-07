@@ -51,6 +51,10 @@ uint64_t rt_sched_slot_of(uint64_t counter, uint32_t hz) {
 uint64_t rt_vsync_due_counter(uint64_t n) { return rt_sched_due_counter(n, RT_VSYNC_HZ); }
 
 uint64_t rt_vsync_counter_ns(uint64_t count) { return origin_ns() + count * COUNTER_NS; }
+uint64_t rt_vsync_counter_at_ns(uint64_t ns) {
+    uint64_t origin = origin_ns();
+    return ns <= origin ? 0 : (ns - origin) / COUNTER_NS;
+}
 
 uint64_t rt_vsync_due_ns(uint64_t n) { return rt_vsync_counter_ns(rt_vsync_due_counter(n)); }
 

@@ -30,7 +30,7 @@ bool commit(const Row &row, const char *text, char *why, size_t why_size);
 
 const char *group_label(RtSettingGroup g);
 void set_status(const char *text);   // the line the menu shows under its buttons (a refused value, a failed save)
-const std::string &status();
+std::string status();   // a copy: the window thread can set it while the frame is built
 UiCounterFn counters();
 // The counters the menu owns itself (the store's), index 0, 1, ... until it returns false.
 bool own_counter(int index, char *name, size_t name_size, char *value, size_t value_size);

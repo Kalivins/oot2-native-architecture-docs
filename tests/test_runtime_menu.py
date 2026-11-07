@@ -55,7 +55,7 @@ TIMEOUT = 120
 GROUPS = ["Graphics", "Frame rate and pacing", "Display", "Audio", "Input", "Enhancements", "Debug"]
 
 # the menu answers' rows: label -> (group, state, key). A greyed row has no key until the ticket that consumes it
-# registers one (the window's, the movie hold's), and then turns live by itself.
+# registers one (the movie hold's), and then turns live by itself; the window's keys came with the window.
 ROWS = {
     "Graphics back end": ("Graphics", "restart", "gfx"),
     "Resolution regime": ("Graphics", "greyed", "-"),
@@ -65,9 +65,10 @@ ROWS = {
     "Hold the system timer resolution": ("Frame rate and pacing", "restart", "timer_resolution"),
     "Hold the game's step during movies": ("Frame rate and pacing", "greyed", "-"),
     "Interpolation": ("Frame rate and pacing", "greyed", "-"),
-    "Window mode": ("Display", "greyed", "-"),
-    "Window width": ("Display", "greyed", "-"),
-    "Window height": ("Display", "greyed", "-"),
+    "Window mode": ("Display", "live", "window_mode"),
+    "Window width": ("Display", "live", "window_width"),
+    "Window height": ("Display", "live", "window_height"),
+    "Open a window": ("Display", "restart", "window"),
     "Output size": ("Display", "greyed", "-"),
     "Exclusive fullscreen at 60 Hz": ("Display", "greyed", "-"),
     "Overlay (frame time)": ("Display", "live", "overlay"),

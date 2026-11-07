@@ -93,6 +93,14 @@ typedef enum RtSettingSource {
       "hold a 0.5 ms system timer resolution while the game runs; 0 leaves the system's")                              \
     X(frame_rate_target, PACING, INT, LIVE, 0, 20, 120, NULL,                                                          \
       "fixed frame rate: pace presents on their own schedule at this many a second, whatever interval the game asks for; 0 is off") \
+    X(window, DISPLAY, BOOL, RESTART, 1, 0, 1, NULL,                                                                   \
+      "open a window and present the picture to it (the Vulkan back end, in a build with SDL3); 0 presents to the offscreen capture only") \
+    X(window_mode, DISPLAY, ENUM, LIVE, 0, 0, 0, "windowed|borderless",                                                \
+      "windowed: a decorated, resizable window; borderless: a window with no border at the size of the screen")        \
+    X(window_width, DISPLAY, INT, LIVE, 1280, 320, 16384, NULL,                                                        \
+      "the width in pixels of the window in windowed mode; resizing the window changes it, and it is remembered")      \
+    X(window_height, DISPLAY, INT, LIVE, 720, 180, 16384, NULL,                                                        \
+      "the height in pixels of the window in windowed mode; resizing the window changes it, and it is remembered")     \
     X(overlay, DISPLAY, BOOL, LIVE, 0, 0, 1, NULL,                                                                     \
       "the frame-time readout drawn over the picture; the Test preset turns it on")                                    \
     X(counters, DEBUG, BOOL, LIVE, 0, 0, 1, NULL,                                                                      \

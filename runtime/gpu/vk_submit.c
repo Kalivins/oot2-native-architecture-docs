@@ -32,6 +32,7 @@
 #include "oot2/vk_capture.h"
 #include "oot2/vk_image.h"
 #include "oot2/vk_miss.h"
+#include "oot2/vk_present.h"
 #include "oot2/vk_replay.h"
 #include "plat.h"
 
@@ -157,6 +158,11 @@ void gpu_vk_effect(GpuEffect fn, void *arg) {
 }
 
 uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits) {
+    return gpu_vk_end_present(waits, nwaits, NULL, NULL, NULL);
+}
+
+uint64_t gpu_vk_end_present(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits, const VkSemaphoreSubmitInfo *extra_signal,
+                            const VkPresentInfoKHR *present, VkResult *present_result) {
     if (!g_value) rt_fatal("gfx: vulkan: the end of a submission that was not begun");
     uint64_t value = g_value;
     VkCommandBufferSubmitInfo cbi[3];
@@ -178,12 +184,20 @@ uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits) {
         cbi[ncb++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
                                                  .commandBuffer = g_epi};
     }
-    VkSemaphoreSubmitInfo signal = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = gpu_vk.timeline,
-                                    .value = value, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    VkSemaphoreSubmitInfo signal[2] = {{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = gpu_vk.timeline,
+                                        .value = value, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT}};
+    uint32_t nsignal = 1;
+    if (extra_signal) signal[nsignal++] = *extra_signal;   // a binary semaphore, for a present
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = nwaits,
                         .pWaitSemaphoreInfos = waits, .commandBufferInfoCount = ncb, .pCommandBufferInfos = cbi,
-                        .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &signal};
+                        .signalSemaphoreInfoCount = nsignal, .pSignalSemaphoreInfos = signal};
     GPU_VK_OK(vkQueueSubmit2(gpu_vk.queue, 1, &si, VK_NULL_HANDLE), "vkQueueSubmit2");
+    // vkQueuePresentKHR needs the queue to itself like a submit does, so it is made here, before the submission's gate opens
+    if (present) {
+        VkResult r = vkQueuePresentKHR(gpu_vk.queue, present);
+        if (present_result) *present_result = r;
+        else if (r != VK_SUCCESS) gpu_vk_failed(r, "vkQueuePresentKHR");
+    }
     g_cur = g_pro = g_epi = VK_NULL_HANDLE;
     g_value = 0;
     gpu_sync_end();
@@ -222,8 +236,12 @@ static void vk_texture_register(const dpool_ref *pool, int id, const tex_t *t, c
 static void vk_sampler_register(const dpool_ref *pool, int id, const samp_par *s) {
     bindless_sampler_register(pool, id, s);
 }
-// The offscreen capture (oot2/vk_capture.h) until the window's swapchain: after the work submitted before the call.
-static void vk_present(const tex_t *t, const int crop[4]) { vkc_present(t, crop); }
+// The picture goes to the offscreen capture (oot2/vk_capture.h: what the capture and the tools read, taken before the menu is
+// drawn) and, when there is a window (vkw_window, oot2/vk_present.h), to the window; both after the work submitted before the call.
+static void vk_present(const tex_t *t, const int crop[4]) {
+    vkc_present(t, crop);
+    if (vkw_active()) vkw_present(t, crop);
+}
 static void vk_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row,
                            uint64_t img) {
     vkb_read_texels(t, v, r, dst, row, img);
@@ -261,4 +279,6 @@ const GfxBackend gfx_vulkan_backend = {
     .guest_written = vk_guest_written,
     .guest_read = vk_guest_read,
     .cpu_synced = vk_cpu_synced,
+    .present_pace = vkw_pace,
+    .present_shown = vkw_shown,
 };

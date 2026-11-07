@@ -13,8 +13,9 @@
 // device. Changed here: a device is judged by the shared list of required items, and refused by name with every item it
 // lacks (DKB requires a few extensions and features of its own and skips a device silently); the features enabled are
 // the items' and nothing more (DKB enables everything the driver reports); asking for validation without the layer
-// installed stops the start instead of going on without it; sync and GPU-assisted validation; no swapchain (the present
-// ticket decides whether the device is made able to present), no second transfer queue, no memory allocator yet.
+// installed stops the start instead of going on without it; sync and GPU-assisted validation; the instance and the device
+// are made able to present only when a window was asked for (vkw_window, oot2/vk_present.h), and then with the swapchain
+// extension and present timing where the device has it; no second transfer queue, no memory allocator yet.
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -25,6 +26,7 @@
 #include "oot2/runtime.h"
 #include "oot2/vk_bindless.h"
 #include "oot2/vk_miss.h"
+#include "oot2/vk_present.h"
 #include "oot2/vk_raw.h"
 #include "oot2/vk_rec.h"
 #include "oot2/vk_replay.h"
@@ -261,12 +263,16 @@ static void instance(void) {
     }
     VkValidationFeaturesEXT features = {.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT, .pNext = &mci,
                                         .enabledValidationFeatureCount = nenables, .pEnabledValidationFeatures = enables};
-    const char *extensions[1] = {VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
+    // the debug messenger's extension when validating, and the window's surface extensions when a window was asked for
+    const char *extensions[16];
+    uint32_t nextensions = 0;
+    if (validate) extensions[nextensions++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    if (vkw_wanted()) nextensions += vkw_instance_extensions(extensions + nextensions, 16 - nextensions);
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "oot2",
                              .pEngineName = "oot2-native", .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pNext = validate ? &features : NULL,
                                .pApplicationInfo = &app, .enabledLayerCount = validate ? 1 : 0,
-                               .ppEnabledLayerNames = layers, .enabledExtensionCount = validate ? 1 : 0,
+                               .ppEnabledLayerNames = layers, .enabledExtensionCount = nextensions,
                                .ppEnabledExtensionNames = extensions};
     r = vkCreateInstance(&ci, NULL, &gpu_vk.instance);
     if (r == VK_ERROR_INCOMPATIBLE_DRIVER)   // a loader with no driver behind it
@@ -328,7 +334,9 @@ static void choose(void) {
         cand[i].name = props[i].deviceName;
         cand[i].type = props[i].deviceType;
         VkQueueFlags flags = 0;
-        if (queue_family(devs[i], &flags) == UINT32_MAX) cand[i].unusable = "no queue family with graphics and compute";
+        uint32_t family = queue_family(devs[i], &flags);
+        if (family == UINT32_MAX) cand[i].unusable = "no queue family with graphics and compute";
+        else if (vkw_wanted() && !vkw_can_present(devs[i], family)) cand[i].unusable = "it cannot present to the window";
         rt_log("gfx: vulkan: device %u: %s (%s, Vulkan %u.%u.%u), %d of the %d items the renderer requires", i,
                props[i].deviceName, type_name(props[i].deviceType), VK_API_VERSION_MAJOR(props[i].apiVersion),
                VK_API_VERSION_MINOR(props[i].apiVersion), VK_API_VERSION_PATCH(props[i].apiVersion), has,
@@ -376,10 +384,11 @@ static void create_device(uint64_t after) {
         features.pNext = &driver_cache;
         rt_log("gfx: vulkan: OOT2_VK_DRIVER_CACHE off: the driver's own pipeline cache is disabled");
     }
-    const char *names[OOT2_VK_EXT_COUNT];
+    const char *names[OOT2_VK_EXT_COUNT + 8];   // the items' extensions, and a window's: swapchain and present timing
     uint32_t nnames = 0;
     for (int e = 0; e < OOT2_VK_EXT_COUNT; e++)
         if (en.ext[e]) names[nnames++] = oot2_vk_extension_name(e);
+    if (vkw_wanted()) vkw_device_extensions(gpu_vk.phys, names, &nnames, &features);
     float priority = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = gpu_vk.family,
                                   .queueCount = 1, .pQueuePriorities = &priority};
@@ -434,6 +443,7 @@ void gpu_vk_open(void) {
     backing_open(&gpu_vk_backing_ops);
     gpu_vk_mirror_policy();
     vkb_open();
+    vkw_open();   // the window's surface, the menu's pipeline and the present thread, when a window was asked for
     g_open = 1;
     plat_mutex_unlock(&g_open_lock);
 }
@@ -444,6 +454,7 @@ void gpu_vk_close(void) {
     plat_mutex_lock(&g_open_lock);
     if (g_open) {
         vkrec_close();   // the frames handed over, submitted (nothing when the replay never opened the recorder)
+        vkw_close();     // the present thread, the swapchain, the menu and the surface, before the device goes
         gpu_sync_finish();
         vkr_device_close();
         vkm_close();   // the builds still running, the releases that were waiting, the summary of the misses

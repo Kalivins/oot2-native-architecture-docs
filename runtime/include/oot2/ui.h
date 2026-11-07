@@ -13,6 +13,7 @@
 // any, the runtime was built with (the ImGui fetch study). The tests of the build keep using the stand-in.
 #pragma once
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,8 +63,9 @@ size_t ui_standin_list(const char *text, char *out, size_t cap);
 //
 // The menu is drawn with Dear ImGui into draw lists and no more: the Vulkan present path (a later ticket) renders them,
 // so a build without a window, a device or the null back end's own, runs the same code, which is how the tests drive
-// it. All calls but ui_menu_input come from the one thread that builds the frame; ui_menu_input only touches atomics,
-// so the thread that pumps window events may call it.
+// it. All calls but ui_menu_input and ui_menu_pointer come from the one thread that builds the frame; those two may come from
+// the thread that pumps window events: the pointer is stored in atomics, and the open key's close saves the settings file on
+// the calling thread (never on a frame), with the status line it leaves under a lock.
 typedef enum UiRowState {
     UI_ROW_LIVE,      // a change reaches the running game
     UI_ROW_RESTART,   // the next start uses it
@@ -137,6 +139,49 @@ typedef struct UiDraw {
 int ui_menu_frame(const UiFrame *frame, UiDraw *out);
 // Where the last frame drew a row's own control (x, y, width, height), for the pointer; 0 when it was not drawn.
 int ui_menu_row_rect(int index, float rect[4]);
+
+// ---- drawing the frame (the Vulkan present path, runtime/gpu/vk_overlay.c)
+//
+// The last frame's draw lists, flattened for a renderer that knows no Dear ImGui type: one vertex array, one array of 32-bit
+// indices that already hold the vertex offsets, and the commands in drawing order. Valid until the next ui_menu_frame, and
+// to be read on the thread that made it. An empty set (the menu closed and the overlay off, or no Dear ImGui) says so with
+// zero commands. A vertex is Dear ImGui's own: position and texture coordinates in window pixels, and a colour as
+// 0xAABBGGRR (red in the low byte). A command draws index_count indices from first_index with texture `texture` (the id
+// the renderer's create returned), inside clip = x0, y0, x1, y1 in window pixels.
+typedef struct UiVertex {
+    float x, y, u, v;
+    uint32_t color;
+} UiVertex;
+typedef struct UiCmd {
+    float clip[4];
+    uint64_t texture;
+    uint32_t first_index, index_count;
+} UiCmd;
+typedef struct UiDrawData {
+    const UiVertex *vertices;
+    uint32_t vertex_count;
+    const uint32_t *indices;
+    uint32_t index_count;
+    const UiCmd *cmds;
+    uint32_t cmd_count;
+} UiDrawData;
+void ui_menu_draw_data(UiDrawData *out);
+
+// The renderer's textures. Dear ImGui builds its font atlas as a texture and asks its renderer to create, update and
+// destroy it; with these set, ui_menu_frame passes every such request on instead of answering it itself (the way the
+// frame runs with no renderer). create returns the texture's id (not 0) or 0 when it cannot; pixels are width x height texels,
+// 4 bytes each (red, green, blue, alpha) or 1 byte each when alpha_only. update gives the changed rectangle, whose first
+// texel is at pixels and whose rows are pitch bytes apart. destroy comes once no frame that drew the texture can still be
+// in flight. All three run inside ui_menu_frame, on the thread that builds the frame; a NULL set restores the default.
+typedef struct UiTextureOps {
+    uint64_t (*create)(int width, int height, int alpha_only, const uint8_t *pixels);
+    void (*update)(uint64_t id, int x, int y, int width, int height, int alpha_only, const uint8_t *pixels, int pitch);
+    void (*destroy)(uint64_t id);
+} UiTextureOps;
+void ui_menu_set_texture_ops(const UiTextureOps *ops);
+// Make the context and the font atlas now, for a window of width by height pixels, and pass the atlas to the texture ops,
+// so that the first frame that shows something creates nothing. 1 when it did, 0 without Dear ImGui.
+int ui_menu_prepare(int width, int height);
 
 #ifdef __cplusplus
 }
