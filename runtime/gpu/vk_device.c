@@ -413,6 +413,7 @@ void gpu_vk_open(void) {
     create_device(after);
     gpu_vk_start_timeline(after);
     backing_open(&gpu_vk_backing_ops);
+    gpu_vk_mirror_policy();
     g_open = 1;
     plat_mutex_unlock(&g_open_lock);
 }

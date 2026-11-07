@@ -11,9 +11,9 @@
 //   extent   VRAM. A pool the CPU cannot see (CPU_NO_ACCESS, physical) gets one extent over the whole pool at its first
 //            bind, so no bind inside the pool spans two extents; a pool no bind reaches (render targets, which are
 //            images) gets none. Up to BACKING_BLOCK bytes it is a part of a VRAM block; past that, a block of its own.
-//   import   host memory imported over committed guest pages: a pool the CPU can see (BACKING_RULE).
-//   mirror   VRAM kept current from the guest's pages: the coherence ticket's hook; not made here.
-//   none     before that first bind, and for pages of a pool the CPU can see that no import covers.
+//   import   host memory imported over committed guest pages: a pool the CPU can see whose mirror the rule refused.
+//   mirror   VRAM kept current from the guest's pages, in the place an import would take (Mirrors below).
+//   none     before that first bind, and for pages of a pool the CPU can see that no import or mirror covers.
 // A page of a virtual pool is the page of the physical pool its one run maps it to (the front end allows one run per
 // virtual pool, research 33 decision 4); a bind over an unmapped page is a named fatal.
 //
@@ -52,8 +52,34 @@
 // runtime/vk_headroom.c, whose idea this follows; no code is taken from it). A block made on the resolving thread
 // because none was ready, and every block of its own, is counted and logged.
 //
+// Mirrors (D14, D17a, section 8). A bind in a pool the CPU can see asks the mirror hook (the Vulkan back end's says yes
+// on a discrete device, where imported memory is read across the bus) and then the admission rule: the mirror is made
+// when the device-local heap's use plus the mirror's size plus an eighth of its budget fits the budget, the figures of
+// VK_EXT_memory_budget (BackingOps.vram), and the write watch covers its range; otherwise the bind gets an import. A
+// mirror is VRAM from the blocks, over the range the import would cover (the run of committed pages around the bind
+// inside its cell), and needs no import beside it:
+//   CPU to mirror   the first resolve of a mirror in a submission brings it current before that submission's own work:
+//                   it queries the mirror's range through the page generations (oot2/pagegen.h, the one owner of the
+//                   write watch), and copies the pages stamped after the mirror's generation (all of them the first
+//                   time) from guest memory into a staging copy taken then, which the GPU copies in the submission's
+//                   prologue, after every earlier submission's work and before its own. So a CPU write before a submit
+//                   is read by that submission, as on the console, whichever submission of the frame it is.
+//   GPU to guest    a GPU write into a mirror is declared by whoever records it (backing_gpu_wrote: the replay's
+//                   storage writes, copies and fills); at the submission's end its bytes are copied out to staging, and
+//                   once the device reached the submission's value, on the completion thread and before the value is
+//                   done, they are written into guest memory. Never before: a CPU that waited for the fence reads them,
+//                   one that did not reads the old bytes, as on the console.
+//   both            a copy into a mirror leaves out the bytes of GPU writes not yet written back, so a page the CPU and
+//                   the GPU both write keeps the GPU's bytes (DKB Recomp's shadow-storage rule).
+// A new backing over a run that holds older ones (a bind that grew the run) waits for the older submissions that used
+// them, so their GPU writes are in guest memory before the new backing takes its copy; one written by the submission
+// being recorded is a named fatal. A mirror over pages the guest decommitted is retired at the next sync, as an import is.
+// Lever L1 must not release pages a mirror covers (backing_page), as it must not release imported ones.
+//
 // Locking: one reader-writer lock. A resolve that finds its backing holds it shared; one that makes a backing holds it
-// exclusively, and imports are made under it. Every call may come from any thread.
+// exclusively, and imports are made under it. The mirrors' coherence state (their generations, the GPU writes not yet
+// written back) has a mutex of its own, taken after that lock and never by a thread that waits for a value; the
+// completion thread takes only it. Every call may come from any thread.
 #pragma once
 #include <stdint.h>
 
@@ -67,6 +93,7 @@
 #define BACKING_DEFERRED_MAX 1024             // backings waiting for retirement; a full queue waits for its oldest
 #define BACKING_EXTENT_ALIGN 0x10000ull       // extents are 64 KiB aligned in their block, as window pages are
 #define BACKING_HOST_PAGE 0x1000ull           // the page of commit and of host import
+#define BACKING_MIRROR_RESERVE 8              // section 8: a mirror leaves an eighth of the VRAM budget free
 enum { BACKING_NONE, BACKING_EXTENT, BACKING_IMPORT, BACKING_MIRROR };
 
 // What a bind asks for: its range and its pool's flags (NVNmemoryPoolFlags).
@@ -75,9 +102,11 @@ typedef struct BackingAsk {
     uint32_t pool_flags;
 } BackingAsk;
 // BACKING_EXTENT for a pool the CPU cannot see; for one it can, BACKING_MIRROR when the mirror hook says so, else
-// BACKING_IMPORT. The hook belongs to the coherence ticket (D14's mirrors); until it is set, the answer is an import.
+// BACKING_IMPORT. A mirror the admission refuses is an import after all (backing_resolve). No hook: imports.
 int backing_rule(const BackingAsk *ask);
 void backing_set_mirror_hook(int (*want_mirror)(const BackingAsk *ask));
+// The admission (section 8): 1 when used + size + budget / BACKING_MIRROR_RESERVE <= budget.
+int backing_mirror_fits(uint64_t used, uint64_t budget, uint64_t size);
 
 // ---- the memory behind backings
 typedef struct BackingMem {
@@ -86,6 +115,13 @@ typedef struct BackingMem {
     uint64_t address;   // the buffer's device address
     uint64_t size;
 } BackingMem;
+// A copy between host memory and backing memory: size bytes at offset in mem, and host's bytes (an upload) or the
+// place they are read from (a readback).
+typedef struct BackingCopy {
+    const BackingMem *mem;
+    uint64_t offset, size;
+    const void *host;
+} BackingCopy;
 typedef struct BackingOps {
     // A VRAM block of size bytes with one buffer over it: 1, or 0 when the device has no room (a named fatal follows).
     int (*block_new)(uint64_t size, BackingMem *out);
@@ -93,6 +129,18 @@ typedef struct BackingOps {
     int (*import)(uint64_t host, uint64_t size, BackingMem *out);
     // Free an allocation no submission can use any more.
     void (*free)(const BackingMem *m);
+    // ---- mirrors: all four, or none (a map without mirrors; a hook that asks for one then stops by name)
+    // The heap blocks come from, as VK_EXT_memory_budget tells it: 1 with its use and its budget in bytes.
+    int (*vram)(uint64_t *used, uint64_t *budget);
+    // In the submission `value` being recorded, on its thread: copy each host range into its backing memory in the
+    // submission's prologue, after every command of earlier submissions and before every command of this one. The host
+    // bytes are taken before the call returns.
+    void (*upload)(uint64_t value, const BackingCopy *c, int n);
+    // Likewise, at the end of the submission, after every command it recorded: copy each backing range out, and set
+    // c[i].host to where its bytes can be read once value is done (and until a later submission's value is).
+    void (*readback)(uint64_t value, BackingCopy *c, int n);
+    // backing_close, once every backing is freed: the memory uploads and readbacks used goes.
+    void (*close)(void);
 } BackingOps;
 
 // Open the map over ops (the Vulkan back end at gpu_vk_open, after its timeline started; a test with stand-ins), and
@@ -111,13 +159,37 @@ int backing_pool_map_virtual(const pool_t *v, int n, const nvn_mapping_t *reques
 // The backing of [addr, addr + size) (size 0 counts as 1) for the submission with the given value (gpu_sync_begin's;
 // 0 for none): its buffer, the offset of addr in it and addr's device address. A range that is not wholly inside one
 // pool, or that would need two backings (pages of a virtual pool in no run), is a named fatal that prints its shape.
+// A resolve with a value is made in that submission, on its thread (between gpu_sync_begin and gpu_sync_end): the first
+// one of a mirror brings it current for the submission (Mirrors above). Value 0 only reads the map.
 typedef struct BackingRef {
     uint64_t buffer, offset, address;
-    int kind;   // BACKING_EXTENT or BACKING_IMPORT
+    int kind;   // BACKING_EXTENT, BACKING_IMPORT or BACKING_MIRROR
 } BackingRef;
 void backing_resolve(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out);
-// Before a submission: grow and retire imports after the commit epoch moved, and free what retired.
+// Before a submission: grow and retire imports after the commit epoch moved, retire mirrors over pages decommitted since,
+// and free what retired.
 void backing_sync(void);
+
+// ---- coherence (Mirrors above), in the submission `value` being recorded, on its thread
+// The submission writes [addr, addr + size) on the GPU, through the backing a resolve of it in this submission gave: in
+// a mirror the bytes go back to guest memory once the device reached value; in an import they are there already.
+// Every GPU write of a replayed submission into a CPU-visible pool is declared, or the CPU never sees it.
+void backing_gpu_wrote(uint64_t addr, uint64_t size, uint64_t value);
+// Every live mirror current for the submission, as its first resolve would make it: for work that reaches memory
+// without a resolve (the raw path, D15).
+void backing_sync_mirrors(uint64_t value);
+// The submission's end, before gpu_sync_end: the readbacks of what it declared written, and their write-back.
+void backing_submit_end(uint64_t value);
+
+// ---- the CPU hooks of gfx.h, as the Vulkan back end answers them
+// guest_written: the CPU wrote [addr, addr + size) (a flush, the front end's own writes): the pages are stamped, so the
+// mirrors over them are brought current at their next use.
+void backing_guest_written(uint64_t addr, uint64_t size);
+// guest_read and cpu_synced: what the GPU wrote into mirrors is in guest memory by the time a value is done, so these
+// check it: a write-back still waiting for a value that is done is a named fatal. A read of bytes a GPU write still in
+// flight will replace is counted (the game reads before its fence; the console gives it the old bytes too).
+void backing_guest_read(uint64_t addr, uint64_t size);
+void backing_cpu_synced(uint64_t fence);
 
 // ---- the decision of one page, for tests and for the raw path's page table: the kind, and when it has a backing, the
 // device address of addr and, for a page of a virtual pool, the physical GPU address it maps to (else addr).
@@ -134,5 +206,10 @@ typedef struct BackingStats {
     uint64_t blocks_made_ahead, blocks_made_inline, blocks_dedicated;  // by the block thread; on a resolving thread
     uint64_t deferred, deferred_peak, deferred_full_waits, freed;      // the deferred-release queue
     uint64_t fini_waits, resolves, resolve_misses, syncs, sync_rescans;
+    uint64_t mirrors, mirror_bytes;                                    // live now
+    uint64_t mirrors_made, mirrors_refused_budget, mirrors_refused_untracked, mirrors_stale, replace_waits;
+    uint64_t mirror_syncs, uploads, upload_bytes;                      // syncs, and the copies into mirrors they made
+    uint64_t writebacks, writeback_bytes, writebacks_skipped;          // GPU writes written back; into unmapped memory
+    uint64_t pending, reads_in_flight;                                 // GPU writes not written back yet; early reads
 } BackingStats;
 void backing_stats(BackingStats *out);

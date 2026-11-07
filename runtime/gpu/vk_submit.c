@@ -53,6 +53,7 @@ typedef struct {
 static Slot *g_slots;
 static int g_nslots;
 static VkCommandBuffer g_cur;   // the open submission's command buffer, once asked for
+static VkCommandBuffer g_pro;   // its prologue, once asked for
 static uint64_t g_value;        // the open submission's value, 0 when none is open
 static int g_kind;
 
@@ -78,13 +79,12 @@ uint64_t gpu_vk_begin(int kind) {
     uint64_t value = gpu_sync_begin();
     g_value = value;
     g_kind = kind;
-    g_cur = VK_NULL_HANDLE;
+    g_cur = g_pro = VK_NULL_HANDLE;
     return value;
 }
 
-VkCommandBuffer gpu_vk_cmd(void) {
-    if (!g_value) rt_fatal("gfx: vulkan: a command buffer outside a submission");
-    if (g_cur) return g_cur;
+// A command buffer from a free slot, begun for the open submission.
+static VkCommandBuffer slot_begin(void) {
     uint64_t done = gpu_sync_done();
     int i = 0;
     while (i < g_nslots && g_slots[i].value > done) i++;
@@ -99,12 +99,37 @@ VkCommandBuffer gpu_vk_cmd(void) {
         g_nslots++;
     }
     g_slots[i].value = g_value;
-    g_cur = g_slots[i].cb;
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
-    GPU_VK_OK(vkBeginCommandBuffer(g_cur, &bi), "vkBeginCommandBuffer");
+    GPU_VK_OK(vkBeginCommandBuffer(g_slots[i].cb, &bi), "vkBeginCommandBuffer");
+    return g_slots[i].cb;
+}
+
+VkCommandBuffer gpu_vk_cmd(void) {
+    if (!g_value) rt_fatal("gfx: vulkan: a command buffer outside a submission");
+    if (g_cur) return g_cur;
+    g_cur = slot_begin();
     checkpoint(0);
     return g_cur;
+}
+
+// Every write before it made available and visible to every access after it, in submission order (D18's barrier).
+static void full_barrier(VkCommandBuffer cb) {
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                           .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                           .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+}
+
+VkCommandBuffer gpu_vk_prologue(void) {
+    if (!g_value) rt_fatal("gfx: vulkan: a prologue outside a submission");
+    if (g_pro) return g_pro;
+    g_pro = slot_begin();
+    full_barrier(g_pro);
+    return g_pro;
 }
 
 void gpu_vk_effect(GpuEffect fn, void *arg) {
@@ -115,18 +140,27 @@ void gpu_vk_effect(GpuEffect fn, void *arg) {
 uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits) {
     if (!g_value) rt_fatal("gfx: vulkan: the end of a submission that was not begun");
     uint64_t value = g_value;
+    VkCommandBufferSubmitInfo cbi[2];
+    uint32_t ncb = 0;
+    if (g_pro) {
+        full_barrier(g_pro);
+        GPU_VK_OK(vkEndCommandBuffer(g_pro), "vkEndCommandBuffer (the prologue)");
+        cbi[ncb++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                                                 .commandBuffer = g_pro};
+    }
     if (g_cur) {
         checkpoint(1);
         GPU_VK_OK(vkEndCommandBuffer(g_cur), "vkEndCommandBuffer");
+        cbi[ncb++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+                                                 .commandBuffer = g_cur};
     }
-    VkCommandBufferSubmitInfo cbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = g_cur};
     VkSemaphoreSubmitInfo signal = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = gpu_vk.timeline,
                                     .value = value, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = nwaits,
-                        .pWaitSemaphoreInfos = waits, .commandBufferInfoCount = g_cur ? 1u : 0u,
-                        .pCommandBufferInfos = &cbi, .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &signal};
+                        .pWaitSemaphoreInfos = waits, .commandBufferInfoCount = ncb, .pCommandBufferInfos = cbi,
+                        .signalSemaphoreInfoCount = 1, .pSignalSemaphoreInfos = &signal};
     GPU_VK_OK(vkQueueSubmit2(gpu_vk.queue, 1, &si, VK_NULL_HANDLE), "vkQueueSubmit2");
-    g_cur = VK_NULL_HANDLE;
+    g_cur = g_pro = VK_NULL_HANDLE;
     g_value = 0;
     gpu_sync_end();
     return value;
@@ -159,11 +193,14 @@ static int vk_pool_map_virtual(pool_t *v, int n, const void *requests) {
     return backing_pool_map_virtual(v, n, requests);
 }
 
+// The replay resolves its bindings in the submission (a mirror's first resolve brings it current in the prologue) and
+// declares its GPU writes (backing_gpu_wrote); its end reads back what it wrote into mirrors.
 static uint64_t vk_submit(const uint64_t *handles, int n) {
     backing_sync();
     uint64_t value = gpu_vk_begin(GPU_VK_REPLAY);
     for (int i = 0; i < n; i++) gpu_check_recording(value, i, handles[i]);
     gpu_vk_cmd();
+    backing_submit_end(value);
     return gpu_vk_end(NULL, 0);
 }
 
@@ -213,13 +250,13 @@ static void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion
     (void)img;
     not_built("a texel write (write_texels)");
 }
-// Nothing is kept for textures or programs, no copy of pool storage exists and the GPU writes nothing the CPU reads:
-// these have nothing to do yet.
+// Nothing is kept for textures or programs yet: these have nothing to do.
 static void vk_texture_release(const tex_t *t) { (void)t; }
 static void vk_program_release(const prog_t *p) { (void)p; }
-static void vk_guest_written(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
-static void vk_guest_read(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
-static void vk_cpu_synced(uint64_t fence) { (void)fence; }
+// The CPU's view of mirrored pool storage (oot2/backing.h, Mirrors).
+static void vk_guest_written(uint64_t addr, uint64_t size) { backing_guest_written(addr, size); }
+static void vk_guest_read(uint64_t addr, uint64_t size) { backing_guest_read(addr, size); }
+static void vk_cpu_synced(uint64_t fence) { backing_cpu_synced(fence); }
 
 const GfxBackend gfx_vulkan_backend = {
     .name = "vulkan",

@@ -37,7 +37,7 @@ FAILING = {
                   "CPU_NO_ACCESS pool [0x8000000000, 0x8000100000) by 0x1000 bytes: it would need two backings",
     "span_virtual": "reaches pages no mapping request mapped (16 of 32 pages mapped): it would need two backings",
     "import_fails": "the device refused to import committed host memory",
-    "mirror": "mirrors are not built yet",
+    "mirror": "the mirror hook chose a mirror for [0x",
 }
 
 

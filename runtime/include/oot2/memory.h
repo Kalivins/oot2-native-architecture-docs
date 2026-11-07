@@ -67,7 +67,8 @@ RtMemInfo rt_mem_query(uint64_t addr);
 
 // Pages of the heap or alias region written since the last call with reset (the GPU back end uploads them again,
 // D14): addresses to pages, at most max; the count is returned. UINT64_MAX when [addr, addr+size) is not inside one of
-// those two regions or the platform has no write watch.
+// those two regions or the platform has no write watch. A call with reset takes the pages it reports from every later
+// caller, so the runtime has one caller, the page generations (oot2/pagegen.h), which every consumer reads instead.
 uint64_t rt_mem_written(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset);
 
 // The commit state of guest pages, for the GPU back end's host imports (D14): an import over a page that is not
@@ -119,8 +120,8 @@ void rt_mem_measure(RtMemStats *out);
 // function is up to the next function start in host address order, or its module's end marker) is guest code; any other is runtime
 // or back-end code. Locking: busy runs under the runtime's exclusive memory lock and must not call rt_pages_* or touch
 // guest memory; written runs after the lock is dropped, on the writing thread (possibly in a signal handler on POSIX).
-// The write watch (rt_mem_written, Windows): a release clears the page's mark, so read and reset the watch for a page
-// before releasing it; the write that recommits a page puts its mark back. The pages of a range that the guest unmaps
+// The write watch (rt_mem_written, Windows): a release clears the page's mark, so query a page through the page
+// generations (pagegen_scan) before releasing it; the write that recommits a page puts its mark back. The pages of a range that the guest unmaps
 // or shrinks away lose their state with their memory.
 #define RT_MAX_PAGE_RANGES 64
 enum { RT_PAGES_OFF = 0, RT_PAGES_COUNTING = 1, RT_PAGES_RELEASING = 2 };

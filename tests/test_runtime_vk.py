@@ -144,6 +144,29 @@ class VkDeviceTest(unittest.TestCase):
         self.assertEqual(len(re.findall(r"^round \d+: ", done.stdout, re.M)), 3, done.stdout)
         print(f"\n{done.stdout}", end="")
 
+    def test_a_cpu_write_into_a_mirror_is_read_by_the_next_submission(self) -> None:
+        self.need_usable_device()
+        done = self.run_case("mirror_upload", env={"OOT2_VK_VALIDATION": "sync"})
+        self.assert_clean(done, "mirror_upload")
+        self.assertIn("three CPU writes, each read by the next submission; only the written page was copied each time",
+                      done.stdout)
+        print(f"\n{done.stdout}", end="")
+
+    def test_a_gpu_write_into_a_mirror_reaches_the_cpu_after_its_fence_and_never_before(self) -> None:
+        self.need_usable_device()
+        done = self.run_case("mirror_writeback", env={"OOT2_VK_VALIDATION": "sync"})
+        self.assert_clean(done, "mirror_writeback")
+        self.assertIn("held by a semaphore: guest memory kept the old bytes", done.stdout)
+        self.assertIn("the GPU's write reached guest memory after its fence and cpu_synced", done.stdout)
+        print(f"\n{done.stdout}", end="")
+
+    def test_the_memory_budget_figures_move_the_mirror_admission(self) -> None:
+        self.need_usable_device()
+        done = self.run_case("mirror_budget", env={"OOT2_VK_VALIDATION": "on"})
+        self.assert_clean(done, "mirror_budget")
+        self.assertRegex(done.stdout, r"one of \d+ MiB admitted before and refused after")
+        print(f"\n{done.stdout}", end="")
+
     def assert_loss_report(self, case: str, where: str) -> str:
         with tempfile.TemporaryDirectory(prefix="oot2-loss-") as d:
             done = self.run_case(case, d)

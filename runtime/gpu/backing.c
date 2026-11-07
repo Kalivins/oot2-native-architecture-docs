@@ -11,9 +11,22 @@
 // map only under the exclusive lock, so a stamp made under the shared lock is seen by whoever removes it. Memory is
 // freed outside the lock (freeing a 64 MiB import takes about 1.6 ms, research 48).
 //
-// A cell holds the imports of the separate runs of committed pages that binds reached inside it, sorted and disjoint.
-// A bind outside them commits its own pages, then takes the whole run of committed pages around it: every import of the
-// cell inside that run is replaced by one import over the run.
+// A cell holds the imports and mirrors of the separate runs of committed pages that binds reached inside it, sorted and
+// disjoint. A bind outside them commits its own pages, then takes the whole run of committed pages around it: every
+// backing of the cell inside that run is replaced by one over the run.
+//
+// Mirrors (backing.h, Mirrors): VRAM parts of the blocks, as extents are, over the run an import would cover. A mirror
+// is brought current at its first resolve in each submission (mirror_use) from the page generations (oot2/pagegen.h);
+// the GPU writes declared into it are read back at the submission's end and written into guest memory by an effect on
+// the completion thread (writeback), which runs once the device reached the value and before the value is done.
+//
+// The mirrors' copies and write-backs are adapted from DKB Recomp runtime/vk_memory.c at 9d8fa02 (GPL-3.0-or-later):
+// the admission rule (used + size + budget / 8 within the budget), the generation a mirror is current up to, the copy of
+// the pages stamped after it, a GPU write noted at record time and copied back into guest memory at its fence, and the
+// copies into a mirror that leave out the bytes of GPU writes not copied back yet. Changed here: a mirror covers the
+// committed run around its bind instead of the pool, needs no import (its copies go through staging), is brought current
+// at its first resolve in a submission rather than by 2 MiB snapshots per submission, and a new backing over older ones
+// waits for the submissions that used them.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +35,7 @@
 #include "oot2/gpu.h"
 #include "oot2/kernel.h"
 #include "oot2/memory.h"
+#include "oot2/pagegen.h"
 #include "oot2/runtime.h"
 #include "plat.h"
 #include "../nvn/nvn_pool_index.h"
@@ -51,14 +65,20 @@ typedef struct Block {
     int nfree, cap;
 } Block;
 
-// An extent (a part of a block) or an import. mem is the whole buffer; offset is where gpu_lo lies in it.
+// An extent or a mirror (a part of a block), or an import. mem is the whole buffer; offset is where gpu_lo lies in it.
 typedef struct Backing {
     int kind;
     uint64_t gpu_lo, gpu_hi;
     uint64_t last_use;   // atomic: the newest submission value that resolved into it
+    uint64_t written;    // atomic: the newest value that declared a GPU write into it (backing_gpu_wrote)
     BackingMem mem;
     uint64_t offset;
-    Block *block;        // an extent's
+    Block *block;        // an extent's or a mirror's
+    uint64_t part;       // the bytes it takes of its block
+    // A mirror's, under g_coh: every CPU write stamped up to synced is in it (none while fresh); sync_value is the
+    // submission it was brought current for last (atomic, read without g_coh to skip a second sync).
+    uint64_t synced, sync_value;
+    int fresh;
 } Backing;
 
 // A pool the CPU sees cut to the windows [k1, k2] one bind touched, and the imports binds made inside it.
@@ -80,6 +100,7 @@ typedef struct Rec {
     int64_t run_delta;      // physical GPU address minus virtual GPU address
     int run_lost;           // the run's physical pool was finalized while pages were mapped
     uint64_t *bits, pages, mapped;
+    int mirror_logged;      // a refused mirror of this pool was logged
 } Rec;
 
 static PlatLock g_lock = PLAT_LOCK_INIT;
@@ -99,6 +120,16 @@ static int (*g_mirror_hook)(const BackingAsk *ask);
 typedef struct Deferred { Backing *b; uint64_t value; } Deferred;
 static Deferred *g_def;
 static int g_ndef, g_def_cap;
+
+// Mirrors: the live ones (g_lock), and the coherence state (g_coh, after g_lock; the completion thread takes it alone):
+// GPU writes declared and not written back yet, and the counters of syncs and write-backs.
+static Backing **g_mirrors;
+static int g_nmirrors, g_mirrors_cap;
+static PlatMutex g_coh = PLAT_MUTEX_INIT;
+typedef struct Pending { uint64_t value, lo, hi; Backing *m; } Pending;
+static Pending *g_pend;
+static int g_npend, g_pend_cap;
+static BackingStats g_cst;   // the coherence counters (g_coh)
 
 // The block thread.
 static PlatMutex g_bt_lock = PLAT_MUTEX_INIT;
@@ -135,6 +166,12 @@ int backing_rule(const BackingAsk *ask) {
     if (g_mirror_hook && g_mirror_hook(ask)) return BACKING_MIRROR;
     return BACKING_IMPORT;
 }
+
+int backing_mirror_fits(uint64_t used, uint64_t budget, uint64_t size) {
+    return used <= budget && size <= budget - used && budget / BACKING_MIRROR_RESERVE <= budget - used - size;
+}
+
+static int has_mirrors(void) { return g_ops.vram != NULL; }
 
 // ---------- VRAM blocks (g_lock exclusive unless said)
 static int spare_count(void) {
@@ -265,11 +302,10 @@ static Block *block_inline(uint64_t size, int dedicated, const char *what) {
     return b;
 }
 
-// A new extent over the whole of rec's range (g_lock exclusive).
-static Backing *extent_new(Rec *r) {
-    uint64_t size = up(r->hi - r->lo, BACKING_EXTENT_ALIGN), at = UINT64_MAX;
-    char what[96];
-    snprintf(what, sizeof what, "the extent of pool [%#llx, %#llx)", (ull)r->lo, (ull)r->hi);
+// size bytes (a multiple of BACKING_EXTENT_ALIGN) of a VRAM block, for what: the block, and the offset in *out.
+// g_lock exclusive.
+static Block *vram_take(uint64_t size, const char *what, uint64_t *out) {
+    uint64_t at = UINT64_MAX;
     Block *blk = NULL;
     if (size > BACKING_BLOCK) {
         blk = block_inline(size, 1, what);
@@ -289,11 +325,38 @@ static Backing *extent_new(Rec *r) {
             bt_kick();
         }
     }
+    *out = at;
+    return blk;
+}
+
+// A new extent over the whole of rec's range (g_lock exclusive).
+static Backing *extent_new(Rec *r) {
+    uint64_t size = up(r->hi - r->lo, BACKING_EXTENT_ALIGN), at;
+    char what[96];
+    snprintf(what, sizeof what, "the extent of pool [%#llx, %#llx)", (ull)r->lo, (ull)r->hi);
+    Block *blk = vram_take(size, what, &at);
     Backing *b = calloc(1, sizeof *b);
     if (!b) rt_fatal("gfx: vulkan: backing map: out of memory for an extent");
     *b = (Backing){.kind = BACKING_EXTENT, .gpu_lo = r->lo, .gpu_hi = r->lo + size, .mem = blk->mem, .offset = at,
-                   .block = blk};
+                   .block = blk, .part = size};
     g_st.extents++, g_st.extent_bytes += size;
+    return b;
+}
+
+// A new mirror over guest pages [lo, hi), fresh: nothing is copied into it until its first use in a submission.
+// g_lock exclusive.
+static Backing *mirror_new(uint64_t lo, uint64_t hi) {
+    uint64_t size = up(hi - lo, BACKING_EXTENT_ALIGN), at;
+    char what[96];
+    snprintf(what, sizeof what, "the mirror of [%#llx, %#llx)", (ull)lo, (ull)hi);
+    Block *blk = vram_take(size, what, &at);
+    Backing *b = calloc(1, sizeof *b);
+    if (!b) rt_fatal("gfx: vulkan: backing map: out of memory for a mirror");
+    *b = (Backing){.kind = BACKING_MIRROR, .gpu_lo = lo, .gpu_hi = hi, .mem = blk->mem, .offset = at, .block = blk,
+                   .part = size, .fresh = 1};
+    g_mirrors = grow(g_mirrors, &g_mirrors_cap, g_nmirrors + 1, sizeof *g_mirrors, "the mirror list");
+    g_mirrors[g_nmirrors++] = b;
+    g_st.mirrors++, g_st.mirror_bytes += hi - lo, g_st.mirrors_made++;
     return b;
 }
 
@@ -304,8 +367,18 @@ static void defer(Backing *b) {
     g_def[g_ndef++] = (Deferred){b, used_by(b)};
     g_st.deferred = (uint64_t)g_ndef;
     if (g_st.deferred > g_st.deferred_peak) g_st.deferred_peak = g_st.deferred;
-    if (b->kind == BACKING_EXTENT) g_st.extents--, g_st.extent_bytes -= b->gpu_hi - b->gpu_lo;
-    else g_st.imports--, g_st.import_bytes -= b->gpu_hi - b->gpu_lo;
+    if (b->kind == BACKING_EXTENT) {
+        g_st.extents--, g_st.extent_bytes -= b->gpu_hi - b->gpu_lo;
+    } else if (b->kind == BACKING_MIRROR) {
+        g_st.mirrors--, g_st.mirror_bytes -= b->gpu_hi - b->gpu_lo;
+        for (int i = 0; i < g_nmirrors; i++)
+            if (g_mirrors[i] == b) {
+                g_mirrors[i] = g_mirrors[--g_nmirrors];
+                break;
+            }
+    } else {
+        g_st.imports--, g_st.import_bytes -= b->gpu_hi - b->gpu_lo;
+    }
 }
 
 // What to free once the lock is dropped.
@@ -328,9 +401,9 @@ static void retire(Freeing *f, int all) {
             continue;
         }
         Backing *b = d.b;
-        if (b->kind == BACKING_EXTENT) {
+        if (b->kind != BACKING_IMPORT) {
             Block *blk = b->block;
-            block_give(blk, b->offset, b->gpu_hi - b->gpu_lo);
+            block_give(blk, b->offset, b->part);
             if (!blk->used && (all || blk->dedicated || spare_count() > BACKING_SPARE_BLOCKS)) {
                 to_free(f, &blk->mem);
                 block_drop(blk);
@@ -608,6 +681,132 @@ static void cell_put(Cell *c, uint64_t rs, uint64_t re, Backing *b) {
     g_st.imports_grown += (uint64_t)replaced;
 }
 
+// ---------- mirrors: copies in (g_coh)
+typedef struct Runs { Span *r; int n, cap; } Runs;
+typedef struct Ups { const Backing *m; BackingCopy *c; int n, cap; uint64_t bytes; } Ups;
+
+static void runs_push(void *ctx, uint64_t lo, uint64_t hi) {
+    Runs *s = ctx;
+    s->r = grow(s->r, &s->cap, s->n + 1, sizeof *s->r, "a mirror's runs");
+    s->r[s->n++] = (Span){lo, hi};
+}
+
+static void up_push(Ups *u, uint64_t lo, uint64_t hi) {
+    u->c = grow(u->c, &u->cap, u->n + 1, sizeof *u->c, "a mirror's copies");
+    u->c[u->n++] = (BackingCopy){&u->m->mem, u->m->offset + (lo - u->m->gpu_lo), hi - lo, (const void *)(uintptr_t)lo};
+    u->bytes += hi - lo;
+}
+
+// [lo, hi) into u, less the bytes of GPU writes not written back yet (pending entries from i on) and the pages not
+// committed now (a mirror over them is retired at the next sync).
+static void up_range(Ups *u, uint64_t lo, uint64_t hi, int i) {
+    for (; i < g_npend; i++)
+        if (g_pend[i].lo < hi && g_pend[i].hi > lo) {
+            if (g_pend[i].lo > lo) up_range(u, lo, g_pend[i].lo, i + 1);
+            if (g_pend[i].hi < hi) up_range(u, g_pend[i].hi, hi, i + 1);
+            return;
+        }
+    for (uint64_t a = lo; a < hi;) {
+        int c;
+        uint64_t n = rt_mem_commit_run(a, hi - a, &c);
+        if (n == UINT64_MAX || !n) break;
+        if (c) up_push(u, a, a + n);
+        a += n;
+    }
+}
+
+// Bring m current for submission value: query its range, then copy in what the CPU wrote since it was current last
+// (everything the first time), after the query, so the copy holds every write the query stamped.
+static void mirror_bring(Backing *m, uint64_t value) {
+    uint64_t g = pagegen_scan(m->gpu_lo, m->gpu_hi);
+    if (g == UINT64_MAX)
+        rt_fatal("gfx: vulkan: backing map: the write watch no longer covers the mirror of [%#llx, %#llx)",
+                 (ull)m->gpu_lo, (ull)m->gpu_hi);
+    Runs runs = {0};
+    if (m->fresh) runs_push(&runs, m->gpu_lo, m->gpu_hi);
+    else pagegen_runs(m->gpu_lo, m->gpu_hi, m->synced, runs_push, &runs);
+    m->synced = g, m->fresh = 0;
+    Ups u = {.m = m};
+    for (int i = 0; i < runs.n; i++) up_range(&u, runs.r[i].lo, runs.r[i].hi, 0);
+    if (u.n) g_ops.upload(value, u.c, u.n);
+    g_cst.mirror_syncs++, g_cst.uploads += (uint64_t)u.n, g_cst.upload_bytes += u.bytes;
+    free(u.c);
+    free(runs.r);
+}
+
+// The first resolve of mirror m in submission value brings it current; the later ones of that submission find it so.
+// g_lock held (shared at least), on the submission's thread.
+static void mirror_use(Backing *m, uint64_t value) {
+    if (!value || __atomic_load_n(&m->sync_value, __ATOMIC_ACQUIRE) == value) return;
+    plat_mutex_lock(&g_coh);
+    if (m->sync_value != value) {
+        mirror_bring(m, value);
+        __atomic_store_n(&m->sync_value, value, __ATOMIC_RELEASE);
+    }
+    plat_mutex_unlock(&g_coh);
+}
+
+// A mirror over [rs, re) in r when the admission and the write watch allow one, else NULL (the bind gets an import), the
+// pool's first refusal logged. g_lock exclusive.
+static Backing *mirror_admit(Rec *r, uint64_t rs, uint64_t re) {
+    uint64_t size = up(re - rs, BACKING_EXTENT_ALIGN), used = 0, budget = 0;
+    char why[160] = "";
+    if (!g_ops.vram(&used, &budget) || !backing_mirror_fits(used, budget, size)) {
+        g_st.mirrors_refused_budget++;
+        snprintf(why, sizeof why, "it does not fit the VRAM budget (device-local use %llu of %llu MiB, an eighth "
+                 "kept free)", (ull)(used >> 20), (ull)(budget >> 20));
+    } else if (pagegen_scan(rs, re) == UINT64_MAX) {
+        g_st.mirrors_refused_untracked++;
+        snprintf(why, sizeof why, "the write watch does not cover it");
+    } else {
+        return mirror_new(rs, re);
+    }
+    if (!r->mirror_logged) {
+        r->mirror_logged = 1;
+        rt_log("gfx: vulkan: backing map: the mirror of [%#llx, %#llx) (%llu KiB) in pool [%#llx, %#llx) is refused: "
+               "%s; imported", (ull)rs, (ull)re, (ull)((re - rs) >> 10), (ull)r->lo, (ull)r->hi, why);
+    }
+    return NULL;
+}
+
+__attribute__((noreturn)) static void written_now(uint64_t lo, uint64_t hi, uint64_t value, uint64_t rs, uint64_t re) {
+    rt_fatal("gfx: vulkan: backing map: [%#llx, %#llx), which submission %llu wrote on the GPU while it is being "
+             "recorded, would be replaced by a backing over [%#llx, %#llx): the write cannot move to it", (ull)lo,
+             (ull)hi, (ull)value, (ull)rs, (ull)re);
+}
+
+// Before a new backing over [rs, re) replaces the backings of c inside that run, in submission value: when a mirror is
+// among them or will be one, or a GPU write into a mirror retired earlier is still to be written back there, wait for the
+// older submissions that used them, so their GPU writes are in guest memory before the new backing takes its copy of it
+// (imports alone alias the same memory and need no wait). A backing the submission being recorded wrote cannot be handed
+// over: a named fatal. Value 0 (no submission) waits for issued submissions only. g_lock exclusive; the wait holds it,
+// which is safe because the completion thread never takes it.
+static void replace_wait(const Cell *c, uint64_t rs, uint64_t re, uint64_t value, int mirror) {
+    uint64_t wait = 0, issued = gpu_sync_issued();
+    for (int i = 0; i < c->nimp; i++)
+        if (c->imp[i]->gpu_hi > rs && c->imp[i]->gpu_lo < re) mirror |= c->imp[i]->kind == BACKING_MIRROR;
+    plat_mutex_lock(&g_coh);
+    for (int i = 0; i < g_npend; i++) {
+        const Pending *p = &g_pend[i];
+        if (p->hi <= rs || p->lo >= re) continue;
+        mirror = 1;
+        if (value && p->value == value) written_now(p->lo, p->hi, value, rs, re);
+        if ((p->value < value || (!value && p->value <= issued)) && p->value > wait) wait = p->value;
+    }
+    plat_mutex_unlock(&g_coh);
+    if (!mirror) return;
+    for (int i = 0; i < c->nimp; i++) {
+        const Backing *o = c->imp[i];
+        if (o->gpu_hi <= rs || o->gpu_lo >= re) continue;
+        uint64_t u = used_by(o);
+        if (value && __atomic_load_n(&o->written, __ATOMIC_ACQUIRE) == value) written_now(o->gpu_lo, o->gpu_hi, value, rs, re);
+        if ((u < value || (!value && u <= issued)) && u > wait) wait = u;
+    }
+    if (wait <= gpu_sync_done()) return;
+    g_st.replace_waits++;
+    wait_value(wait);
+}
+
 // ---------- the resolver
 static void fill(BackingRef *out, const Backing *b, uint64_t addr) {
     out->buffer = b->mem.buffer;
@@ -630,26 +829,37 @@ static Backing *backing_in(Rec *r, uint64_t addr, uint64_t size) {
     return b && addr + size <= b->gpu_hi ? b : NULL;
 }
 
-// The backing of [addr, addr + size) when the map holds one, stamped; g_lock, shared at least.
-static int lookup(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out) {
-    Rec *r = rec_find(addr, size), *v = NULL;
+// The backing that holds [*addr, *addr + size) when the map holds one, *addr moved into the physical pool for a virtual
+// one; the pool in *rec and the virtual pool gone through in *virt (else NULL). g_lock, shared at least.
+static Backing *find(uint64_t *addr, uint64_t size, Rec **rec, Rec **virt) {
+    Rec *r = rec_find(*addr, size), *v = NULL;
+    *rec = *virt = NULL;
     if (r && r->cls == CLS_VIRTUAL) {
-        if (!r->run || !virtual_mapped(r, addr, size)) return 0;
+        if (!r->run || !virtual_mapped(r, *addr, size)) return NULL;
         v = r;
-        addr = (uint64_t)((int64_t)addr + r->run_delta);
+        *addr = (uint64_t)((int64_t)*addr + r->run_delta);
         r = r->run;
-        if (addr < r->lo || addr + size > r->hi) return 0;
+        if (*addr < r->lo || *addr + size > r->hi) return NULL;
     }
-    Backing *b = r ? backing_in(r, addr, size) : NULL;
+    *rec = r, *virt = v;
+    return r ? backing_in(r, *addr, size) : NULL;
+}
+
+// The backing of [addr, addr + size) when the map holds one, stamped, and a mirror brought current; g_lock, shared at
+// least.
+static int lookup(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out) {
+    Rec *r, *v;
+    Backing *b = find(&addr, size, &r, &v);
     if (!b) return 0;
     if (v) stamp(&v->last_use, value);
     stamp(&r->last_use, value), stamp(&b->last_use, value);
+    if (b->kind == BACKING_MIRROR) mirror_use(b, value);
     fill(out, b, addr);
     return 1;
 }
 
-// Make what [addr, addr + size) needs, or stop by name with the shape. g_lock exclusive.
-static void make(uint64_t addr, uint64_t size) {
+// Make what [addr, addr + size) needs in submission value, or stop by name with the shape. g_lock exclusive.
+static void make(uint64_t addr, uint64_t size, uint64_t value) {
     Rec *r = rec_find(addr, size);
     if (!r) {
         Rec *s = rec_find(addr, 1);
@@ -678,9 +888,9 @@ static void make(uint64_t addr, uint64_t size) {
         if (!r->ext) r->ext = extent_new(r);
         return;
     }
-    if (kind == BACKING_MIRROR)
-        rt_fatal("gfx: vulkan: backing map: the mirror hook chose a mirror for [%#llx, %#llx), and mirrors are not "
-                 "built yet", (ull)addr, (ull)(addr + size));
+    if (kind == BACKING_MIRROR && !has_mirrors())
+        rt_fatal("gfx: vulkan: backing map: the mirror hook chose a mirror for [%#llx, %#llx), and the device side "
+                 "gives no mirror operations", (ull)addr, (ull)(addr + size));
     uint64_t plo = down(addr, HPAGE), phi = up(addr + size, HPAGE);
     if (!rt_mem_commit_io(plo, phi - plo, 0))
         rt_fatal("gfx: vulkan: backing map: a bind of [%#llx, %#llx) in pool [%#llx, %#llx) covers memory the guest "
@@ -688,9 +898,14 @@ static void make(uint64_t addr, uint64_t size) {
     Cell *c = cell_get(r, addr / WINDOW, (addr + size - 1) / WINDOW, 1);
     uint64_t rs, re;
     committed_run(c->lo, c->hi, plo, phi, &rs, &re);
-    char why[96];
-    snprintf(why, sizeof why, "a bind of [%#llx, %#llx)", (ull)addr, (ull)(addr + size));
-    cell_put(c, rs, re, import_new(rs, re, plo, why));
+    replace_wait(c, rs, re, value, kind == BACKING_MIRROR);
+    Backing *b = kind == BACKING_MIRROR ? mirror_admit(r, rs, re) : NULL;
+    if (!b) {
+        char why[96];
+        snprintf(why, sizeof why, "a bind of [%#llx, %#llx)", (ull)addr, (ull)(addr + size));
+        b = import_new(rs, re, plo, why);
+    }
+    cell_put(c, rs, re, b);
 }
 
 void backing_resolve(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out) {
@@ -703,7 +918,7 @@ void backing_resolve(uint64_t addr, uint64_t size, uint64_t value, BackingRef *o
     if (hit) return;
     __atomic_fetch_add(&g_misses, 1, __ATOMIC_RELAXED);
     plat_lock(&g_lock);
-    make(addr, size);
+    make(addr, size, value);
     if (!lookup(addr, size, value, out))
         rt_fatal("gfx: vulkan: backing map: [%#llx, %#llx) has no backing after one was made", (ull)addr,
                  (ull)(addr + size));
@@ -711,9 +926,129 @@ void backing_resolve(uint64_t addr, uint64_t size, uint64_t value, BackingRef *o
     bound();
 }
 
+// ---------- coherence (backing.h, Mirrors)
+void backing_gpu_wrote(uint64_t addr, uint64_t size, uint64_t value) {
+    if (!size) return;
+    if (addr + size < addr || !value)
+        rt_fatal("gfx: vulkan: backing map: a GPU write declared over %#llx+%#llx outside a submission (value %llu)",
+                 (ull)addr, (ull)size, (ull)value);
+    plat_lock_shared(&g_lock);
+    Rec *r, *v;
+    uint64_t a = addr;
+    Backing *b = find(&a, size, &r, &v);
+    if (!b || used_by(b) != value)
+        rt_fatal("gfx: vulkan: backing map: a GPU write declared over [%#llx, %#llx) in submission %llu, which no "
+                 "resolve of that submission backed", (ull)addr, (ull)(addr + size), (ull)value);
+    stamp(&b->written, value);
+    if (b->kind == BACKING_MIRROR) {
+        plat_mutex_lock(&g_coh);
+        g_pend = grow(g_pend, &g_pend_cap, g_npend + 1, sizeof *g_pend, "the GPU writes to write back");
+        g_pend[g_npend++] = (Pending){value, a, a + size, b};
+        plat_mutex_unlock(&g_coh);
+    }
+    plat_unlock_shared(&g_lock);
+}
+
+void backing_sync_mirrors(uint64_t value) {
+    if (!g_open || !value) return;
+    plat_lock_shared(&g_lock);
+    for (int i = 0; i < g_nmirrors; i++) {
+        stamp(&g_mirrors[i]->last_use, value);
+        mirror_use(g_mirrors[i], value);
+    }
+    plat_unlock_shared(&g_lock);
+}
+
+// The write-back of one submission: its GPU writes into mirrors, read back at its end, and where they go.
+typedef struct WbItem { uint64_t lo, size; const void *host; } WbItem;
+typedef struct Wb { int n; WbItem item[]; } Wb;
+
+// The completion thread, once the device reached value and before value is done: the bytes go into guest memory (a
+// page the guest no longer maps is left out and counted), are stamped as written, and leave the pending list.
+static void writeback(void *arg, uint64_t value) {
+    Wb *w = arg;
+    plat_mutex_lock(&g_coh);
+    for (int i = 0; i < w->n; i++) {
+        const WbItem *it = &w->item[i];
+        if (!rt_mem_commit_io(it->lo, it->size, 1)) {
+            if (!g_cst.writebacks_skipped++)
+                rt_log("gfx: vulkan: backing map: a GPU write of [%#llx, %#llx) by submission %llu lands in memory the "
+                       "guest no longer maps: left out", (ull)it->lo, (ull)(it->lo + it->size), (ull)value);
+            continue;
+        }
+        memcpy((void *)(uintptr_t)it->lo, it->host, it->size);
+        pagegen_mark(it->lo, it->lo + it->size);
+        g_cst.writebacks++, g_cst.writeback_bytes += it->size;
+    }
+    int k = 0;
+    for (int i = 0; i < g_npend; i++)
+        if (g_pend[i].value != value) g_pend[k++] = g_pend[i];
+    g_npend = k;
+    plat_mutex_unlock(&g_coh);
+    free(w);
+}
+
+void backing_submit_end(uint64_t value) {
+    if (!g_open || !has_mirrors()) return;
+    plat_mutex_lock(&g_coh);
+    int n = 0;
+    for (int i = 0; i < g_npend; i++) n += g_pend[i].value == value;
+    if (!n) {
+        plat_mutex_unlock(&g_coh);
+        return;
+    }
+    BackingCopy *c = calloc((size_t)n, sizeof *c);
+    Wb *w = malloc(sizeof *w + (size_t)n * sizeof *w->item);
+    if (!c || !w) rt_fatal("gfx: vulkan: backing map: out of memory for %d write-backs", n);
+    w->n = 0;
+    for (int i = 0; i < g_npend; i++) {
+        const Pending *p = &g_pend[i];
+        if (p->value != value) continue;
+        c[w->n] = (BackingCopy){&p->m->mem, p->m->offset + (p->lo - p->m->gpu_lo), p->hi - p->lo, NULL};
+        w->item[w->n++] = (WbItem){p->lo, p->hi - p->lo, NULL};
+    }
+    g_ops.readback(value, c, n);
+    for (int i = 0; i < n; i++) w->item[i].host = c[i].host;
+    gpu_sync_effect(writeback, w);
+    plat_mutex_unlock(&g_coh);
+    free(c);
+}
+
+void backing_guest_written(uint64_t addr, uint64_t size) {
+    if (!size || addr >= RT_ADDRESS_LIMIT) return;   // the GPU window: no CPU wrote it
+    pagegen_mark(addr, addr + size);
+}
+
+__attribute__((noreturn)) static void not_written_back(const Pending *p, const char *when) {
+    rt_fatal("gfx: vulkan: backing map: the GPU write of [%#llx, %#llx) by submission %llu into a mirror was not "
+             "written back by the time its value was done (%s)", (ull)p->lo, (ull)p->hi, (ull)p->value, when);
+}
+
+void backing_guest_read(uint64_t addr, uint64_t size) {
+    if (!size) size = 1;
+    uint64_t done = gpu_sync_done();   // read first: a value done now had its write-back run before it was published
+    plat_mutex_lock(&g_coh);
+    for (int i = 0; i < g_npend; i++) {
+        if (g_pend[i].hi <= addr || g_pend[i].lo >= addr + size) continue;
+        if (g_pend[i].value <= done) not_written_back(&g_pend[i], "a CPU read of mapped memory");
+        g_cst.reads_in_flight++;
+    }
+    plat_mutex_unlock(&g_coh);
+}
+
+void backing_cpu_synced(uint64_t fence) {
+    uint64_t done = gpu_sync_done();
+    if (fence > done) fence = done;
+    plat_mutex_lock(&g_coh);
+    for (int i = 0; i < g_npend; i++)
+        if (g_pend[i].value <= fence) not_written_back(&g_pend[i], "a CPU wait for a fence");
+    plat_mutex_unlock(&g_coh);
+}
+
 // ---------- the commit epoch
-// Every import again: retired when a page under it is no longer committed, else grown to the run of committed pages
-// around it inside its cell, which may join its neighbours. g_lock exclusive.
+// Every backing of a cell again: retired when a page under it is no longer committed; an import is also grown to the run
+// of committed pages around it inside its cell, which may join its neighbours, up to a mirror (a mirror is not grown: a
+// bind outside it makes a new backing). g_lock exclusive.
 static void rescan_cell(Cell *c) {
     for (int i = 0; i < c->nimp;) {
         Backing *o = c->imp[i];
@@ -729,11 +1064,22 @@ static void rescan_cell(Cell *c) {
             defer(o);
             memmove(c->imp + i, c->imp + i + 1, (size_t)(c->nimp - i - 1) * sizeof *c->imp);
             c->nimp--;
-            g_st.imports_stale++;
+            if (o->kind == BACKING_MIRROR) g_st.mirrors_stale++;
+            else g_st.imports_stale++;
+            continue;
+        }
+        if (o->kind == BACKING_MIRROR) {
+            i++;
             continue;
         }
         uint64_t rs, re;
         committed_run(c->lo, c->hi, o->gpu_lo, o->gpu_hi, &rs, &re);
+        for (int j = 0; j < c->nimp; j++) {   // up to the mirrors beside it
+            const Backing *m = c->imp[j];
+            if (m->kind != BACKING_MIRROR) continue;
+            if (m->gpu_hi <= o->gpu_lo && m->gpu_hi > rs) rs = m->gpu_hi;
+            if (m->gpu_lo >= o->gpu_hi && m->gpu_lo < re) re = m->gpu_lo;
+        }
         if (rs == o->gpu_lo && re == o->gpu_hi) {
             i++;
             continue;
@@ -789,6 +1135,12 @@ void backing_stats(BackingStats *out) {
     *out = g_st;
     out->spare_blocks = (uint64_t)spare_count();
     plat_unlock_shared(&g_lock);
+    plat_mutex_lock(&g_coh);
+    out->mirror_syncs = g_cst.mirror_syncs, out->uploads = g_cst.uploads, out->upload_bytes = g_cst.upload_bytes;
+    out->writebacks = g_cst.writebacks, out->writeback_bytes = g_cst.writeback_bytes;
+    out->writebacks_skipped = g_cst.writebacks_skipped, out->reads_in_flight = g_cst.reads_in_flight;
+    out->pending = (uint64_t)g_npend;
+    plat_mutex_unlock(&g_coh);
     out->resolves = __atomic_load_n(&g_resolves, __ATOMIC_RELAXED);
     out->resolve_misses = __atomic_load_n(&g_misses, __ATOMIC_RELAXED);
 }
@@ -798,8 +1150,15 @@ void backing_open(const BackingOps *ops) {
     if (g_open) rt_fatal("gfx: vulkan: backing map: opened twice");
     if (!ops || !ops->block_new || !ops->import || !ops->free)
         rt_fatal("gfx: vulkan: backing map: an operation is missing from the table");
+    int mirror_ops = !!ops->vram + !!ops->upload + !!ops->readback;
+    if (mirror_ops && mirror_ops != 3)
+        rt_fatal("gfx: vulkan: backing map: the mirror operations are given in part (%d of 3)", mirror_ops);
     g_ops = *ops;
     memset(&g_st, 0, sizeof g_st);
+    plat_mutex_lock(&g_coh);
+    memset(&g_cst, 0, sizeof g_cst);
+    g_npend = 0;
+    plat_mutex_unlock(&g_coh);
     g_resolves = g_misses = 0;
     g_seen_epoch = rt_mem_ready() ? rt_mem_commit_epoch() : 0;
     g_open = 1;
@@ -827,7 +1186,13 @@ void backing_close(void) {
         to_free(&f, &g_blocks[0]->mem);
         block_drop(g_blocks[0]);
     }
+    g_nmirrors = 0;   // every one was retired with its pool
+    g_mirror_hook = NULL;
     g_open = 0;
     plat_unlock(&g_lock);
+    plat_mutex_lock(&g_coh);
+    g_npend = 0;   // every submission is done (gpu_sync_finish came first): their write-backs ran
+    plat_mutex_unlock(&g_coh);
     free_all(&f);
+    if (g_ops.close) g_ops.close();
 }

@@ -15,6 +15,12 @@
 //   loss_submit      vkQueueSubmit2 answers VK_ERROR_DEVICE_LOST: the report is written to the folder, the run stops
 //   loss_completion  the completion thread's vkWaitSemaphores answers it: the same, from that thread
 //   refuse           OOT2_VK_DEVICE names no device: the start stops by name
+//   backing, backing_fini, backing_flat   the backing map's imports and extents (ticket 57)
+//   mirror_upload    a CPU write into a mirrored range is read by the GPU in the next submission, three times, and
+//                    only the written page is copied
+//   mirror_writeback a GPU write into a mirrored range reaches guest memory after its fence and cpu_synced, never
+//                    before (the submission is held by a semaphore meanwhile)
+//   mirror_budget    VK_EXT_memory_budget's figures move with VRAM taken outside the map, and move the admission
 //
 // The loss cases replace Volk's entry points for the failing call and for the two queries that are valid only on a lost
 // device (the fault and the checkpoints) with answers made here, so the whole path runs without hanging the GPU.
@@ -285,6 +291,7 @@ static void case_wait(void) {
 // ---------- the backing map on the device (oot2/backing.h): guest memory of the runtime's own, pools placed by hand
 #define KiB (1ull << 10)
 #define MiB (1ull << 20)
+#define GiB (1ull << 30)
 #define WIN GFX_GPU_WINDOW_BASE
 static Cpu g_cpu;
 static uint64_t g_heap;
@@ -369,6 +376,7 @@ static void backing_stats_line(void) {
 static void case_backing(void) {
     guest_heap(512 * MiB);
     gpu_vk_open();
+    backing_set_mirror_hook(NULL);   // imports: the mirrors have cases of their own
     make_buffer();
     const uint64_t boundary = (g_heap + 128 * MiB) & ~(BACKING_IMPORT_WINDOW - 1);
     pool_t p = make_pool(g_heap + 16 * MiB, 4 * MiB, 0);
@@ -460,6 +468,7 @@ static void fini_thread(void *arg) {
 static void case_backing_fini(void) {
     guest_heap(64 * MiB);
     gpu_vk_open();
+    backing_set_mirror_hook(NULL);
     g_fini = make_pool(g_heap + 4 * MiB, 4 * MiB, 0);   // an import: its memory is freed when the pool goes
     touch_range(g_heap + 4 * MiB, 4 * MiB);
     VkSemaphore gate = make_gate();
@@ -511,6 +520,7 @@ static void case_backing_flat(void) {
     static pool_t p[POOLS];
     guest_heap(512 * MiB);
     gpu_vk_open();
+    backing_set_mirror_hook(NULL);   // imports and extents, as ticket 57 measured them
     touch_range(g_heap, HALF * 64 * KiB);
     uint64_t vram0 = 0, priv0 = 0;
     for (int round = 0; round < ROUNDS; round++) {
@@ -544,6 +554,128 @@ static void case_backing_flat(void) {
     }
     close_and_report();
     printf("ok backing_flat\n");
+}
+
+// ---------- mirrors (oot2/backing.h, Mirrors): this device is discrete, so a CPU-visible bind gets one
+static void mirror_stats_line(void) {
+    BackingStats s;
+    backing_stats(&s);
+    printf("mirrors: live %llu (%llu KiB), made %llu, refused %llu; syncs %llu, uploads %llu (%llu KiB); write-backs "
+           "%llu (%llu bytes), pending %llu, early reads %llu\n", (unsigned long long)s.mirrors,
+           (unsigned long long)(s.mirror_bytes >> 10), (unsigned long long)s.mirrors_made,
+           (unsigned long long)(s.mirrors_refused_budget + s.mirrors_refused_untracked),
+           (unsigned long long)s.mirror_syncs, (unsigned long long)s.uploads, (unsigned long long)(s.upload_bytes >> 10),
+           (unsigned long long)s.writebacks, (unsigned long long)s.writeback_bytes, (unsigned long long)s.pending,
+           (unsigned long long)s.reads_in_flight);
+}
+
+static void fill_words(uint64_t a, uint64_t n, uint32_t word) {
+    for (uint64_t i = 0; i < n / 4; i++) ((volatile uint32_t *)(uintptr_t)a)[i] = word;
+}
+
+// A CPU write into a mirrored range is read by the GPU in the next submission, and the next one in the one after.
+static void case_mirror_upload(void) {
+    guest_heap(64 * MiB);
+    gpu_vk_open();
+    make_buffer();
+    pool_t p = make_pool(g_heap + 4 * MiB, 1 * MiB, 0);
+    fill_words(g_heap + 4 * MiB, 1 * MiB, 0x5EED5EEDu);
+    BackingRef r;
+    through(READ, g_heap + 4 * MiB, 16 * KiB, 0, &r);
+    CHECK(r.kind == BACKING_MIRROR && words_are(g_words, 16 * KiB, 0x5EED5EEDu));
+    printf("a first use: the GPU read the CPU's words through the mirror\n");
+    for (uint32_t k = 1; k <= 3; k++) {
+        fill_words(g_heap + 4 * MiB + 4 * KiB, 4 * KiB, 0xC0DE0000u + k);   // one page, before the next submission
+        backing_sync();   // as the replay's submit does first
+        through(READ, g_heap + 4 * MiB, 16 * KiB, 0, &r);
+        CHECK(r.kind == BACKING_MIRROR && words_are(g_words + 1024, 4 * KiB, 0xC0DE0000u + k));
+        CHECK(words_are(g_words, 4 * KiB, 0x5EED5EEDu) && words_are(g_words + 2048, 8 * KiB, 0x5EED5EEDu));
+    }
+    BackingStats s;
+    backing_stats(&s);
+    CHECK(s.mirrors == 1 && s.mirror_syncs == 4 && s.upload_bytes == 1 * MiB + 3 * 4 * KiB);
+    printf("three CPU writes, each read by the next submission; only the written page was copied each time\n");
+    mirror_stats_line();
+    gfx_vulkan_backend.pool_fini(&p);
+    free_buffer();
+    close_and_report();
+    printf("ok mirror_upload\n");
+}
+
+// A GPU write into a mirrored range reaches the CPU once its submission is done and cpu_synced is called, never before.
+static void case_mirror_writeback(void) {
+    guest_heap(64 * MiB);
+    gpu_vk_open();
+    pool_t p = make_pool(g_heap + 4 * MiB, 1 * MiB, 0);
+    fill_words(g_heap + 4 * MiB, 1 * MiB, 0xAAAAAAAAu);
+    VkSemaphore gate = make_gate();
+    VkSemaphoreSubmitInfo wait = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = gate, .value = 1,
+                                  .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    uint64_t v = gpu_vk_begin(GPU_VK_INTERNAL);
+    BackingRef r;
+    backing_resolve(g_heap + 4 * MiB + 64 * KiB, 64 * KiB, v, &r);
+    CHECK(r.kind == BACKING_MIRROR);
+    vkCmdFillBuffer(gpu_vk_cmd(), (VkBuffer)(uintptr_t)r.buffer, r.offset, 64 * KiB, 0x600DF00Du);
+    backing_gpu_wrote(g_heap + 4 * MiB + 64 * KiB, 64 * KiB, v);
+    backing_submit_end(v);
+    CHECK(gpu_vk_end(&wait, 1) == v);
+    plat_sleep_ns(100 * 1000 * 1000);
+    const void *at = (const void *)(uintptr_t)(g_heap + 4 * MiB + 64 * KiB);
+    CHECK(gpu_sync_done() < v && words_are(at, 64 * KiB, 0xAAAAAAAAu));   // never before the fence
+    gfx_vulkan_backend.guest_read(g_heap + 4 * MiB + 64 * KiB, 4);
+    gfx_vulkan_backend.cpu_synced(gpu_sync_done());
+    printf("held by a semaphore: guest memory kept the old bytes, a read before the fence was counted\n");
+    VkSemaphoreSignalInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = gate, .value = 1};
+    CHECK(vkSignalSemaphore(gpu_vk.device, &si) == VK_SUCCESS);
+    CHECK(gfx_vulkan_backend.fence_wait(v, 5000000000ull) == 1);
+    gfx_vulkan_backend.cpu_synced(v);
+    CHECK(words_are(at, 64 * KiB, 0x600DF00Du));
+    CHECK(words_are((const void *)(uintptr_t)(g_heap + 4 * MiB), 64 * KiB, 0xAAAAAAAAu));
+    CHECK(words_are((const void *)(uintptr_t)(g_heap + 4 * MiB + 128 * KiB), 64 * KiB, 0xAAAAAAAAu));
+    BackingStats s;
+    backing_stats(&s);
+    CHECK(s.writebacks == 1 && s.writeback_bytes == 64 * KiB && s.pending == 0 && s.reads_in_flight == 1);
+    printf("the GPU's write reached guest memory after its fence and cpu_synced, and nothing beside it\n");
+    mirror_stats_line();
+    vkDestroySemaphore(gpu_vk.device, gate, NULL);
+    gfx_vulkan_backend.pool_fini(&p);
+    close_and_report();
+    printf("ok mirror_writeback\n");
+}
+
+// VK_EXT_memory_budget's figures feed the admission: VRAM taken outside the map moves them, and a mirror size between
+// the two thresholds is admitted before and refused after.
+static void case_mirror_budget(void) {
+    guest_heap(64 * MiB);
+    gpu_vk_open();
+    uint64_t u0, b0, u1, b1, u2, b2;
+    CHECK(gpu_vk_backing_ops.vram(&u0, &b0) && b0 > 1 * GiB && u0 < b0);
+    BackingMem m;
+    CHECK(gpu_vk_backing_ops.block_new(512 * MiB, &m));
+    CHECK(gpu_vk_backing_ops.vram(&u1, &b1));
+    gpu_vk_backing_ops.free(&m);
+    CHECK(gpu_vk_backing_ops.vram(&u2, &b2));
+    printf("device-local heap: use %llu MiB of a budget of %llu MiB; with a 512 MiB block %llu of %llu; freed %llu of "
+           "%llu\n", (unsigned long long)(u0 >> 20), (unsigned long long)(b0 >> 20), (unsigned long long)(u1 >> 20),
+           (unsigned long long)(b1 >> 20), (unsigned long long)(u2 >> 20), (unsigned long long)(b2 >> 20));
+    CHECK(u1 >= u0 + 256 * MiB);
+    uint64_t t0 = b0 - u0 - b0 / BACKING_MIRROR_RESERVE, t1 = b1 > u1 + b1 / BACKING_MIRROR_RESERVE ?
+                                                               b1 - u1 - b1 / BACKING_MIRROR_RESERVE : 0;
+    CHECK(t1 + 256 * MiB <= t0);
+    uint64_t size = (t0 + t1) / 2;
+    CHECK(backing_mirror_fits(u0, b0, size) && !backing_mirror_fits(u1, b1, size));
+    printf("the largest mirror admitted: %llu MiB, then %llu MiB with the block; one of %llu MiB admitted before and "
+           "refused after\n", (unsigned long long)(t0 >> 20), (unsigned long long)(t1 >> 20),
+           (unsigned long long)(size >> 20));
+    // And through the map, with the figures as they are now: a small mirror is admitted.
+    pool_t p = make_pool(g_heap + 4 * MiB, 1 * MiB, 0);
+    fill_words(g_heap + 4 * MiB, 1 * MiB, 0);
+    BackingRef r;
+    backing_resolve(g_heap + 4 * MiB, 0x100, 0, &r);
+    CHECK(r.kind == BACKING_MIRROR);
+    gfx_vulkan_backend.pool_fini(&p);
+    close_and_report();
+    printf("ok mirror_budget\n");
 }
 
 // ---------- the device lost: Volk's entry points replaced
@@ -657,6 +789,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "backing")) case_backing();
     else if (!strcmp(cs, "backing_fini")) case_backing_fini();
     else if (!strcmp(cs, "backing_flat")) case_backing_flat();
+    else if (!strcmp(cs, "mirror_upload")) case_mirror_upload();
+    else if (!strcmp(cs, "mirror_writeback")) case_mirror_writeback();
+    else if (!strcmp(cs, "mirror_budget")) case_mirror_budget();
     else {
         fprintf(stderr, "unknown case %s\n", cs);
         return 2;

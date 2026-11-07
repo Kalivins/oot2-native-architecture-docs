@@ -106,6 +106,11 @@ const char *gpu_vk_result_name(VkResult r);   // "VK_ERROR_DEVICE_LOST", ...; "V
 enum { GPU_VK_REPLAY = 1, GPU_VK_INTERNAL = 2 };
 uint64_t gpu_vk_begin(int kind);
 VkCommandBuffer gpu_vk_cmd(void);
+// The submission's prologue: a second command buffer, submitted before gpu_vk_cmd's in the same queue submit, which
+// begins with a full barrier over the work of earlier submissions and ends with one over the work after it, so what it
+// records (the backing map's copies into mirrors) runs after every earlier submission and before this one's own work,
+// whenever during the submission it was recorded. Begun at the first call; none is submitted when never asked for.
+VkCommandBuffer gpu_vk_prologue(void);
 void gpu_vk_effect(GpuEffect fn, void *arg);
 uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits);
 
@@ -115,5 +120,8 @@ uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits);
 // The back-end table (vk_submit.c): submit, fence_wait, fence_done and finish on the timeline, the pools through the
 // backing map (oot2/backing.h, opened with the device); the operations later tickets bring stop by name.
 extern const GfxBackend gfx_vulkan_backend;
-// The backing map's memory on this device (vk_backing.c): VRAM blocks and host imports.
+// The backing map's memory on this device (vk_backing.c): VRAM blocks, host imports, and the staging of mirrors' copies.
 extern const BackingOps gpu_vk_backing_ops;
+// The map's mirror hook for this device (gpu_vk_open, after backing_open): mirrors on a discrete device, imports on any
+// other. A test that covers imports alone sets the hook to NULL after the device opens.
+void gpu_vk_mirror_policy(void);
