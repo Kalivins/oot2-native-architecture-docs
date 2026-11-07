@@ -402,8 +402,9 @@ def reference_image(case: Case, swap_uv: bool = False, swap_interpolation: bool 
     return _reference_cache[key]
 
 
-def write_draw(case: Case, folder: Path, *, indexed: bool, depth: tuple | None = None, extra: tuple[str, ...] = ()) -> Path:
-    """The draw file of vk_replay_draw.c for a case, and the files it names, in folder."""
+def write_draw(case: Case, folder: Path, *, indexed: bool, depth: tuple | None = None, extra: tuple[str, ...] = (),
+               index_bytes: int = 4) -> Path:
+    """The draw file of vk_replay_draw.c for a case, and the files it names, in folder; index_bytes is 1 or 4."""
     folder.mkdir(parents=True, exist_ok=True)
     pair, res = case.pair, case.pair.res
     files = pair.program_files()
@@ -419,8 +420,9 @@ def write_draw(case: Case, folder: Path, *, indexed: bool, depth: tuple | None =
     lines.append(f"stream 0 {stride} 0")
     if indexed:
         (folder / "vertices.bin").write_bytes(case.vblob)
-        (folder / "indices.bin").write_bytes(b"".join(struct.pack("<I", i) for i in case.order))
-        lines += ["vertex_buffer 0 vertices.bin", "index_buffer indices.bin u32", f"draw elements {NVN_DRAW_TRIANGLES} {len(case.order)}"]
+        form, name = ("<B", "u8") if index_bytes == 1 else ("<I", "u32")
+        (folder / "indices.bin").write_bytes(b"".join(struct.pack(form, i) for i in case.order))
+        lines += ["vertex_buffer 0 vertices.bin", f"index_buffer indices.bin {name}", f"draw elements {NVN_DRAW_TRIANGLES} {len(case.order)}"]
     else:
         (folder / "vertices.bin").write_bytes(b"".join(case.vblob[i * stride:(i + 1) * stride] for i in case.order))
         lines += ["vertex_buffer 0 vertices.bin", f"draw arrays {NVN_DRAW_TRIANGLES} 0 {len(case.order)}"]
@@ -508,10 +510,10 @@ class Replay:
 
 
 def play(case: Case, name: str, *, validation: str = "on", indexed: bool = False, depth: tuple | None = None,
-         flags: tuple[str, ...] = (), extra: tuple[str, ...] = ()) -> Replay:
+         flags: tuple[str, ...] = (), extra: tuple[str, ...] = (), index_bytes: int = 4) -> Replay:
     """Write the case's draw file and replay it on the device."""
     folder = Path(WORK) / "t63" / name
-    draw = write_draw(case, folder, indexed=indexed, depth=depth, extra=extra)
+    draw = write_draw(case, folder, indexed=indexed, depth=depth, extra=extra, index_bytes=index_bytes)
     run_name = "".join([f"replay-{validation}", *("-" + f.lstrip("-") for f in flags)])   # one file per run kind
     out = folder / f"{run_name}.f32"
     args = ["draw", str(draw), str(out), "--pack", str(PACK), *flags]
@@ -894,9 +896,10 @@ class CoreFeatureTest(DeviceTestCase):
     near, far, cleared = 0.25, 0.75, 1.0
 
     def draw_with(self, name: str, *extra: str, depth: tuple | None = None, flags: tuple[str, ...] = (),
-                  case: Case | None = None, indexed: bool = False) -> tuple[Case, Replay]:
+                  case: Case | None = None, indexed: bool = False, index_bytes: int = 4) -> tuple[Case, Replay]:
         case = case or self.case(self.s2, "base")
-        got = play(case, f"s2_core_{name}", validation="on", depth=depth, flags=flags, extra=extra, indexed=indexed)
+        got = play(case, f"s2_core_{name}", validation="on", depth=depth, flags=flags, extra=extra, indexed=indexed,
+                   index_bytes=index_bytes)
         self.assertTrue(got.ok, got.report())
         self.assertEqual((got.errors, got.warnings), (0, 0), got.report())
         self.assertEqual(got.stats.get("draws"), 1, got.report())
@@ -1026,6 +1029,17 @@ class CoreFeatureTest(DeviceTestCase):
         _, got = self.draw_with("indirect", *extra, case=case, indexed=True)
         rep = compare(case, exp, got, "on", Path(WORK) / "t63" / "s2_core_indirect")
         print(f"\nindirect, first instance 5: {summary(rep)}")
+        self.assertEqual(rep["mismatches"], 0, summary(rep))
+        self.assertTrue(rep["pass"], summary(rep))
+
+    def test_eight_bit_indices_draw_as_the_reference(self) -> None:
+        # the title draws with NVN's unsigned byte index type (an item of oot2/vk_required.h since then)
+        case = self.case(self.t23, "base")
+        self.assertLess(max(case.order), 0xFF)
+        exp = reference_image(case)
+        _, got = self.draw_with("index_u8", case=case, indexed=True, index_bytes=1)
+        rep = compare(case, exp, got, "on", Path(WORK) / "t63" / "s2_core_index_u8")
+        print(f"\n8-bit indices: {summary(rep)}")
         self.assertEqual(rep["mismatches"], 0, summary(rep))
         self.assertTrue(rep["pass"], summary(rep))
 

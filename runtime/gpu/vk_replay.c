@@ -967,12 +967,11 @@ static void index_buffer(int itype, uint64_t ibuf, uint64_t count) {
     VkIndexType t;
     uint32_t bytes;
     if (!vkn_index_type(itype, &t, &bytes)) stop("index type %d", itype);
-    if (bytes == 1) stop("8-bit indices are not replayed yet");
     BackingRef ref;
     F.ops->resolve(ibuf, count ? count * bytes : bytes, F.value, &ref);
     vkrec_BindIndexBuffer((VkBuffer)(uintptr_t)ref.buffer, ref.offset, t);
     if (S.restart_en) {
-        uint32_t all = bytes == 2 ? 0xFFFFu : 0xFFFFFFFFu;
+        uint32_t all = bytes == 1 ? 0xFFu : bytes == 2 ? 0xFFFFu : 0xFFFFFFFFu;
         if (S.restart_index != all) stop("primitive restart at index %#x with %u-byte indices", S.restart_index, bytes);
     }
 }

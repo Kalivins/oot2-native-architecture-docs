@@ -30,7 +30,7 @@
 //   attribute LOC FORMAT OFFSET STREAM    FORMAT r32f rg32f rgb32f rgba32f or the 32-bit integer forms (r32i, r32ui, ...)
 //   stream INDEX STRIDE DIVISOR     vertex stream state
 //   vertex_buffer INDEX FILE        bound at stream INDEX
-//   index_buffer FILE u16|u32       the indices DrawElements reads
+//   index_buffer FILE u8|u16|u32    the indices DrawElements reads
 //   uniform vs|ps R FILE            BindUniformBuffer index R (constant bank c[3 + R]); FILE a bank
 //   storage vs|ps R LOW FILE        BindStorageBuffer index R (row R of the stage's storage table in c[0]); the buffer
 //                                   starts LOW bytes (0 to 15) past a 256-byte boundary, as the contract's address
@@ -288,7 +288,9 @@ static void parse_draw(const char *path, Draw *d) {
             snprintf(d->vbuf[d->nvbuf++].file, NAME, "%s", file);
         } else if (!strcmp(w, "index_buffer")) {
             CHECK(sscanf(rest, "%127s %127s", d->ibuf, a) == 2);
-            d->itype = !strcmp(a, "u16") ? NVN_INDEX_TYPE_UNSIGNED_SHORT : NVN_INDEX_TYPE_UNSIGNED_INT;
+            d->itype = !strcmp(a, "u8")    ? NVN_INDEX_TYPE_UNSIGNED_BYTE
+                       : !strcmp(a, "u16") ? NVN_INDEX_TYPE_UNSIGNED_SHORT
+                                           : NVN_INDEX_TYPE_UNSIGNED_INT;
         } else if (!strcmp(w, "uniform")) {
             CHECK(sscanf(rest, "%127s %u %127s", a, &u[0], file) == 3 && d->nubo < MAX_UBO);
             Bind *k = &d->ubo[d->nubo++];

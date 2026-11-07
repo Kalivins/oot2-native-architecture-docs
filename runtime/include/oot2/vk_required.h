@@ -36,6 +36,9 @@
 // state and write mask for each colour target, dual-source blend factors and indirect draws with a first instance.
 // Every desktop GPU that has the items above has them. robustBufferAccess is not among them and stays off: a raw
 // device address is not covered by it, and a read the game guards past a declared range is data, not zero.
+//
+// Item 43 is 8-bit indices (VK_KHR_index_type_uint8): the title draws with NVN's unsigned byte index type, which Vulkan
+// 1.3 takes only through this extension; primitive restart at 0xFF comes with it.
 #pragma once
 #include <stdint.h>
 #include <string.h>
@@ -146,7 +149,7 @@
       (e->features.dualSrcBlend = VK_TRUE))                                                                            \
     X(draw_indirect_first_instance, "indirect draws with a first instance",                                            \
       f->features.drawIndirectFirstInstance,                                                                           \
-      (e->features.drawIndirectFirstInstance = VK_TRUE))
+      (e->features.drawIndirectFirstInstance = VK_TRUE))                                                                   X(index_type_uint8, "8-bit indices", f->index_u8.indexTypeUint8, (e->index_u8.indexTypeUint8 = VK_TRUE))
 
 // The device extensions the items read, E(id, name), and the ones they depend on below Vulkan 1.4 (pipeline_library
 // for graphics_pipeline_library, maintenance5 for pipeline_binary). The device the back end creates enables every one
@@ -167,7 +170,7 @@
     E(shader_atomic_float, "VK_EXT_shader_atomic_float")                                                              \
     E(depth_clip_control, "VK_EXT_depth_clip_control")                                                                \
     E(pipeline_library, "VK_KHR_pipeline_library")                                                                    \
-    E(maintenance5, "VK_KHR_maintenance5")
+    E(maintenance5, "VK_KHR_maintenance5")                                                                                E(index_type_uint8, "VK_KHR_index_type_uint8")
 
 enum {
 #define OOT2_VK_ITEM_ENUM(id, what, test, enable) OOT2_VK_ITEM_##id,
@@ -250,6 +253,7 @@ typedef struct Oot2VkFacts {
     VkPhysicalDeviceFaultFeaturesEXT fault;
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomic_float;
     VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip;
+    VkPhysicalDeviceIndexTypeUint8FeaturesKHR index_u8;
     unsigned char ext[OOT2_VK_EXT_COUNT];   // 1 for each extension of OOT2_VK_EXTENSIONS the device lists
 } Oot2VkFacts;
 
@@ -290,6 +294,8 @@ static inline void oot2_vk_chain_features(Oot2VkFacts *f, VkPhysicalDeviceFeatur
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT)
     OOT2_VK_LINK(f->ext[OOT2_VK_EXT_depth_clip_control], f->depth_clip,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT)
+    OOT2_VK_LINK(f->ext[OOT2_VK_EXT_index_type_uint8], f->index_u8,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR)
     (void)tail;
 }
 
