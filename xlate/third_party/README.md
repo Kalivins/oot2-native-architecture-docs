@@ -117,3 +117,16 @@ Changes of this project:
   10 s to build on the reference GPU; the walk is 167 instructions, and kept a
   call the module builds in about 0.5 s. Under 52 sites the call made builds
   slower, so those helpers are left to inline.
+- `Translation/Optimizations/GlobalToStorage.cs`, `TryGenerateMultiTargetStorageOp`
+  and `HoldsPointer`: a global address that is a phi of a constant buffer
+  pointer and an address traced to no buffer (a pointer the shader loaded
+  through another buffer) got a helper over the traced buffers alone, which
+  gives a load zero at every other address, so the loaded path read zeros. Such
+  an access now takes the raw helper, as one through a select does, and a note
+  says so ("mixes an address traced to a storage buffer with one traced to
+  none"). A constant or undefined phi source holds no pointer (a register one
+  path never wrote enters a phi that way) and is left out as before. Lichii
+  fixed the same defect in its own tree (pull request 410); the code here is
+  this project's. On the 56,381 programs of the corpus 132 modules change (121
+  mesh and 11 compute, 72 of them in the set the updated game loads), and
+  nothing else does.
