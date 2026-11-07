@@ -3,7 +3,7 @@
 # Copyright (C) 2026 The oot2-native contributors
 """Build the Vulkan harnesses of the spikes with clang.
 
-    py -3 tools/build_vkdraw.py [--harness vkdraw|vkmesh|vkpipecost|vkcomputecost|vkhmmacost|vkwatchcost|vkpresent]
+    py -3 tools/build_vkdraw.py [--harness vkdraw|vkmesh|vkpipecost|vkcomputecost|vkmeshcost|vkhmmacost|vkwatchcost|vkpresent]
                                 [--out DIR] [--sdk DIR]
                                 [--cc clang]
 
@@ -11,7 +11,9 @@ vkdraw is spike S2's first draw (tools/firstdraw/vkdraw.c); vkmesh is its task a
 sibling, for the first translated mesh draw (tools/firstdraw/vkmesh.c, ticket 72); vkpipecost is spike
 S3's pipeline and descriptor cost harness (tools/pipecost/*.c, Windows only);
 vkcomputecost is spike S6's compute pipeline build harness
-(tools/computecost/vkcomputecost.c, Windows only); vkhmmacost times compute
+(tools/computecost/vkcomputecost.c, Windows only); vkmeshcost is spike S4's task and mesh
+pipeline library build harness (tools/meshcost/vkmeshcost.c, Windows only);
+vkhmmacost times compute
 dispatches for the HMMA cost measurement (tools/hmmacost/vkhmmacost.c, Windows
 only); vkwatchcost is spike S5's write-watch and host-import probe
 (tools/watchcost/vkwatchcost.c, Windows only), which runs on the runtime's own
@@ -44,6 +46,7 @@ SOURCES = {
     "vkmesh": [ROOT / "tools" / "firstdraw" / "vkmesh.c"],
     "vkpipecost": sorted((ROOT / "tools" / "pipecost").glob("vkpc_*.c")),
     "vkcomputecost": [ROOT / "tools" / "computecost" / "vkcomputecost.c"],
+    "vkmeshcost": [ROOT / "tools" / "meshcost" / "vkmeshcost.c"],
     "vkhmmacost": [ROOT / "tools" / "hmmacost" / "vkhmmacost.c"],
     "vkwatchcost": [ROOT / "tools" / "watchcost" / "vkwatchcost.c"],
     "vkpresent": [ROOT / "tools" / "presentcost" / "vkpresent.c"],
