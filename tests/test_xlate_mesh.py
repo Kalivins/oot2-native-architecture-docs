@@ -24,6 +24,7 @@ from test_xlate_uni import mov_cbuf, scheduled
 OP_EXTENSION, OP_ENTRY_POINT, OP_EXECUTION_MODE, OP_CAPABILITY = 10, 15, 16, 17
 OP_TYPE_ARRAY, OP_TYPE_POINTER, OP_CONSTANT, OP_FUNCTION, OP_FUNCTION_END = 28, 32, 43, 54, 56
 OP_VARIABLE, OP_LOAD, OP_STORE, OP_ACCESS_CHAIN, OP_DECORATE, OP_RETURN = 59, 61, 62, 65, 71, 253
+OP_SELECT, OP_CONTROL_BARRIER = 169, 224
 OP_EMIT_MESH_TASKS, OP_SET_MESH_OUTPUTS = 5294, 5295
 
 CAPABILITY_MESH_SHADING = 5283
@@ -77,6 +78,8 @@ class Module:
         self.constants = {ops[1]: ops[2] for op, ops in self.insts if op == OP_CONSTANT}
         self.pointers = {ops[0]: (ops[1], ops[2]) for op, ops in self.insts if op == OP_TYPE_POINTER}
         self.arrays = {ops[0]: (ops[1], ops[2]) for op, ops in self.insts if op == OP_TYPE_ARRAY}
+        # What defines a result id, for the instructions whose result is the second operand
+        self.defs = {ops[1]: (op, ops) for op, ops in self.insts if op in (OP_CONSTANT, OP_VARIABLE, OP_LOAD, OP_ACCESS_CHAIN, OP_SELECT)}
         first = next(n for n, (op, _) in enumerate(self.insts) if op == OP_FUNCTION)
         # A global variable: before the first function; (result type, id, storage class)
         self.variables = {ops[1]: (ops[0], ops[2]) for op, ops in self.insts[:first] if op == OP_VARIABLE}
@@ -182,6 +185,7 @@ class TaskEmissionTest(MeshHarness):
         self.assertEqual([op for op, _ in body].count(OP_EMIT_MESH_TASKS), 1)
         self.assertEqual(body[-1][0], OP_EMIT_MESH_TASKS)
         self.assertNotIn(OP_RETURN, [op for op, _ in body])
+        self.assertEqual([op for op, _ in body].count(OP_CONTROL_BARRIER), 1)      # before the payload is handed on
         x, y, z, used = body[-1][1]
         self.assertEqual((module.constants[y], module.constants[z], used), (1, 1, payload))
 
@@ -254,6 +258,26 @@ class MeshEmissionTest(MeshHarness):
 
         # Every EXIT goes to one return
         self.assertEqual([op for op, _ in body].count(OP_RETURN), 1)
+
+    def test_a_mesh_zeroes_its_count_before_its_first_barrier(self):
+        # Every invocation stores the zero count, then one barrier, before the program's first instruction; the epilogue has the other
+        module, _ = self.translate(self.mesh_job("m8"))
+        body = module.body(module.entry()[1])
+        barriers = [n for n, (op, _) in enumerate(body) if op == OP_CONTROL_BARRIER]
+        self.assertEqual(len(barriers), 2)
+        stores = [ops for op, ops in body[:barriers[0]] if op == OP_STORE]
+        self.assertEqual(len(stores), 1)
+        self.assertEqual(module.constants[stores[0][1]], 0)
+        chain = module.defs[stores[0][0]][1]
+        self.assertEqual(module.variables[chain[2]][1], 4)                      # a Workgroup variable: the count
+
+    def test_the_primitive_count_is_clamped_to_the_declared_maximum(self):
+        module, _ = self.translate(self.mesh_job("m9"))
+        body = module.body(module.entry()[1])
+        (count,) = [ops[1] for op, ops in body if op == OP_SET_MESH_OUTPUTS]
+        kind, select = module.defs[count]
+        self.assertEqual(kind, OP_SELECT)
+        self.assertIn(1, [module.constants[i] for i in select[3:] if i in module.constants])   # max_primitives is 1
 
     def test_the_outputs_are_the_components_of_the_map_and_no_others(self):
         module, _ = self.translate(self.mesh_job("m2"))
