@@ -19,6 +19,7 @@ Run: python -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shutil
 import subprocess
@@ -31,7 +32,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
 import build_game  # noqa: E402
+import fetch_imgui  # noqa: E402
 from test_build_game import pe_imports, toolchain_or_skip  # noqa: E402
+from test_fetch_imgui import fetched_or_skip  # noqa: E402
 
 RUNTIME = ROOT / "runtime"
 TEST_SOURCE = ROOT / "tests" / "runtime" / "ui_test.c"
@@ -110,6 +113,11 @@ class UiTest(unittest.TestCase):
             with self.subTest(wrong=wrong):
                 self.assertEqual(self.run_case("flags", *wrong).returncode, 1)
 
+    def test_a_build_without_dear_imgui_says_so(self) -> None:
+        done = self.run_case("imgui", "none")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(self.run_case("imgui", fetch_imgui.VERSION).returncode, 1)   # the case can tell
+
     def test_the_stand_in_takes_its_names_from_the_cxx_library(self) -> None:
         names = cxx_names(self.nm, self.build.out / "obj" / "runtime" / "ui_ui_standin.o")
         self.assertTrue(names, "the stand-in's object names nothing the C++ standard library defines")
@@ -145,6 +153,104 @@ class UiTest(unittest.TestCase):
                   f"include/c++/v1 ({len(files)} files)": sum(p.stat().st_size for p in files)}
         print("\nllvm-mingw C++ pieces:", ", ".join(f"{name} {size:,} bytes" for name, size in pieces.items()),
               flush=True)
+
+
+def undefined_names(nm: str, obj: Path) -> list[str]:
+    done = subprocess.run([nm, "-u", str(obj)], capture_output=True, text=True, errors="replace")
+    if done.returncode:
+        raise RuntimeError(f"{nm} -u {obj} failed:\n{done.stdout}{done.stderr}")
+    return [words[-1] for words in (line.split() for line in done.stdout.splitlines()) if words]
+
+
+class UiImguiTest(unittest.TestCase):
+    """The stand-in built with the fetched Dear ImGui (tools/fetch_imgui.py, research 107): its four core sources
+    are compiled into the runtime library by the plan's own rule, the stand-in includes the header and asks the core
+    whether the two agree, and the library links, whole, into a program that runs. No window, no device, no drawing.
+
+    Needs a fetched folder (OOT2_IMGUI, else fetched/imgui); without one the tests skip, unless OOT2_REQUIRE_IMGUI is
+    set, as continuous integration sets it."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        tool = toolchain_or_skip()
+        cls.imgui = fetched_or_skip()
+        cls.tool = dataclasses.replace(tool, imgui=cls.imgui)
+        cls.tmp = tempfile.TemporaryDirectory(prefix="oot2-ui-imgui-", ignore_cleanup_errors=True)
+        top = Path(cls.tmp.name)
+        cls.runtime = top / "runtime"
+        shutil.copytree(RUNTIME / "include", cls.runtime / "include")
+        shutil.copytree(RUNTIME / "ui", cls.runtime / "ui", ignore=shutil.ignore_patterns("__pycache__"))
+        cls.build = build_game.Build(top / "build", cls.tool, runtime=cls.runtime, jobs=2)
+        build_game.make_runtime_lib(cls.build)
+        cls.nm = nm_of(cls.tool)
+        obj = top / "ui_test.o"
+        run([cls.tool.cc, "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-I", str(cls.runtime / "include"),
+             "-c", str(TEST_SOURCE), "-o", str(obj)], "compiling ui_test.c")
+        cls.exe = top / f"ui_test{EXE}"
+        run([cls.tool.cxx, *build_game.LINK_FLAGS, str(obj), str(cls.build.lib), *build_game.LINK_LIBS,
+             "-o", str(cls.exe)], "linking ui_test")
+        # The program links the library whole (HOST_OVERRIDE entries are found by section): every object of Dear
+        # ImGui goes in, so a name one of them needs that another does not define stops the link.
+        cls.whole = top / f"ui_test_whole{EXE}"
+        run([cls.tool.cxx, *build_game.LINK_FLAGS, str(obj), "-Wl,--whole-archive", str(cls.build.lib),
+             "-Wl,--no-whole-archive", *build_game.LINK_LIBS, "-o", str(cls.whole)], "linking ui_test whole")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        if hasattr(cls, "tmp"):
+            cls.tmp.cleanup()
+
+    def objects(self) -> list[Path]:
+        return [self.build.out / "obj" / "runtime" / f"imgui-{Path(n).stem}.o" for n in fetch_imgui.CORE_SOURCES]
+
+    def test_the_runtime_reports_the_pinned_version_and_its_core_agrees_with_the_headers(self) -> None:
+        for exe in (self.exe, self.whole):
+            with self.subTest(exe=exe.name):
+                done = subprocess.run([str(exe), "imgui", fetch_imgui.VERSION], capture_output=True, text=True,
+                                      timeout=60)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                for wrong in ("1.0.0", "none"):
+                    done = subprocess.run([str(exe), "imgui", wrong], capture_output=True, text=True, timeout=60)
+                    self.assertEqual(done.returncode, 1, wrong)
+
+    def test_the_stand_in_cases_still_pass_beside_dear_imgui(self) -> None:
+        for case in CASES:
+            with self.subTest(case=case):
+                done = subprocess.run([str(self.exe), case], capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_the_four_core_sources_are_compiled_into_the_library(self) -> None:
+        members = subprocess.run([self.tool.ar, "t", str(self.build.lib)], capture_output=True, text=True,
+                                 errors="replace").stdout.split()
+        for obj in self.objects():
+            with self.subTest(obj=obj.name):
+                self.assertTrue(obj.is_file())
+                self.assertIn(obj.name, members)
+        defined = subprocess.run([self.nm, "-g", "--defined-only", str(self.objects()[0])], capture_output=True,
+                                 text=True, errors="replace").stdout
+        self.assertIn("DebugCheckVersionAndDataLayout", defined)
+
+    # What an object compiled with exceptions on names and one compiled without them does not: measured on
+    # imgui_draw.cpp with the plan's flags, the second has none of these (__cxa_guard_acquire and _release are the
+    # thread-safe local statics, present either way).
+    EXCEPTION_NAMES = {"_Unwind_Resume", "_ZSt9terminatev", "__cxa_begin_catch", "__cxa_end_catch", "__cxa_throw",
+                       "__cxa_rethrow"}
+
+    def test_the_core_is_built_without_exceptions_and_without_run_time_type_information(self) -> None:
+        for obj in self.objects():
+            with self.subTest(obj=obj.name):
+                bad = [n for n in undefined_names(self.nm, obj)
+                       if n in self.EXCEPTION_NAMES or "personality" in n or "dynamic_cast" in n]
+                self.assertEqual(bad, [])
+
+    @unittest.skipUnless(WIN, "a PE import table")
+    def test_the_program_imports_nothing_dear_imgui_would_add_with_the_windows_functions_on(self) -> None:
+        # IMGUI_DISABLE_WIN32_FUNCTIONS keeps windows.h out of imgui.cpp: no USER32 (clipboard), SHELL32 (open a link)
+        # or IMM32 (input method). The imports stay the system's C library and KERNEL32, and no toolchain DLL.
+        imports = [name.lower() for name in pe_imports(self.whole)]
+        self.assertIn("kernel32.dll", imports)
+        odd = [n for n in imports if n != "kernel32.dll" and not n.startswith("api-ms-win-crt-")]
+        self.assertEqual(odd, [], f"imports: {imports}")
 
 
 if __name__ == "__main__":

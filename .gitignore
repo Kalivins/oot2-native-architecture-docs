@@ -14,6 +14,10 @@ obj/
 *.exe
 *.dll
 
+# Third-party sources fetched at a pinned version by tools/fetch_*.py (Dear ImGui). Never committed: they are too large
+# for the content guard, and THIRD_PARTY_NOTICES.md names each pin.
+fetched/
+
 # Dumps and extracted game data. Each player keeps these on their own machine.
 dump/
 dumps/

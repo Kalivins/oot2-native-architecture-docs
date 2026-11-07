@@ -820,14 +820,36 @@ class RuntimeLibTest(unittest.TestCase):
         toolchain_or_skip()
         with tempfile.TemporaryDirectory(prefix="oot2-runtime-lib-") as tmp:
             out = io.StringIO()
-            with mock.patch("sys.stdout", out):
+            # a build without Dear ImGui, whatever folder this machine has fetched (the next test builds with one)
+            with mock.patch("sys.stdout", out), mock.patch.dict(os.environ), \
+                    mock.patch.object(build_game.fetch_imgui, "DEFAULT_DEST", Path(tmp) / "no-dear-imgui"):
+                os.environ.pop(build_game.IMGUI_ENV, None)
                 code = build_game.main(["--make-runtime-lib", "--out", tmp, "--jobs", "4"])
             self.assertEqual(code, 0, out.getvalue())
+            self.assertIn("no Dear ImGui", out.getvalue())
             listed = (Path(tmp) / "obj" / build_game.RUNTIME_LIST).read_text(encoding="utf-8").split()
             for name in ("gpu_gpu.o", "gpu_vk_volk.o", "spirv_gpu_shaders.o", "ui_ui_standin.o"):
                 self.assertIn(f"obj/runtime/{name}", listed)
             lib = (Path(tmp) / build_game.LIB_NAME).read_bytes()
             for symbol in (b"volkInitialize", b"gfx_select", b"gpu_shaders", b"ui_standin_list"):
+                self.assertIn(symbol, lib)
+
+    def test_make_runtime_lib_with_the_fetched_dear_imgui_holds_its_four_core_objects(self) -> None:
+        toolchain_or_skip()
+        from test_fetch_imgui import fetched_or_skip
+        folder = fetched_or_skip()
+        with tempfile.TemporaryDirectory(prefix="oot2-runtime-lib-imgui-") as tmp:
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out):
+                code = build_game.main(["--make-runtime-lib", "--out", tmp, "--jobs", "4", "--imgui", str(folder)])
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertIn(f"Dear ImGui {build_game.fetch_imgui.VERSION} from {folder}", out.getvalue())
+            listed = (Path(tmp) / "obj" / build_game.RUNTIME_LIST).read_text(encoding="utf-8").split()
+            for name in build_game.fetch_imgui.CORE_SOURCES:
+                self.assertIn(f"obj/runtime/imgui-{Path(name).stem}.o", listed)
+            self.assertIn("obj/runtime/ui_ui_standin.o", listed)
+            lib = (Path(tmp) / build_game.LIB_NAME).read_bytes()
+            for symbol in (b"DebugCheckVersionAndDataLayout", b"ui_standin_list", b"volkInitialize"):
                 self.assertIn(symbol, lib)
 
 

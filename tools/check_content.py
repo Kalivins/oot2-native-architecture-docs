@@ -84,6 +84,7 @@ BLOCKED_DIRS = {
     "build", "out", "generated", "captures", "frame-dumps",
     "shader-cache", "pipeline-cache",
     "bin", "obj",  # .NET build output (xlate/)
+    "fetched",  # third-party sources laid out by tools/fetch_*.py (tools/fetch_imgui.py)
 }
 BLOCKED_DIR_PREFIXES = ("cmake-build-",)
 

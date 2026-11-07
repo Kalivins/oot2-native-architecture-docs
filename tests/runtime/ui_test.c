@@ -90,6 +90,22 @@ static int case_flags(int argc, char **argv) {
     return 0;
 }
 
+// ui_test imgui VERSION|none: the Dear ImGui the runtime was built with, and whether its core agrees with the headers
+// the stand-in saw (research 107). "none" is a build without the library.
+static int case_imgui(int argc, char **argv) {
+    CHECK(argc == 3);
+    UiBuild b = ui_standin_build();
+    if (!strcmp(argv[2], "none")) {
+        CHECK(b.imgui_version == NULL);
+        CHECK(b.imgui_agrees == 0);
+        return 0;
+    }
+    CHECK(b.imgui_version != NULL);
+    CHECK(!strcmp(b.imgui_version, argv[2]));
+    CHECK(b.imgui_agrees == 1);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *name = argc > 1 ? argv[1] : "";
     if (!strcmp(name, "list")) return case_list();
@@ -98,6 +114,7 @@ int main(int argc, char **argv) {
     if (!strcmp(name, "empty")) return case_empty();
     if (!strcmp(name, "many")) return case_many();
     if (!strcmp(name, "flags")) return case_flags(argc, argv);
-    fprintf(stderr, "usage: ui_test list|sorted|cut|empty|many|flags [DIALECT EXCEPTIONS RTTI]\n");
+    if (!strcmp(name, "imgui")) return case_imgui(argc, argv);
+    fprintf(stderr, "usage: ui_test list|sorted|cut|empty|many|flags|imgui [ARGS]\n");
     return 2;
 }

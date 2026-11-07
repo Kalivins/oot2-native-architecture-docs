@@ -87,14 +87,26 @@ jobs:
           python tools/fetch_vulkan.py --dest "$RUNNER_TEMP/vulkan-kit"
           echo "VULKAN_SDK=$RUNNER_TEMP/vulkan-kit" >> "$GITHUB_ENV"
 
+      # Dear ImGui at the pin of tools/fetch_imgui.py, laid out in the ignored folder fetched/imgui inside the
+      # checkout, and the guard run again over the whole tree with it present (the run above had it absent): it is
+      # ignored by .gitignore and blocked by the guard, so a file of it that got staged would be refused.
+      - name: Fetch Dear ImGui
+        run: python tools/fetch_imgui.py
+
+      - name: Check the whole tree with Dear ImGui present
+        run: |
+          test -f fetched/imgui/imgui.cpp
+          python tools/check_content.py --all
+
       # The runtime boundary and lifter tests build C with clang (preinstalled on the
       # runner, with the AArch64 assembler the lifter tests use); here a missing
-      # compiler, Ninja, capstone or Vulkan SDK fails them instead of skipping them.
+      # compiler, Ninja, capstone, Vulkan SDK or Dear ImGui fails them instead of skipping them.
       - name: Run the unit tests
         env:
           OOT2_REQUIRE_CLANG: "1"
           OOT2_REQUIRE_CAPSTONE: "1"
           OOT2_REQUIRE_VULKAN: "1"
+          OOT2_REQUIRE_IMGUI: "1"
         run: |
           clang --version
           python -m unittest discover -s tests -v

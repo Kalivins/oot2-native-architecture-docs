@@ -13,8 +13,22 @@
 #include <string>
 #include <vector>
 
+// Built with the fetched Dear ImGui (tools/build_game.py defines OOT2_WITH_IMGUI and puts its folder on the include
+// path), the stand-in includes its header and asks its core whether the two agree. That is all it does with it: no
+// context, no window, no device, no drawing (research 107).
+#ifdef OOT2_WITH_IMGUI
+#include "imgui.h"
+#endif
+
 extern "C" UiBuild ui_standin_build(void) {
     UiBuild b;
+#ifdef OOT2_WITH_IMGUI
+    b.imgui_version = IMGUI_VERSION;
+    b.imgui_agrees = IMGUI_CHECKVERSION() ? 1 : 0;
+#else
+    b.imgui_version = NULL;
+    b.imgui_agrees = 0;
+#endif
     b.dialect = static_cast<long>(__cplusplus);
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
     b.exceptions = 1;

@@ -140,13 +140,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "fetch_vulkan.py failed" }
           "VULKAN_SDK=$kit" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-      # Here a missing clang, Ninja, translator, capstone or Vulkan SDK fails the tests instead of skipping them.
+      # Dear ImGui at the pin of tools/fetch_imgui.py (version 1.92.9b, fetched by commit, every file checked against
+      # its SHA-256), laid out in the ignored folder fetched/imgui, where tools/build_game.py and the tests find it.
+      # The fetch takes seconds, so nothing is cached. The tests compile its four core sources into the runtime.
+      - name: Fetch Dear ImGui
+        run: python tools/fetch_imgui.py
+
+      # Here a missing clang, Ninja, translator, capstone, Vulkan SDK or Dear ImGui fails the tests instead of skipping them.
       - name: Run the unit tests
         env:
           OOT2_REQUIRE_CLANG: "1"
           OOT2_REQUIRE_XLATE: "1"
           OOT2_REQUIRE_CAPSTONE: "1"
           OOT2_REQUIRE_VULKAN: "1"
+          OOT2_REQUIRE_IMGUI: "1"
         run: |
           clang --version
           python -m unittest discover -s tests -v

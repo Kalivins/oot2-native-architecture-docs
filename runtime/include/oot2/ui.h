@@ -7,9 +7,10 @@
 // (tools/build_game.py, CXX_FLAGS), because the runtime does not unwind C++ exceptions (research 05). No C file
 // includes a C++ header, and no C++ object may let an exception leave a function declared here.
 //
-// Until the menu's library is chosen and fetched, the directory holds only a stand-in: one file that uses the C++
-// standard library (a container, a string, an algorithm) so that building and linking it proves the path
-// (research 104). The functions below are the stand-in's; the menu replaces them.
+// Until the menu is written, the directory holds only a stand-in: one file that uses the C++ standard library (a
+// container, a string, an algorithm) so that building and linking it proves the path (research 104), and that reports
+// which Dear ImGui, if any, the runtime was built with (research 107). The functions below are the stand-in's; the
+// menu replaces them.
 #pragma once
 #include <stddef.h>
 
@@ -20,10 +21,18 @@ extern "C" {
 // How the C++ side was compiled: its language level (the value of __cplusplus, 201703 for C++17) and whether
 // exceptions and run-time type information were on (both 0 by the build's flags). A test reads it, so a change of
 // the flags that does not reach the compiler shows.
+//
+// imgui_version is Dear ImGui's version string when the runtime was built with the fetched library
+// (tools/fetch_imgui.py, tools/build_game.py --imgui), else NULL. imgui_agrees is 1 when the compiled core and the headers this file saw agree
+// on the version and on the layout of the structures a caller shares with it (Dear ImGui's own check), else 0; it is
+// 0 with no library. A core built from other headers than the caller's stops in Dear ImGui's assert instead of
+// returning 0, in a build that has asserts.
 typedef struct UiBuild {
     long dialect;
     int exceptions;
     int rtti;
+    const char *imgui_version;
+    int imgui_agrees;
 } UiBuild;
 
 UiBuild ui_standin_build(void);

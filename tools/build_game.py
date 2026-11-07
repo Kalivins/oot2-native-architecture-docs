@@ -48,6 +48,14 @@ SDK's Bin folder, else PATH), validated by it (--spirv-val), and embedded as spi
 into the runtime library (oot2/gpu.h). They are compiled at every build of the library, so an embedded shader always
 matches its source; no compiled shader is kept in the repository.
 
+Dear ImGui. The menu's library is fetched and never committed (tools/fetch_imgui.py, research 107): --imgui, else the
+OOT2_IMGUI variable, else fetched/imgui when it exists. A folder that is not exactly the pinned layout is refused by
+name. Its four core sources (fetch_imgui.CORE_SOURCES) are compiled as C++ with the runtime's C++ flags (warnings off:
+it is not this project's code) and join the runtime library; every C++ file of the runtime then sees its headers and
+the definitions of fetch_imgui.DEFINES, and OOT2_WITH_IMGUI. Without a folder nothing changes: the runtime builds as
+before and runtime/ui reports that it has no Dear ImGui. Only a command line names the folder through the variable or
+the default: find_toolchain takes it as an argument, so no test builds Dear ImGui by accident.
+
 program_glue.c, written into --out, carries what the build knows of the player's dump: the layout (checked against
 layout.h at compile time), the lifted modules' function tables, each module file to load with its whole-file SHA-256,
 the other files oot2.exe checks at each start (main.npdm and --file by SHA-256, --file-size by size only, and the
@@ -87,6 +95,7 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 
+import fetch_imgui  # noqa: E402
 import layout  # noqa: E402
 from check_content import GENERATED_MARKER  # noqa: E402
 
@@ -144,9 +153,28 @@ class Toolchain:
     vulkan: Path | None = None    # a Vulkan SDK's Include folder: vulkan/ and Volk/ (vulkan_include)
     glslang: str | None = None    # compiles the runtime's own shaders (find_glslang)
     cxx: str | None = None        # the C++ driver: compiles the runtime's .cpp files and links the program (find_cxx)
+    imgui: Path | None = None     # a fetched Dear ImGui folder (find_imgui), compiled into the runtime library
 
 
 VOLK_FILES = ("volk.c", "volk.h")
+IMGUI_ENV = "OOT2_IMGUI"
+
+
+def find_imgui(folder: str | os.PathLike | None = None) -> Path | None:
+    """The fetched Dear ImGui folder: folder, else the OOT2_IMGUI variable, else fetched/imgui when it exists; None when
+    there is none, which is a build without Dear ImGui. A folder that was named, or the default one when it exists,
+    must be exactly what tools/fetch_imgui.py lays out (fetch_imgui.problems); BuildError says how it is not, since a
+    wrong pin built silently would put unchecked code in the runtime."""
+    named = folder or os.environ.get(IMGUI_ENV)
+    path = Path(named) if named else fetch_imgui.DEFAULT_DEST if fetch_imgui.DEFAULT_DEST.exists() else None
+    if path is None:
+        return None
+    path = path.resolve()
+    bad = fetch_imgui.problems(path)
+    if bad:
+        raise BuildError(f"the Dear ImGui folder {path} cannot be used: {bad[0]}\n"
+                         "(run tools/fetch_imgui.py to lay it out again)")
+    return path
 
 
 def vulkan_include(sdk: str | os.PathLike | None = None) -> Path | None:
@@ -207,11 +235,12 @@ def find_cxx(cc_path: str, cxx: str | None = None) -> str | None:
 
 
 def find_toolchain(cc: str | None = None, ninja: str | None = None, ar: str | None = None,
-                   vulkan_sdk: str | os.PathLike | None = None, cxx: str | None = None) -> Toolchain:
+                   vulkan_sdk: str | os.PathLike | None = None, cxx: str | None = None,
+                   imgui: Path | None = None) -> Toolchain:
     """The C compiler (cc, else OOT2_CC, else clang), its C++ driver (find_cxx), Ninja (ninja, else OOT2_NINJA, else
     ninja on PATH), the archiver (ar, else llvm-ar beside the compiler, else llvm-ar or ar on PATH), the Vulkan headers
-    and Volk (the Vulkan SDK vulkan_sdk, else VULKAN_SDK) and glslang (find_glslang). BuildError names what is
-    missing."""
+    and Volk (the Vulkan SDK vulkan_sdk, else VULKAN_SDK) and glslang (find_glslang). imgui is a folder find_imgui
+    returned, or None for a build without Dear ImGui. BuildError names what is missing."""
     name = cc or os.environ.get("OOT2_CC") or "clang"
     cc_path = shutil.which(name)
     if not cc_path:
@@ -248,7 +277,7 @@ def find_toolchain(cc: str | None = None, ninja: str | None = None, ar: str | No
     if not glslang:
         raise BuildError("glslang was not found (OOT2_GLSLANG, the Vulkan SDK's Bin folder or PATH): it compiles the "
                          "runtime's own shaders (runtime/gpu/shaders)")
-    return Toolchain(cc_path, ar_path, ninja_path, include, glslang, cxx_path)
+    return Toolchain(cc_path, ar_path, ninja_path, include, glslang, cxx_path, imgui)
 
 
 def vulkan_inputs(include: Path | None, glslang: str | None) -> list:
@@ -467,11 +496,25 @@ def cmd_arg(s: str) -> str:
 
 
 CXX_SUFFIX = ".cpp"
+# Dear ImGui is not this project's code, so its warnings are not this project's to read.
+THIRD_PARTY_CXX_FLAGS = tuple(f for f in CXX_FLAGS if f not in ("-Wall", "-Wextra")) + ("-w",)
 
 
 def runtime_sources(runtime: Path) -> list[Path]:
     """The runtime's C and C++ sources, runtime/<module>/*.c and *.cpp, in name order."""
     return sorted(p for suffix in (".c", CXX_SUFFIX) for p in runtime.glob(f"*/*{suffix}"))
+
+
+def imgui_sources(imgui: Path) -> list[Path]:
+    """The Dear ImGui sources that join the runtime library: the four core files of the fetched folder, in the order
+    fetch_imgui lists them. The backends are laid out and pinned, and not compiled yet."""
+    return [Path(imgui) / name for name in fetch_imgui.CORE_SOURCES]
+
+
+def imgui_object(out: Path, src: Path) -> Path:
+    """The object of a Dear ImGui source, beside the runtime's own. The hyphen keeps its name from ever being one that
+    object_of makes (runtime/<module>/<name>.c becomes <module>_<name>.o), since an archive keeps members by name."""
+    return Path(out) / "obj" / "runtime" / f"imgui-{src.stem}.o"
 
 
 # ------------------------------------------------------------------------------------------------ the runtime's shaders
@@ -562,6 +605,12 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
     # The runtime's sources and the file that embeds its shaders (written by runtime_library before Ninja runs).
     rt_objects = [] if b.runtime_lib else [(s, object_of(b, s, None))
                                            for s in runtime_sources(b.runtime) + [shader_glue_path(o)]]
+    # Dear ImGui's core sources, from the fetched folder, beside the shaders' glue file: runtime_sources reads only
+    # runtime/<module>/*.c and *.cpp, one level down, and the fetched folder is outside the tree (fetch_imgui).
+    imgui = b.tool.imgui if rt_objects else None
+    imgui_pairs = [(s, imgui_object(o, s)) for s in imgui_sources(imgui)] if imgui else []
+    rt_objects += imgui_pairs
+    imgui_srcs = {s for s, _ in imgui_pairs}
     if rt_objects and b.tool.vulkan is None:
         raise BuildError("the runtime cannot be built without the Vulkan headers and Volk (find_toolchain)")
     if b.tool.cxx is None:
@@ -574,6 +623,10 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
         made[obj] = src
     # The Vulkan headers and Volk, for the runtime only: generated code and the program glue never include them.
     vk = f" -I {cmd_arg(rel(b.tool.vulkan, o))} -I {cmd_arg(rel(b.tool.vulkan / 'Volk', o))}" if b.tool.vulkan else ""
+    # Dear ImGui's headers and definitions reach every C++ file of the runtime, so that the menu that includes imgui.h
+    # and the core compiled from it agree; OOT2_WITH_IMGUI tells runtime/ui that the headers are there.
+    ig = (f" -I {cmd_arg(rel(imgui, o))} -DOOT2_WITH_IMGUI=1" +
+          "".join(f" -D{d}" for d in fetch_imgui.DEFINES)) if imgui else ""
     glue, glue_object = o / GLUE_NAME, o / "obj" / "program_glue.o"
     lines = [
         "# Written by tools/build_game.py; do not edit.",
@@ -583,7 +636,8 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
         f"ar = {cmd_arg(b.tool.ar)}",
         f"genflags = {' '.join(GEN_FLAGS)} {inc}",
         f"rtflags = {' '.join(RT_FLAGS)} {inc} -I {cmd_arg(rel(b.runtime / 'core', o))}{vk}",
-        f"cxxflags = {' '.join(CXX_FLAGS)} {inc} -I {cmd_arg(rel(b.runtime / 'core', o))}{vk}",
+        f"cxxflags = {' '.join(CXX_FLAGS)} {inc} -I {cmd_arg(rel(b.runtime / 'core', o))}{vk}{ig}",
+        f"imguiflags = {' '.join(THIRD_PARTY_CXX_FLAGS)}{ig}",
         f"glueflags = {' '.join(RT_FLAGS)} {inc}" + (f" -I {cmd_arg(rel(b.gen, o))}" if b.gen else ""),
         f"ldflags = {' '.join(LINK_FLAGS)}",
         f"lib = {cmd_arg(rel(b.lib, o))}",
@@ -613,6 +667,12 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
         "  depfile = $out.d",
         "  description = CXX $in",
         "",
+        "rule cxx_imgui",
+        "  command = $cxx $imguiflags -MD -MF $out.d -c $in -o $out",
+        "  deps = gcc",
+        "  depfile = $out.d",
+        "  description = CXX $in",
+        "",
         "rule ar",
         "  command = $ar rcs $out $in",
         "  description = AR $out",
@@ -631,7 +691,7 @@ def plan(b: Build, lifted: list[Lifted]) -> Plan:
         for src, obj in pairs:
             lines.append(f"build {ninja_path(obj, o)}: cc_gen {ninja_path(src, o)}")
     for src, obj in rt_objects:
-        rule = "cxx_rt" if src.suffix.lower() == CXX_SUFFIX else "cc_rt"
+        rule = "cxx_imgui" if src in imgui_srcs else "cxx_rt" if src.suffix.lower() == CXX_SUFFIX else "cc_rt"
         lines.append(f"build {ninja_path(obj, o)}: {rule} {ninja_path(src, o)}")
     if rt_objects:
         lines.append(f"build {ninja_path(b.lib, o)}: ar " + " ".join(ninja_path(obj, o) for _, obj in rt_objects))
@@ -1031,6 +1091,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ninja", help="Ninja (default: OOT2_NINJA, else ninja on PATH)")
     ap.add_argument("--vulkan-sdk", type=Path,
                     help="Vulkan SDK with the headers, Volk and glslang (default: the VULKAN_SDK variable)")
+    ap.add_argument("--imgui", type=Path,
+                    help="fetched Dear ImGui folder (tools/fetch_imgui.py; default: the OOT2_IMGUI variable, else "
+                         "fetched/imgui when it exists, else a build without Dear ImGui)")
     ap.add_argument("--runtime", type=Path, default=RUNTIME, help="runtime source folder (default runtime/)")
     ap.add_argument("--runtime-lib", type=Path, help=f"a prebuilt {LIB_NAME} to link instead of building one")
     ap.add_argument("--make-runtime-lib", action="store_true", help=f"build only {LIB_NAME} into --out")
@@ -1049,13 +1112,16 @@ def main(argv: list[str] | None = None) -> int:
             print(line, flush=True)
 
     try:
-        tool = find_toolchain(args.cc, args.ninja, vulkan_sdk=args.vulkan_sdk, cxx=args.cxx)
+        tool = find_toolchain(args.cc, args.ninja, vulkan_sdk=args.vulkan_sdk, cxx=args.cxx,
+                              imgui=find_imgui(args.imgui))
         files = [GameFile(w, p.resolve(), True) for w, p in args.file]
         files += [GameFile(w, p.resolve(), False) for w, p in args.file_size]
         b = Build(args.out, tool, gen=args.gen.resolve() if args.gen else None,
                   exefs=args.exefs.resolve() if args.exefs else None, exe=args.exe, runtime=args.runtime.resolve(),
                   runtime_lib=args.runtime_lib.resolve() if args.runtime_lib else None, files=files, jobs=jobs)
         print(f"build_game: {tool.cc} ({tool_id(tool.cc)}), C++ {tool.cxx}, {jobs} jobs ({why})", flush=True)
+        print("build_game: " + (f"Dear ImGui {fetch_imgui.VERSION} from {tool.imgui}" if tool.imgui
+                                else "no Dear ImGui (tools/fetch_imgui.py lays it out)"), flush=True)
         if args.make_runtime_lib:
             r = make_runtime_lib(b, show)
             print(f"{r['lib']}: {mib(r['bytes'])}, {r['objects']} objects")
