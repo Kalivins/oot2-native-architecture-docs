@@ -152,7 +152,15 @@ void gpu_check_recording(uint64_t value, int index, uint64_t handle) {
 }
 
 // ---------- the back-end table
+// Pools are the backing map's (oot2/backing.h): pool_fini returns once no submission in flight used the pool.
+static int vk_pool_init(pool_t *p) { return backing_pool_init(p); }
+static void vk_pool_fini(pool_t *p) { backing_pool_fini(p); }
+static int vk_pool_map_virtual(pool_t *v, int n, const void *requests) {
+    return backing_pool_map_virtual(v, n, requests);
+}
+
 static uint64_t vk_submit(const uint64_t *handles, int n) {
+    backing_sync();
     uint64_t value = gpu_vk_begin(GPU_VK_REPLAY);
     for (int i = 0; i < n; i++) gpu_check_recording(value, i, handles[i]);
     gpu_vk_cmd();
@@ -166,20 +174,6 @@ static void vk_finish(void) { gpu_sync_finish(); }
 // What later tickets bring: a call stops by name.
 __attribute__((noreturn)) static void not_built(const char *what) {
     rt_fatal("gfx: vulkan: %s is not built yet in the Vulkan back end", what);
-}
-static int vk_pool_init(pool_t *p) {
-    (void)p;
-    not_built("a memory pool (pool_init)");
-}
-static void vk_pool_fini(pool_t *p) {
-    (void)p;
-    not_built("a memory pool (pool_fini)");
-}
-static int vk_pool_map_virtual(pool_t *v, int n, const void *requests) {
-    (void)v;
-    (void)n;
-    (void)requests;
-    not_built("a virtual pool mapping (pool_map_virtual)");
 }
 static void vk_texture_register(const dpool_ref *pool, int id, const tex_t *t, const view_t *v) {
     (void)pool;

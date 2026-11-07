@@ -123,12 +123,16 @@ static uint64_t *new_bitmap(uint64_t bits) {
     return p;
 }
 
-// ---- commit and decommit, counted per region
+// ---- commit and decommit, counted per region, and the commit epoch (rt_mem_commit_epoch): every change of a page map
+// moves it once, after the bits changed
+static uint64_t g_commit_epoch;   // atomic
+
 static void account(int r, uint64_t a, uint64_t n, int on) {
     uint64_t first = (a - R[r].base) / PAGE, changed = 0;
     for (uint64_t i = 0; i < n / PAGE; i++) changed += (uint64_t)bit_change(R[r].bits, first + i, on);
     if (on) __atomic_fetch_add(&R[r].committed, changed * PAGE, __ATOMIC_RELAXED);
     else __atomic_fetch_sub(&R[r].committed, changed * PAGE, __ATOMIC_RELAXED);
+    if (changed) __atomic_fetch_add(&g_commit_epoch, 1, __ATOMIC_RELEASE);
 }
 
 static uint64_t managed_pages;   // atomic: pages of released or armed state in every page range (zero in a default run)
@@ -1072,6 +1076,22 @@ uint64_t rt_mem_written(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t 
         if (inside(addr, size, R[r].base, R[r].size)) return plat_written(addr, size, pages, max, reset);
     return UINT64_MAX;
 }
+
+uint64_t rt_mem_commit_run(uint64_t addr, uint64_t size, int *committed) {
+    if (!rt_mem_ready()) rt_fatal("rt_mem_commit_run before rt_mem_init");
+    int r = region_of(addr);
+    if (r < 0) return UINT64_MAX;
+    if (!size) return 0;
+    const Region *g = &R[r];
+    uint64_t off = addr - g->base, end = size < g->size - off ? off + size : g->size;
+    uint64_t first = off / PAGE, stop;
+    int v = bit(g->bits, first);
+    stop = run_end(g->bits, first, (end + PAGE - 1) / PAGE, v) * PAGE;
+    *committed = v;
+    return (stop < end ? stop : end) - off;
+}
+
+uint64_t rt_mem_commit_epoch(void) { return __atomic_load_n(&g_commit_epoch, __ATOMIC_ACQUIRE); }
 
 static uint64_t resident_bytes(const Region *g) {
     uint64_t pages = g->size / PAGE, total = 0;

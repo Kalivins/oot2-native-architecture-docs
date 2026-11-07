@@ -49,27 +49,66 @@ void plat_write_stderr(const char *p, size_t n) {
 
 static DWORD win_prot(int prot) { return prot == PLAT_RW ? PAGE_READWRITE : prot == PLAT_R ? PAGE_READONLY : PAGE_NOACCESS; }
 
-int plat_reserve_at(uint64_t addr, uint64_t size, int watch) {
-    void *want = (void *)(uintptr_t)addr;
-    void *p = VirtualAlloc(want, size, MEM_RESERVE | (watch ? MEM_WRITE_WATCH : 0), PAGE_NOACCESS);
-    if (p && p != want) VirtualFree(p, 0, MEM_RELEASE);
-    return p == want;
+// The end of the piece that holds a (plat.h, PLAT_PIECE), or end when that comes first.
+static uint64_t piece_end(uint64_t a, uint64_t end) {
+    uint64_t b = (a | (PLAT_PIECE - 1)) + 1;
+    return b > a && b < end ? b : end;
 }
 
+int plat_reserve_at(uint64_t addr, uint64_t size, int watch) {
+    const uint64_t end = addr + size;
+    for (uint64_t a = addr; a < end;) {
+        uint64_t b = watch ? piece_end(a, end) : end;
+        void *want = (void *)(uintptr_t)a;
+        void *p = VirtualAlloc(want, b - a, MEM_RESERVE | (watch ? MEM_WRITE_WATCH : 0), PAGE_NOACCESS);
+        if (p != want) {
+            if (p) VirtualFree(p, 0, MEM_RELEASE);
+            if (a > addr) plat_release(addr, a - addr);
+            return 0;
+        }
+        a = b;
+    }
+    return 1;
+}
+
+// A reservation made in one piece or in several: every allocation that starts in [addr, addr+size) is released.
 void plat_release(uint64_t addr, uint64_t size) {
-    (void)size;
-    VirtualFree((void *)(uintptr_t)addr, 0, MEM_RELEASE);
+    for (uint64_t a = addr; a < addr + size;) {
+        MEMORY_BASIC_INFORMATION m;
+        if (VirtualQuery((void *)(uintptr_t)a, &m, sizeof m) != sizeof m || (uint64_t)(uintptr_t)m.AllocationBase != a)
+            return;
+        uint64_t next = a + m.RegionSize;   // past the allocation's last region
+        while (next < addr + size && VirtualQuery((void *)(uintptr_t)next, &m, sizeof m) == sizeof m &&
+               (uint64_t)(uintptr_t)m.AllocationBase == a)
+            next += m.RegionSize;
+        VirtualFree((void *)(uintptr_t)a, 0, MEM_RELEASE);
+        a = next;
+    }
 }
 
 int plat_commit(uint64_t addr, uint64_t size, int prot) {
-    return VirtualAlloc((void *)(uintptr_t)addr, size, MEM_COMMIT, win_prot(prot)) != NULL;
+    for (uint64_t a = addr, b; a < addr + size; a = b) {
+        b = piece_end(a, addr + size);
+        if (!VirtualAlloc((void *)(uintptr_t)a, b - a, MEM_COMMIT, win_prot(prot))) return 0;
+    }
+    return 1;
 }
 
-int plat_decommit(uint64_t addr, uint64_t size) { return VirtualFree((void *)(uintptr_t)addr, size, MEM_DECOMMIT) != 0; }
+int plat_decommit(uint64_t addr, uint64_t size) {
+    for (uint64_t a = addr, b; a < addr + size; a = b) {
+        b = piece_end(a, addr + size);
+        if (!VirtualFree((void *)(uintptr_t)a, b - a, MEM_DECOMMIT)) return 0;
+    }
+    return 1;
+}
 
 int plat_protect(uint64_t addr, uint64_t size, int prot) {
-    DWORD old;
-    return VirtualProtect((void *)(uintptr_t)addr, size, win_prot(prot), &old) != 0;
+    for (uint64_t a = addr, b; a < addr + size; a = b) {
+        DWORD old;
+        b = piece_end(a, addr + size);
+        if (!VirtualProtect((void *)(uintptr_t)a, b - a, win_prot(prot), &old)) return 0;
+    }
+    return 1;
 }
 
 int plat_is_free(uint64_t addr) {
@@ -77,13 +116,20 @@ int plat_is_free(uint64_t addr) {
     return VirtualQuery((void *)(uintptr_t)addr, &mbi, sizeof mbi) == sizeof mbi && mbi.State == MEM_FREE;
 }
 
+// Piece by piece, in address order, until the buffer is full: a query with reset resets only the pages it returns
+// (research 48 B5), so pieces after a full buffer keep their marks for the next call.
 uint64_t plat_written(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset) {
-    ULONG_PTR count = (ULONG_PTR)max;
-    ULONG granularity;
-    if (GetWriteWatch(reset ? WRITE_WATCH_FLAG_RESET : 0, (void *)(uintptr_t)addr, size, (PVOID *)pages, &count,
-                      &granularity))
-        return UINT64_MAX;
-    return count;
+    uint64_t total = 0;
+    for (uint64_t a = addr, b; a < addr + size && total < max; a = b) {
+        b = piece_end(a, addr + size);
+        ULONG_PTR count = (ULONG_PTR)(max - total);
+        ULONG granularity;
+        if (GetWriteWatch(reset ? WRITE_WATCH_FLAG_RESET : 0, (void *)(uintptr_t)a, b - a, (PVOID *)(pages + total),
+                          &count, &granularity))
+            return UINT64_MAX;
+        total += count;
+    }
+    return total;
 }
 
 uint64_t plat_resident(uint64_t addr, uint64_t size) {

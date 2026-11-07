@@ -70,6 +70,18 @@ RtMemInfo rt_mem_query(uint64_t addr);
 // those two regions or the platform has no write watch.
 uint64_t rt_mem_written(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset);
 
+// The commit state of guest pages, for the GPU back end's host imports (D14): an import over a page that is not
+// committed fails, and after a failed import the driver refuses every import of that size or larger for a while
+// (research 14 F12, research 48 B1 and B7). rt_mem_commit_run gives the length in bytes, from addr, of the run of pages
+// in one state that holds addr, up to addr + size and up to the end of addr's region, with *committed set to 1 for
+// committed pages and 0 for pages that are not; a caller walks a range run by run. UINT64_MAX when addr lies in no
+// region (stack, heap, alias, modules, kernel); 0 for size 0. It reads the page map without the lock, so its answer is
+// a snapshot: the commit epoch grows by one after each change of the page map (a first touch, host I/O, SetHeapSize,
+// MapMemory and UnmapMemory, UnmapPhysicalMemory, a page released or committed again by lever L1), so a reader that
+// read the epoch, then the map, and later reads a larger epoch knows the map may have changed since its reading.
+uint64_t rt_mem_commit_run(uint64_t addr, uint64_t size, int *committed);
+uint64_t rt_mem_commit_epoch(void);
+
 // Measurement, and spike S7's first instrument: per region, what the guest declared mapped, what the runtime
 // committed, and how much of that is resident now.
 enum { RT_MEM_STACK, RT_MEM_HEAP, RT_MEM_ALIAS, RT_MEM_MODULES, RT_MEM_KERNEL, RT_MEM_REGIONS };

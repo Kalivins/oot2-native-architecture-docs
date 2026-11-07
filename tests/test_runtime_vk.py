@@ -3,7 +3,9 @@
 """Tests of the Vulkan back end on a real device (runtime/gpu, runtime/include/oot2/gpu_vk.h), through
 tests/runtime/vk_test.c: the device check of every device, the device opened with every item of oot2/vk_required.h,
 1,000 empty replayed submissions from two threads mixed with the back end's own, a fence wait that times out and a later
-one that succeeds, finish, and the device-loss report on an injected loss.
+one that succeeds, finish, the device-loss report on an injected loss, and the backing map (oot2/backing.h): reads and
+writes through the resolver into each kind of backing, pool_fini held by a submission in flight, and 4,660 pools made
+and finalized with device and host memory left flat.
 
 The program is built like tests/test_runtime_gpu.py's (build_program), at -O2. Without a Vulkan device, or without a
 device that has every item (the laptop's GTX 1060), the tests that need one skip, unless OOT2_REQUIRE_GPU is set, in the
@@ -113,6 +115,33 @@ class VkDeviceTest(unittest.TestCase):
         done = self.run_case("wait", env={"OOT2_VK_VALIDATION": "sync"})
         self.assert_clean(done, "wait")
         self.assertRegex(done.stdout, r"finish left values 21, counter 21")
+        print(f"\n{done.stdout}", end="")
+
+    def test_the_backing_map_reads_and_writes_each_kind_through_the_resolver(self) -> None:
+        self.need_usable_device()
+        done = self.run_case("backing", env={"OOT2_VK_VALIDATION": "sync"}, timeout=300)
+        self.assert_clean(done, "backing")
+        for line in ("an import over uncommitted pages is refused; a 4 KiB import of a committed page then succeeds",
+                     "imported: the GPU read the CPU's words and the CPU read the GPU's, on touched and untouched pages",
+                     "VRAM extent: written and read back",
+                     "virtual over a physical run: through the window's extent and through an import of guest memory",
+                     "an import across a 64 MiB window boundary (two reservation pieces): written and seen",
+                     "the heap shrank under 4 imports: decommitted, and the imports retired at the next sync"):
+            self.assertIn(line, done.stdout)
+        print(f"\n{done.stdout}", end="")
+
+    def test_pool_fini_with_a_submission_in_flight_returns_only_after_it_is_done(self) -> None:
+        self.need_usable_device()
+        done = self.run_case("backing_fini", env={"OOT2_VK_VALIDATION": "sync"})
+        self.assert_clean(done, "backing_fini")
+        self.assertIn("pool_fini held while the submission was in flight", done.stdout)
+        print(f"\n{done.stdout}", end="")
+
+    def test_4660_pools_made_and_finalized_leave_device_and_host_memory_flat(self) -> None:
+        self.need_usable_device()
+        done = self.run_case("backing_flat", env={"OOT2_VK_VALIDATION": "on"}, timeout=900)
+        self.assert_clean(done, "backing_flat")
+        self.assertEqual(len(re.findall(r"^round \d+: ", done.stdout, re.M)), 3, done.stdout)
         print(f"\n{done.stdout}", end="")
 
     def assert_loss_report(self, case: str, where: str) -> str:

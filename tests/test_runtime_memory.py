@@ -41,7 +41,7 @@ MODULE_SIZE = 0x8000
 
 EXIT_FATAL, EXIT_UNIMPLEMENTED = 70, 71
 
-PASSING = ("sha256", "heap", "pool", "alias", "stack", "load", "io", "writewatch")
+PASSING = ("sha256", "heap", "pool", "alias", "stack", "load", "io", "writewatch", "commitrun", "pieces")
 
 # case: (exit code, text the FATAL line must contain)
 FAILING = {
@@ -117,7 +117,7 @@ class MemoryTest(unittest.TestCase):
                 with self.subTest(level=level, case=case):
                     done = self.run_case(level, case)
                     self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-                    if f"skip {case}" in done.stdout:   # no write watch on this platform
+                    if f"skip {case}" in done.stdout:   # no write watch, or no pieces, on this platform
                         self.assertNotEqual(os.name, "nt", done.stdout)
                         self.skipTest(done.stdout.strip())
                     self.assertIn(f"ok {case}", done.stdout)

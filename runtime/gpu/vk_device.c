@@ -412,6 +412,7 @@ void gpu_vk_open(void) {
     choose();
     create_device(after);
     gpu_vk_start_timeline(after);
+    backing_open(&gpu_vk_backing_ops);
     g_open = 1;
     plat_mutex_unlock(&g_open_lock);
 }
@@ -422,6 +423,7 @@ void gpu_vk_close(void) {
     plat_mutex_lock(&g_open_lock);
     if (g_open) {
         gpu_sync_finish();
+        backing_close();
         gpu_vk_stop_timeline();
         GPU_VK_OK(vkDeviceWaitIdle(gpu_vk.device), "vkDeviceWaitIdle");
         vkDestroyCommandPool(gpu_vk.device, gpu_vk.pool, NULL);

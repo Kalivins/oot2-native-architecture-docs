@@ -24,8 +24,10 @@
 
 #include "volk.h"
 
+#include "oot2/backing.h"
 #include "oot2/gpu.h"
 #include "oot2/gpu_vk.h"
+#include "oot2/memory.h"
 #include "oot2/runtime.h"
 #include "plat.h"
 
@@ -280,6 +282,270 @@ static void case_wait(void) {
     printf("ok wait\n");
 }
 
+// ---------- the backing map on the device (oot2/backing.h): guest memory of the runtime's own, pools placed by hand
+#define KiB (1ull << 10)
+#define MiB (1ull << 20)
+#define WIN GFX_GPU_WINDOW_BASE
+static Cpu g_cpu;
+static uint64_t g_heap;
+
+static void guest_heap(uint64_t size) {
+    RtMemConfig cfg = {.pool_size = 2048 * MiB, .heap_region_size = 1024 * MiB, .alias_region_size = 64 * MiB,
+                       .stack_region_size = 64 * MiB, .system_resource_size = MiB};
+    rt_mem_init(&cfg);
+    g_cpu.x[0] = 0, g_cpu.x[1] = size;
+    rt_svc(&g_cpu, 0x01, 0);   // SetHeapSize
+    CHECK(g_cpu.x[0] == 0);
+    g_heap = g_cpu.x[1];
+}
+
+static pool_t make_pool(uint64_t mem, uint64_t size, uint32_t flags) {
+    pool_t p = {.magic = MAGIC('P', 'O', 'O', 'L'), .flags = flags, .mem = (uint8_t *)(uintptr_t)mem, .size = size,
+                .game_mem = (flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) ? NULL : (uint8_t *)(uintptr_t)mem};
+    CHECK(gfx_vulkan_backend.pool_init(&p));
+    return p;
+}
+
+static void map_run(pool_t *v, pool_t *phys, int64_t poff, uint64_t size) {
+    nvn_mapping_t m = {.physical_pool = (const NVNmemoryPool *)(const void *)phys, .physical_offset = poff,
+                       .virtual_offset = 0, .size = size};
+    CHECK(gfx_vulkan_backend.pool_map_virtual(v, 1, &m));
+}
+
+static void barrier(VkCommandBuffer cb, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) {
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                           .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = dst_stage,
+                           .dstAccessMask = dst_access};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+}
+
+// One internal submission: fill [addr, addr + size) with word, or copy it into the readback buffer (g_buf), through the
+// resolver; waited for. Returns the submission's value.
+enum { FILL, READ };
+static uint64_t through(int what, uint64_t addr, uint64_t size, uint32_t word, BackingRef *ref) {
+    uint64_t v = gpu_vk_begin(GPU_VK_INTERNAL);
+    backing_resolve(addr, size, v, ref);
+    VkCommandBuffer cb = gpu_vk_cmd();
+    barrier(cb, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkBuffer buf = (VkBuffer)(uintptr_t)ref->buffer;
+    if (what == FILL) {
+        vkCmdFillBuffer(cb, buf, ref->offset, size, word);
+    } else {
+        VkBufferCopy c = {.srcOffset = ref->offset, .dstOffset = 0, .size = size};
+        vkCmdCopyBuffer(cb, buf, g_buf, 1, &c);
+    }
+    barrier(cb, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+    CHECK(gpu_vk_end(NULL, 0) == v);
+    CHECK(gpu_sync_wait(v, 5000000000ull));
+    return v;
+}
+
+static int words_are(const volatile void *p, uint64_t size, uint32_t word) {
+    for (uint64_t i = 0; i < size / 4; i++)
+        if (((const volatile uint32_t *)p)[i] != word) return 0;
+    return 1;
+}
+
+static void touch_range(uint64_t a, uint64_t n) {
+    for (uint64_t p = a; p < a + n; p += 0x1000) *(volatile uint8_t *)(uintptr_t)p = 0;
+}
+
+static void backing_stats_line(void) {
+    BackingStats s;
+    backing_stats(&s);
+    printf("map: pools %llu, imports %llu (%llu KiB), extents %llu (%llu KiB), blocks %llu (spare %llu, ahead %llu, "
+           "inline %llu, own %llu), imports made %llu refused %llu, deferred peak %llu\n", (unsigned long long)s.pools,
+           (unsigned long long)s.imports, (unsigned long long)(s.import_bytes >> 10), (unsigned long long)s.extents,
+           (unsigned long long)(s.extent_bytes >> 10), (unsigned long long)s.blocks,
+           (unsigned long long)s.spare_blocks, (unsigned long long)s.blocks_made_ahead,
+           (unsigned long long)s.blocks_made_inline, (unsigned long long)s.blocks_dedicated,
+           (unsigned long long)s.imports_made, (unsigned long long)s.imports_refused,
+           (unsigned long long)s.deferred_peak);
+}
+
+// Reads and writes through the resolver into each kind of backing, with the CPU's view checked after each fence.
+static void case_backing(void) {
+    guest_heap(512 * MiB);
+    gpu_vk_open();
+    make_buffer();
+    const uint64_t boundary = (g_heap + 128 * MiB) & ~(BACKING_IMPORT_WINDOW - 1);
+    pool_t p = make_pool(g_heap + 16 * MiB, 4 * MiB, 0);
+    pool_t w = make_pool(WIN, 2 * MiB, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS);
+    pool_t pw = make_pool(WIN + 16 * MiB, 2 * MiB, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_PHYSICAL);
+    pool_t v = make_pool(WIN + 32 * MiB, 2 * MiB, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL);
+    pool_t pc = make_pool(g_heap + 64 * MiB, 2 * MiB, NVN_MEMORY_POOL_FLAGS_PHYSICAL);
+    pool_t v2 = make_pool(WIN + 48 * MiB, 2 * MiB, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL);
+    pool_t x = make_pool(boundary - 1 * MiB, 2 * MiB, 0);   // across a 64 MiB import window
+    map_run(&v, &pw, 64 * KiB, 1 * MiB);
+    map_run(&v2, &pc, 128 * KiB, 1 * MiB);
+    touch_range(g_heap + 16 * MiB, 1 * MiB);
+    touch_range(g_heap + 64 * MiB, 2 * MiB);
+    touch_range(boundary - 1 * MiB, 2 * MiB);
+
+    // The premise of the commit query (research 14 F12, research 48 B1 and B7), on this device: an import over a page
+    // that is not committed is refused, and a 4 KiB import of a committed page succeeds after it.
+    BackingMem m;
+    CHECK(!gpu_vk_backing_ops.import(g_heap + 16 * MiB, 2 * MiB, &m));
+    CHECK(gpu_vk_backing_ops.import(g_heap + 16 * MiB, 0x1000, &m));
+    gpu_vk_backing_ops.free(&m);
+    printf("an import over uncommitted pages is refused; a 4 KiB import of a committed page then succeeds\n");
+
+    BackingRef r;
+    // Imported: the GPU reads what the CPU wrote, and the CPU reads what the GPU wrote, committed pages or not.
+    for (uint64_t i = 0; i < 4096; i++) ((volatile uint32_t *)(uintptr_t)(g_heap + 16 * MiB))[i] = 0x5EED0000u + (uint32_t)i;
+    through(READ, g_heap + 16 * MiB, 16 * KiB, 0, &r);
+    CHECK(r.kind == BACKING_IMPORT);
+    for (uint32_t i = 0; i < 4096; i++) CHECK(g_words[i] == 0x5EED0000u + i);
+    through(FILL, g_heap + 16 * MiB + 128 * KiB, 16 * KiB, 0xABABABABu, &r);
+    CHECK(words_are((const void *)(uintptr_t)(g_heap + 16 * MiB + 128 * KiB), 16 * KiB, 0xABABABABu));
+    through(FILL, g_heap + 18 * MiB, 16 * KiB, 0xCDCDCDCDu, &r);   // never touched: committed for the bind
+    CHECK(r.kind == BACKING_IMPORT && words_are((const void *)(uintptr_t)(g_heap + 18 * MiB), 16 * KiB, 0xCDCDCDCDu));
+    printf("imported: the GPU read the CPU's words and the CPU read the GPU's, on touched and untouched pages\n");
+
+    // A VRAM extent: written, then read back through a copy.
+    through(FILL, WIN + 0x10000, 16 * KiB, 0x11111111u, &r);
+    CHECK(r.kind == BACKING_EXTENT);
+    through(READ, WIN + 0x10000, 16 * KiB, 0, &r);
+    CHECK(words_are(g_words, 16 * KiB, 0x11111111u));
+    printf("VRAM extent: written and read back\n");
+
+    // Virtual over a physical pool in the window: written through the virtual pool, read through the physical one.
+    through(FILL, WIN + 32 * MiB + 0x20000, 16 * KiB, 0x22222222u, &r);
+    through(READ, WIN + 16 * MiB + 64 * KiB + 0x20000, 16 * KiB, 0, &r);
+    CHECK(r.kind == BACKING_EXTENT && words_are(g_words, 16 * KiB, 0x22222222u));
+    // Virtual over a CPU-visible physical pool (the title's shape): the CPU sees the GPU's words in guest memory.
+    through(FILL, WIN + 48 * MiB + 0x30000, 16 * KiB, 0x33333333u, &r);
+    CHECK(r.kind == BACKING_IMPORT);
+    CHECK(words_are((const void *)(uintptr_t)(g_heap + 64 * MiB + 128 * KiB + 0x30000), 16 * KiB, 0x33333333u));
+    printf("virtual over a physical run: through the window's extent and through an import of guest memory\n");
+
+    // An import across two reservation pieces: one import over the bind, which crosses the boundary.
+    through(FILL, boundary - 8 * KiB, 16 * KiB, 0x44444444u, &r);
+    CHECK(r.kind == BACKING_IMPORT && words_are((const void *)(uintptr_t)(boundary - 8 * KiB), 16 * KiB, 0x44444444u));
+    printf("an import across a 64 MiB window boundary (two reservation pieces): written and seen\n");
+    backing_stats_line();
+
+    // The guest gives imported pages back (a heap that shrinks): the decommit succeeds under the imports, and the next
+    // sync retires every import over those pages.
+    BackingStats s;
+    backing_stats(&s);
+    uint64_t imports = s.imports;
+    g_cpu.x[0] = 0, g_cpu.x[1] = 8 * MiB;
+    rt_svc(&g_cpu, 0x01, 0);
+    CHECK(g_cpu.x[0] == 0);
+    backing_sync();
+    backing_stats(&s);
+    CHECK(imports == 4 && s.imports == 0 && s.imports_stale == imports);   // two runs of p, pc, x
+    printf("the heap shrank under %llu imports: decommitted, and the imports retired at the next sync\n",
+           (unsigned long long)imports);
+
+    pool_t *all[] = {&x, &v2, &pc, &v, &pw, &w, &p};
+    for (int i = 0; i < 7; i++) gfx_vulkan_backend.pool_fini(all[i]);
+    free_buffer();
+    close_and_report();
+    printf("ok backing\n");
+}
+
+// pool_fini of a pool that a submission in flight used returns only once that submission is done.
+static pool_t g_fini;
+static int g_fini_back;
+static void fini_thread(void *arg) {
+    (void)arg;
+    gfx_vulkan_backend.pool_fini(&g_fini);
+    __atomic_store_n(&g_fini_back, 1, __ATOMIC_RELEASE);
+}
+
+static void case_backing_fini(void) {
+    guest_heap(64 * MiB);
+    gpu_vk_open();
+    g_fini = make_pool(g_heap + 4 * MiB, 4 * MiB, 0);   // an import: its memory is freed when the pool goes
+    touch_range(g_heap + 4 * MiB, 4 * MiB);
+    VkSemaphore gate = make_gate();
+    VkSemaphoreSubmitInfo wait = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = gate, .value = 1,
+                                  .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+    uint64_t v = gpu_vk_begin(GPU_VK_INTERNAL);
+    BackingRef r;
+    backing_resolve(g_heap + 4 * MiB, 1 * MiB, v, &r);
+    vkCmdFillBuffer(gpu_vk_cmd(), (VkBuffer)(uintptr_t)r.buffer, r.offset, 1 * MiB, 0x77777777u);
+    CHECK(gpu_vk_end(&wait, 1) == v);
+    CHECK(plat_thread_start(fini_thread, NULL, 256 * KiB));
+    plat_sleep_ns(200 * 1000 * 1000);
+    int early = __atomic_load_n(&g_fini_back, __ATOMIC_ACQUIRE);
+    uint64_t done_before = gpu_sync_done();
+    VkSemaphoreSignalInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO, .semaphore = gate, .value = 1};
+    CHECK(vkSignalSemaphore(gpu_vk.device, &si) == VK_SUCCESS);
+    uint64_t t0 = plat_now_ns();
+    while (!__atomic_load_n(&g_fini_back, __ATOMIC_ACQUIRE)) {
+        CHECK(plat_now_ns() - t0 < 5000000000ull);
+        plat_sleep_ns(100 * 1000);
+    }
+    double after = (double)(plat_now_ns() - t0) / 1e6;
+    CHECK(!early && done_before < v && gpu_sync_done() >= v);
+    CHECK(words_are((const void *)(uintptr_t)(g_heap + 4 * MiB), 1 * MiB, 0x77777777u));
+    BackingStats s;
+    backing_stats(&s);
+    CHECK(s.fini_waits == 1 && s.imports == 0 && s.deferred == 0);
+    printf("pool_fini held while the submission was in flight; returned %.2f ms after the gate opened\n", after);
+    vkDestroySemaphore(gpu_vk.device, gate, NULL);
+    close_and_report();
+    printf("ok backing_fini\n");
+}
+
+// Device-local heap usage (VK_EXT_memory_budget), summed over the device-local heaps.
+static uint64_t vram_usage(void) {
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT b = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 mp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, .pNext = &b};
+    vkGetPhysicalDeviceMemoryProperties2(gpu_vk.phys, &mp);
+    uint64_t used = 0;
+    for (uint32_t i = 0; i < mp.memoryProperties.memoryHeapCount; i++)
+        if (mp.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) used += b.heapUsage[i];
+    return used;
+}
+
+// 4,660 pools (half CPU-visible, imported; half CPU_NO_ACCESS, VRAM extents) made, bound and finalized, three times:
+// device-local memory and the process's private memory end each round where the first round ended.
+static void case_backing_flat(void) {
+    enum { POOLS = 4660, HALF = POOLS / 2, ROUNDS = 3 };
+    static pool_t p[POOLS];
+    guest_heap(512 * MiB);
+    gpu_vk_open();
+    touch_range(g_heap, HALF * 64 * KiB);
+    uint64_t vram0 = 0, priv0 = 0;
+    for (int round = 0; round < ROUNDS; round++) {
+        uint64_t t0 = plat_now_ns();
+        for (int i = 0; i < HALF; i++) p[i] = make_pool(g_heap + (uint64_t)i * 64 * KiB, 64 * KiB, 0);
+        for (int i = 0; i < HALF; i++)
+            p[HALF + i] = make_pool(WIN + (uint64_t)i * 64 * KiB, 64 * KiB, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS);
+        BackingRef r;
+        for (int i = 0; i < POOLS; i++) backing_resolve((uintptr_t)p[i].mem + 0x40, 0x100, 0, &r);
+        uint64_t t1 = plat_now_ns(), vram_in = vram_usage();
+        for (int i = 0; i < POOLS; i++) gfx_vulkan_backend.pool_fini(&p[i]);
+        uint64_t t2 = plat_now_ns();
+        plat_sleep_ns(500 * 1000 * 1000);   // the block thread settles
+        uint64_t vram = vram_usage();
+        PlatProcMem pm;
+        plat_process_memory(&pm);
+        BackingStats s;
+        backing_stats(&s);
+        printf("round %d: made and bound in %.0f ms, finalized in %.0f ms; device-local use %llu MiB with the pools, "
+               "%llu MiB after; private %llu MiB; pools %llu, imports %llu, extents %llu, blocks %llu\n", round,
+               (double)(t1 - t0) / 1e6, (double)(t2 - t1) / 1e6, (unsigned long long)(vram_in >> 20),
+               (unsigned long long)(vram >> 20), (unsigned long long)(pm.private_bytes >> 20),
+               (unsigned long long)s.pools, (unsigned long long)s.imports, (unsigned long long)s.extents,
+               (unsigned long long)s.blocks);
+        CHECK(s.pools == 0 && s.imports == 0 && s.extents == 0 && s.deferred == 0);
+        if (!round) {
+            vram0 = vram, priv0 = pm.private_bytes;
+        } else {
+            CHECK(vram <= vram0 + 16 * MiB && pm.private_bytes <= priv0 + 32 * MiB);
+        }
+    }
+    close_and_report();
+    printf("ok backing_flat\n");
+}
+
 // ---------- the device lost: Volk's entry points replaced
 static int g_fault_calls, g_checkpoint_calls;
 
@@ -388,6 +654,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "loss_submit") && argc >= 3) case_loss_submit(argv[2]);
     else if (!strcmp(cs, "loss_completion") && argc >= 3) case_loss_completion(argv[2]);
     else if (!strcmp(cs, "refuse")) case_refuse();
+    else if (!strcmp(cs, "backing")) case_backing();
+    else if (!strcmp(cs, "backing_fini")) case_backing_fini();
+    else if (!strcmp(cs, "backing_flat")) case_backing_flat();
     else {
         fprintf(stderr, "unknown case %s\n", cs);
         return 2;

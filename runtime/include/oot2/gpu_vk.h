@@ -22,6 +22,7 @@
 
 #include "volk.h"
 
+#include "oot2/backing.h"
 #include "oot2/gfx.h"
 #include "oot2/gpu.h"
 #include "oot2/vk_required.h"
@@ -111,6 +112,8 @@ uint64_t gpu_vk_end(const VkSemaphoreSubmitInfo *waits, uint32_t nwaits);
 // A checkpoint's marker: the value, the kind and 1 at the end of the submission's command buffer (0 at its start).
 #define GPU_VK_MARKER(value, kind, end) ((uint64_t)(value) << 4 | (uint64_t)(kind) << 1 | (uint64_t)(end))
 
-// The back-end table (vk_submit.c): submit, fence_wait, fence_done and finish on the timeline; the operations later
-// tickets bring stop by name.
+// The back-end table (vk_submit.c): submit, fence_wait, fence_done and finish on the timeline, the pools through the
+// backing map (oot2/backing.h, opened with the device); the operations later tickets bring stop by name.
 extern const GfxBackend gfx_vulkan_backend;
+// The backing map's memory on this device (vk_backing.c): VRAM blocks and host imports.
+extern const BackingOps gpu_vk_backing_ops;

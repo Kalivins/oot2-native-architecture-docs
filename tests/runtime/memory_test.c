@@ -12,6 +12,10 @@
 #include "layout.h"
 #include "endmark.h"
 #include "oot2/loader.h"
+#include "plat.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define CHECK(cond)                                                                    \
     do {                                                                               \
@@ -402,6 +406,76 @@ static void case_writewatch(void) {
     CHECK(rt_mem_written(0x10000, 0x1000, pages, 64, 0) == UINT64_MAX);
 }
 
+// The commit query and the commit epoch (architecture D14, for the GPU back end's host imports): a run of pages in one
+// state from addr, clipped to the size asked and to the region; the epoch moves once for each change of the page map
+// (a first touch by a write or a read, host I/O, a heap that shrinks) and never for an access to committed pages.
+static void case_commitrun(void) {
+    RtMemConfig cfg = test_config();
+    rt_mem_init(&cfg);
+    CHECK(svc(0x01, 0, 4 * MiB, 0) == 0);
+    const uint64_t heap = info(4), region = info(5);
+    int st = -1;
+    const uint64_t e0 = rt_mem_commit_epoch();
+    CHECK(rt_mem_commit_run(heap, 4 * MiB, &st) == 4 * MiB && st == 0);
+    ST32(heap + 0x10010, 1);   // commits the chunk [0x10000, 0x20000)
+    CHECK(rt_mem_commit_epoch() == e0 + 1);
+    CHECK(rt_mem_commit_run(heap, 4 * MiB, &st) == 0x10000 && st == 0);
+    CHECK(rt_mem_commit_run(heap + 0x10000, 4 * MiB, &st) == 0x10000 && st == 1);
+    CHECK(rt_mem_commit_run(heap + 0x18000, 0x1000, &st) == 0x1000 && st == 1);    // up to the size asked
+    CHECK(rt_mem_commit_run(heap + 0x18800, 4 * MiB, &st) == 0x7800 && st == 1);   // from addr, not from its page
+    CHECK(rt_mem_commit_run(heap + 0x20000, 4 * MiB, &st) == 4 * MiB && st == 0);
+    CHECK(rt_mem_commit_run(heap + region - 0x1000, 4 * MiB, &st) == 0x1000 && st == 0);   // up to the region's end
+    CHECK(rt_mem_commit_run(heap, 0, &st) == 0);
+    CHECK(rt_mem_commit_run(0x7f00000000ull, 0x1000, &st) == UINT64_MAX);   // in no region
+    CHECK(LD32(heap + 0x10010) == 1);   // an access to committed pages changes nothing
+    CHECK(rt_mem_commit_epoch() == e0 + 1);
+    CHECK(LD32(heap + 0x300000) == 0);   // a first touch by a read commits too
+    CHECK(rt_mem_commit_epoch() == e0 + 2);
+    CHECK(rt_mem_commit_io(heap + 0x100000, 0x1000, 1));   // host I/O
+    CHECK(rt_mem_commit_epoch() == e0 + 3);
+    CHECK(rt_mem_commit_run(heap + 0x100000, 0x10000, &st) == 0x10000 && st == 1);
+    CHECK(svc(0x01, 0, 2 * MiB, 0) == 0);   // the heap shrinks over the chunk at 3 MiB
+    CHECK(rt_mem_commit_epoch() == e0 + 4);
+    CHECK(rt_mem_commit_run(heap + 2 * MiB, 2 * MiB, &st) == 2 * MiB && st == 0);
+    CHECK(svc(0x01, 0, 2 * MiB, 0) == 0);   // nothing past 2 MiB is committed now: no change, no move
+    CHECK(rt_mem_commit_epoch() == e0 + 4);
+}
+
+// Watched reservations in pieces (Windows; plat.h, PLAT_PIECE): the alias region is made of allocations that start at
+// multiples of PLAT_PIECE, and host I/O, the write watch (with a buffer too small for both pages, research 48 B5) and
+// UnmapPhysicalMemory work across a piece boundary as across any other page. Elsewhere the case says it skipped.
+static void case_pieces(void) {
+#ifndef _WIN32
+    printf("skip pieces: reservations are made in one piece on this platform\n");
+    exit(0);
+#else
+    RtMemConfig cfg = test_config();
+    rt_mem_init(&cfg);
+    const uint64_t alias = info(2), b = (alias + PLAT_PIECE) & ~(PLAT_PIECE - 1);
+    CHECK(b - alias < info(3));
+    MEMORY_BASIC_INFORMATION m;
+    CHECK(VirtualQuery((void *)(uintptr_t)(b + 0x1000), &m, sizeof m) == sizeof m);
+    CHECK((uint64_t)(uintptr_t)m.AllocationBase == b && m.State == MEM_RESERVE);
+    CHECK(VirtualQuery((void *)(uintptr_t)(b - 0x1000), &m, sizeof m) == sizeof m);
+    CHECK((uint64_t)(uintptr_t)m.AllocationBase != b && (uint64_t)(uintptr_t)m.AllocationBase >= alias);
+    CHECK(svc(0x2C, b - 0x10000, 0x20000, 0) == 0);
+    CHECK(rt_mem_commit_io(b - 0x8000, 0x10000, 1));   // one call across the boundary
+    int st = -1;
+    CHECK(rt_mem_commit_run(b - 0x10000, 0x20000, &st) == 0x20000 && st == 1);
+    ST32(b - 4, 7);
+    ST32(b, 9);
+    uint64_t pages[8];
+    CHECK(rt_mem_written(b - 0x10000, 0x20000, pages, 8, 1) == 2 && pages[0] == b - 0x1000 && pages[1] == b);
+    ST32(b - 4, 8);
+    ST32(b, 10);
+    CHECK(rt_mem_written(b - 0x10000, 0x20000, pages, 1, 1) == 1 && pages[0] == b - 0x1000);
+    CHECK(rt_mem_written(b - 0x10000, 0x20000, pages, 8, 1) == 1 && pages[0] == b);   // left marked for the next call
+    CHECK(svc(0x2D, b - 0x10000, 0x20000, 0) == 0);   // decommitted across the boundary
+    CHECK(rt_mem_commit_run(b - 0x10000, 0x20000, &st) == 0x20000 && st == 0);
+    CHECK(VirtualQuery((void *)(uintptr_t)b, &m, sizeof m) == sizeof m && m.State == MEM_RESERVE);
+#endif
+}
+
 // ---- failing cases: each must end in one named fatal
 static void touch(uint64_t a) { printf("read %#llx\n", (unsigned long long)LD64(a)); }
 
@@ -448,6 +522,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "load")) case_load(dir);
     else if (!strcmp(cs, "io")) case_io(dir);
     else if (!strcmp(cs, "writewatch")) case_writewatch();
+    else if (!strcmp(cs, "commitrun")) case_commitrun();
+    else if (!strcmp(cs, "pieces")) case_pieces();
     else if (!strcmp(cs, "touch_heap")) case_touch_heap();
     else if (!strcmp(cs, "touch_alias")) case_touch_alias(0);
     else if (!strcmp(cs, "touch_unmapped_again")) case_touch_alias(1);

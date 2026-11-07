@@ -26,6 +26,12 @@ int plat_is_free(uint64_t addr);                                // nothing of th
 // is returned; UINT64_MAX when the platform cannot tell.
 uint64_t plat_written(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max, int reset);
 uint64_t plat_resident(uint64_t addr, uint64_t size);           // bytes of committed pages in the working set
+// On Windows a write-watched reservation (the heap and alias regions) is made of pieces cut at multiples of PLAT_PIECE
+// in the address space, and every call above splits its range at those boundaries, a reservation being the unit of each
+// of them. The reason is the GPU back end's host imports: the driver walks the run of committed pages that follows an
+// imported pointer to the end of its reservation, 14 ms per GiB (research 48 answer 4), and a piece bounds that walk
+// to one import window (oot2/backing.h). The POSIX half reserves in one piece; nothing there walks.
+#define PLAT_PIECE (64ull << 20)
 typedef struct PlatProcMem {
     uint64_t private_bytes;      // commit charge of the process (Windows PrivateUsage; POSIX: anonymous resident)
     uint64_t working_set, peak_working_set;
