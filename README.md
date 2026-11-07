@@ -42,6 +42,10 @@ py -3.14 tools/oot2.py prepare --dump GAME.nup --dest OUT --check
 py -3.14 tools/oot2.py prepare --dump GAME.nup --dest OUT
 ```
 
+The same with a window: `pyw -3.14 tools/oot2_setup.pyw` (or a double-click on it) asks for the dump and the folder,
+checks the PC, runs the steps with their progress, and starts the game when it is prepared. It runs `oot2 prepare` for
+you, so the tools above are still needed until the bundle exists; its logs are in `%LOCALAPPDATA%\oot2-native\logs`.
+
 `--check` runs the first step alone: the dump, the disk, the CPU, the toolchain, the translator and Vulkan, and what
 the other steps would do. A run that stops keeps its finished steps: start it again with the same `--dest`. The
 program is `OUT\oot2.exe`. `tools/oot2.py` documents every option. On a 6-core desktop the lift and compile take about

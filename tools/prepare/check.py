@@ -19,6 +19,8 @@ In order, cheapest first, so a run that cannot succeed stops in seconds:
    step needs Python's compression.zstd (Python 3.14 and later: the shader archives are zstd frames with
    dictionaries) and the shader translator (--xlate, else OOT2_XLATE, else oot2-xlate on PATH), which must start and
    give, through --version, the identity of its own file and the line protocol the pool speaks.
+   The memory is reported, never required: the installed and the free amount, with a warning below the reference
+   machine's 16 GB (prepare then runs fewer jobs at once, and the game has not been measured with less).
 5. Vulkan: the device items of runtime/include/oot2/vk_required.h (architecture section 1), as the probe judged them
    with that header's own tests, which the runtime's device creation uses too. Reported, not required, while the null
    back end is oot2.exe's default (REQUIRE_VULKAN_ITEMS below). The pipelines step needs such a device to build
@@ -51,6 +53,8 @@ GiB = 1 << 30
 # while it runs (its spill of the translator's outputs, until the pack is complete), so the peak, during that step, is
 # about 35 GiB: an inference from S1's modules of the .111 set, 5.3 GB of SPIR-V. 38 GiB leaves about 3 GiB above it.
 OUTPUT_BYTES = 38 * GiB
+# A 16 GB machine shows about 15.9 GiB to Windows; below 15 GiB is less than the reference machine (README).
+LOW_RAM = 15 * GiB
 PROBE_SOURCE = Path(__file__).resolve().parent / "hostcheck.c"
 TEMP = "temp"                      # dest/temp: the steps' scratch files
 PROBE_TIMEOUT = 120                # seconds; a broken driver can hang instance creation
@@ -89,6 +93,10 @@ class Check(Step):
                 f"this CPU ({cpu_name(host)}) lacks {', '.join(missing)}. The game is compiled for x86-64-v3 "
                 "(AVX2 and the instructions that came with it, Intel Haswell or AMD Excavator and later).")
         ctx.reporter.say(f"check: CPU {cpu_name(host)}: x86-64-v3")
+        line, warnings = memory_report(*ram())
+        ctx.reporter.say("check: " + line)
+        for w in warnings:
+            ctx.reporter.warning(w)
         ctx.reporter.say(f"check: build tools: {build_tools(ctx)}")
         ctx.reporter.say(f"check: menu library: {imgui_note(ctx)}")
         ctx.reporter.say(f"check: lift tools: {lift_tools()}")
@@ -145,6 +153,42 @@ def check_disk(ctx: Context) -> None:
         raise PrepareError(
             f"the disk of {ctx.dest} has {free / GiB:.1f} GiB free and prepare needs about {need / GiB:.1f} GiB "
             "there. Free some space, or choose a folder on another disk with --dest.")
+
+
+def ram() -> tuple[int | None, int | None]:
+    """Installed and free memory in bytes, None where the system does not say."""
+    if sys.platform == "win32":
+        import ctypes
+
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)] + \
+                       [(n, ctypes.c_ulonglong) for n in ("total", "avail", "tpf", "apf", "tv", "av", "aev")]
+        st = MemoryStatusEx()
+        st.dwLength = ctypes.sizeof(st)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+            return st.total, st.avail
+        return None, None
+    found = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                name, _, rest = line.partition(":")
+                if name in ("MemTotal", "MemAvailable"):
+                    found[name] = int(rest.split()[0]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return found.get("MemTotal"), found.get("MemAvailable")
+
+
+def memory_report(total: int | None, free: int | None) -> tuple[str, list[str]]:
+    """The memory line of the check and its warning: reported, not required (no step has a measured minimum)."""
+    if not total:
+        return "memory: the system did not say how much", []
+    line = f"memory: {total / GiB:.1f} GiB installed" + (f", {free / GiB:.1f} GiB free" if free else "")
+    if total < LOW_RAM:
+        return line, [f"this PC has {total / GiB:.1f} GiB of memory, below the reference machine's 16 GB: prepare runs "
+                      "fewer jobs at once and takes longer, and the game has not been measured with less"]
+    return line, []
 
 
 def compiler(ctx: Context) -> str:
