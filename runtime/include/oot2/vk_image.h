@@ -35,6 +35,15 @@ VkbImage *vkb_image_get(const tex_t *t);
 VkImage vkb_image_handle(const VkbImage *i);
 VkFormat vkb_image_format(const VkbImage *i);
 int vkb_image_placed(const VkbImage *i);      // 1 when it is bound into its pool's extent
+// The image's shape: its type and extent (a 1D array's layers and a cube's six faces are layers), the aspect a copy takes
+// and every aspect of the format (a clear takes them all), and the format (the linear twin of an sRGB one).
+typedef struct VkbShape {
+    VkImageType type;
+    uint32_t width, height, depth, layers, levels, samples;
+    VkImageAspectFlags aspect, all_aspects;
+    VkFormat format;
+} VkbShape;
+void vkb_image_shape(const VkbImage *i, VkbShape *out);
 // The submission that will signal `value` uses the image: its pool and the image itself wait for it.
 void vkb_image_use(VkbImage *i, uint64_t value);
 

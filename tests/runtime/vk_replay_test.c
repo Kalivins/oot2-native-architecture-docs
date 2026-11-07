@@ -180,6 +180,28 @@ static int op_target(const nvn_tex_rec *t, int storage, uint64_t value, VkrTarge
                            t->tex.d.width, t->tex.d.height, 1, VK_IMAGE_ASPECT_COLOR_BIT};
     return 1;
 }
+// A texture's image: the handle names the texture's serial; storage in host memory has none (the texture arena's).
+static int op_image(const nvn_tex_rec *t, uint64_t value, VkrImage *out) {
+    (void)value;
+    memset(out, 0, sizeof *out);
+    if ((uint64_t)(uintptr_t)t->tex.mem - HOST < HOST_BYTES) return 0;
+    const nvn_texdesc *d = &t->tex.d;
+    out->image = (VkImage)(uintptr_t)(0x1000 + t->tex.serial);
+    out->type = VK_IMAGE_TYPE_2D, out->aspect = out->all_aspects = VK_IMAGE_ASPECT_COLOR_BIT;
+    out->format = VK_FORMAT_R8G8B8A8_UNORM;
+    out->width = d->width, out->height = d->height, out->depth = 1, out->layers = 1, out->samples = 1;
+    out->levels = d->levels ? (uint32_t)d->levels : 1;
+    if (d->target == NVN_TEXTURE_TARGET_2D_ARRAY) out->layers = d->depth;
+    if (d->target == NVN_TEXTURE_TARGET_3D) out->type = VK_IMAGE_TYPE_3D, out->depth = d->depth;
+    if (d->samples > 1) out->samples = (uint32_t)d->samples;
+    if (d->format == NVN_FORMAT_DEPTH24_STENCIL8) {
+        out->format = VK_FORMAT_D24_UNORM_S8_UINT, out->aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        out->all_aspects = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    } else if (d->format == NVN_FORMAT_DEPTH32F) {
+        out->format = VK_FORMAT_D32_SFLOAT, out->aspect = out->all_aspects = VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+    return 1;
+}
 static VkDescriptorSet op_acquire(uint64_t value, const dpool_ref *textures, const dpool_ref *samplers) {
     lput(&g_ops, "op acquire frame %llu textures %d samplers %d\n", (ull)value, textures != NULL, samplers != NULL);
     return (VkDescriptorSet)(uintptr_t)0x5E7;
@@ -199,7 +221,8 @@ static void op_frame_end(uint64_t value) { lput(&g_ops, "op frame_end %llu\n", (
 static const VkReplayOps g_fake_ops = {
     .graphics = op_graphics, .compute = op_compute,
     .graphics_layout = (VkPipelineLayout)(uintptr_t)0x6100, .compute_layout = (VkPipelineLayout)(uintptr_t)0x6200,
-    .binds = op_binds, .resolve = op_resolve, .gpu_wrote = op_gpu_wrote, .target = op_target, .acquire = op_acquire,
+    .binds = op_binds, .resolve = op_resolve, .gpu_wrote = op_gpu_wrote, .target = op_target, .image = op_image,
+    .acquire = op_acquire,
     .image_slot = op_image_slot, .scratch = op_scratch, .frame_begin = op_frame_begin, .frame_end = op_frame_end};
 
 // ---------- the stand-in recorder calls: one line per call
@@ -372,6 +395,71 @@ static void VKAPI_CALL fake_ClearAttachments(VkCommandBuffer cb, uint32_t na, co
         lput(&g_pkt, " depth=%g stencil=%u", a->clearValue.depthStencil.depth, a->clearValue.depthStencil.stencil);
     lput(&g_pkt, " rect=%d,%d %ux%u layers=%u+%u\n", r->rect.offset.x, r->rect.offset.y, r->rect.extent.width,
          r->rect.extent.height, r->baseArrayLayer, r->layerCount);
+}
+static void layers_text(const VkImageSubresourceLayers *l) {
+    lput(&g_pkt, "aspect=%#x level=%u layers=%u+%u", l->aspectMask, l->mipLevel, l->baseArrayLayer, l->layerCount);
+}
+static void region_text(const VkBufferImageCopy *r) {
+    lput(&g_pkt, " off=%llu row=%u imgh=%u ", (ull)r->bufferOffset, r->bufferRowLength, r->bufferImageHeight);
+    layers_text(&r->imageSubresource);
+    lput(&g_pkt, " at=%d,%d,%d ext=%ux%ux%u\n", r->imageOffset.x, r->imageOffset.y, r->imageOffset.z, r->imageExtent.width,
+         r->imageExtent.height, r->imageExtent.depth);
+}
+static void VKAPI_CALL fake_CopyBuffer(VkCommandBuffer cb, VkBuffer s, VkBuffer d, uint32_t n, const VkBufferCopy *r) {
+    CHECK(cb == FAKE_CB && n == 1);
+    lput(&g_pkt, "pkt CopyBuffer 0x%llx->0x%llx %llu->%llu size=%llu\n", (ull)(uintptr_t)s, (ull)(uintptr_t)d,
+         (ull)r->srcOffset, (ull)r->dstOffset, (ull)r->size);
+}
+static void VKAPI_CALL fake_CopyBufferToImage(VkCommandBuffer cb, VkBuffer s, VkImage d, VkImageLayout l, uint32_t n,
+                                              const VkBufferImageCopy *r) {
+    CHECK(cb == FAKE_CB && n == 1 && l == VK_IMAGE_LAYOUT_GENERAL);
+    lput(&g_pkt, "pkt CopyBufferToImage buf=0x%llx img=0x%llx", (ull)(uintptr_t)s, (ull)(uintptr_t)d);
+    region_text(r);
+}
+static void VKAPI_CALL fake_CopyImageToBuffer(VkCommandBuffer cb, VkImage s, VkImageLayout l, VkBuffer d, uint32_t n,
+                                              const VkBufferImageCopy *r) {
+    CHECK(cb == FAKE_CB && n == 1 && l == VK_IMAGE_LAYOUT_GENERAL);
+    lput(&g_pkt, "pkt CopyImageToBuffer img=0x%llx buf=0x%llx", (ull)(uintptr_t)s, (ull)(uintptr_t)d);
+    region_text(r);
+}
+static void VKAPI_CALL fake_CopyImage(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n,
+                                      const VkImageCopy *r) {
+    CHECK(cb == FAKE_CB && n == 1 && sl == VK_IMAGE_LAYOUT_GENERAL && dl == VK_IMAGE_LAYOUT_GENERAL);
+    lput(&g_pkt, "pkt CopyImage 0x%llx->0x%llx src ", (ull)(uintptr_t)s, (ull)(uintptr_t)d);
+    layers_text(&r->srcSubresource);
+    lput(&g_pkt, " at=%d,%d,%d dst ", r->srcOffset.x, r->srcOffset.y, r->srcOffset.z);
+    layers_text(&r->dstSubresource);
+    lput(&g_pkt, " at=%d,%d,%d ext=%ux%ux%u\n", r->dstOffset.x, r->dstOffset.y, r->dstOffset.z, r->extent.width,
+         r->extent.height, r->extent.depth);
+}
+static void VKAPI_CALL fake_BlitImage(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n,
+                                      const VkImageBlit *r, VkFilter f) {
+    CHECK(cb == FAKE_CB && n == 1 && sl == VK_IMAGE_LAYOUT_GENERAL && dl == VK_IMAGE_LAYOUT_GENERAL);
+    lput(&g_pkt, "pkt BlitImage 0x%llx->0x%llx filter=%d src ", (ull)(uintptr_t)s, (ull)(uintptr_t)d, (int)f);
+    layers_text(&r->srcSubresource);
+    lput(&g_pkt, " %d,%d,%d..%d,%d,%d dst ", r->srcOffsets[0].x, r->srcOffsets[0].y, r->srcOffsets[0].z, r->srcOffsets[1].x,
+         r->srcOffsets[1].y, r->srcOffsets[1].z);
+    layers_text(&r->dstSubresource);
+    lput(&g_pkt, " %d,%d,%d..%d,%d,%d\n", r->dstOffsets[0].x, r->dstOffsets[0].y, r->dstOffsets[0].z, r->dstOffsets[1].x,
+         r->dstOffsets[1].y, r->dstOffsets[1].z);
+}
+static void range_text(const VkImageSubresourceRange *r) {
+    lput(&g_pkt, " aspect=%#x level=%u+%u layers=%u+%u\n", r->aspectMask, r->baseMipLevel, r->levelCount, r->baseArrayLayer,
+         r->layerCount);
+}
+static void VKAPI_CALL fake_ClearColorImage(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearColorValue *c,
+                                            uint32_t n, const VkImageSubresourceRange *r) {
+    CHECK(cb == FAKE_CB && n == 1 && l == VK_IMAGE_LAYOUT_GENERAL);
+    lput(&g_pkt, "pkt ClearColorImage 0x%llx color=%g,%g,%g,%g", (ull)(uintptr_t)i, c->float32[0], c->float32[1],
+         c->float32[2], c->float32[3]);
+    range_text(r);
+}
+static void VKAPI_CALL fake_ClearDepthStencilImage(VkCommandBuffer cb, VkImage i, VkImageLayout l,
+                                                   const VkClearDepthStencilValue *v, uint32_t n,
+                                                   const VkImageSubresourceRange *r) {
+    CHECK(cb == FAKE_CB && n == 1 && l == VK_IMAGE_LAYOUT_GENERAL);
+    lput(&g_pkt, "pkt ClearDepthStencilImage 0x%llx depth=%g stencil=%u", (ull)(uintptr_t)i, v->depth, v->stencil);
+    range_text(r);
 }
 static void VKAPI_CALL fake_SetCheckpointNV(VkCommandBuffer cb, const void *m) {
     (void)cb, (void)m;
@@ -595,7 +683,11 @@ static void case_compute(void) {
     printf("ok compute\n");
 }
 
-// A uniform range copied at submit and a GPU write over it in the same submission, in either order.
+// A uniform range copied at submit and a GPU write over it in the same submission, in either order: the drop rule. The
+// vertex stage's uniform buffer and the pixel stage's storage buffer (which its module writes) are one range of host
+// memory. Read first: the first draw reads the copy and its pixel stage then writes the range, which drops the copy, so
+// the second draw reads the live range. Write first: the first draw writes it with the uniform unbound, and the draw
+// that binds it afterwards reads it live too.
 static void case_conflict(int write_first) {
     open_fakes();
     g_ps_binds.sb[0].address_byte_offset = 0x510;
@@ -606,11 +698,127 @@ static void case_conflict(int write_first) {
         PUT(r, OP_BIND_UBO, (p_bind_buf){.stage = 0, .index = 0, .addr = 0, .size = 0});
         PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3});
         PUT(r, OP_BIND_UBO, (p_bind_buf){.stage = 0, .index = 0, .addr = HOST + 0x100, .size = 64});
+    } else {
+        PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3});
     }
     PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .count = 3});
     uint64_t h = rec_end(r);
     vkr_submit(&h, 1);
+    VkrStats st;
+    vkr_stats(&st);
+    printf("stats snapshots %llu drops %llu live %llu writes %llu\n", (ull)st.snapshots, (ull)st.snapshot_drops,
+           (ull)st.live_uniforms, (ull)st.storage_writes);
+    close_fakes();
+    printf("ok conflict_%s\n", write_first ? "write_first" : "read_first");
+}
+
+// ---------- transfers
+#define TEX_A (VRAM + 0x10000)
+#define TEX_B (VRAM + 0x20000)
+#define TEX_ARRAY (VRAM + 0x30000)
+#define TEX_DEPTH (VRAM + 0x40000)
+
+static nvn_tex_rec texture(uint64_t storage, uint64_t serial, int format, int target, uint32_t w, uint32_t h, uint32_t d) {
+    nvn_tex_rec t;
+    memset(&t, 0, sizeof t);
+    t.present = 1;
+    t.tex.d = (nvn_texdesc){.target = target, .format = format, .width = w, .height = h, .depth = d, .levels = 1};
+    t.tex.mem = (uint8_t *)(uintptr_t)storage;
+    t.tex.serial = serial;
+    return t;
+}
+static nvn_tex_rec tex_a(void) { return texture(TEX_A, 1, NVN_FORMAT_RGBA8, NVN_TEXTURE_TARGET_2D, 64, 32, 1); }
+static NVNcopyRegion region(int x, int y, int z, int w, int h, int d) { return (NVNcopyRegion){x, y, z, w, h, d}; }
+
+// The transfers in one submission: updates, buffer copies and fills (writes into a mirror, an import and VRAM), texture
+// copies with the channel's strides, blits, clears of a whole level and of a part of one, and a dispatch after them.
+static void case_transfers(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    uint8_t up[offsetof(p_update_ub, data) + 8] = {0};
+    p_update_ub head = {.dst = MIRROR + 0x900, .size = 8};
+    memcpy(up, &head, offsetof(p_update_ub, data));
+    for (int i = 0; i < 8; i++) up[offsetof(p_update_ub, data) + i] = (uint8_t)(i + 1);
+    put(r, OP_UPDATE_UB, up, sizeof up);
+    PUT(r, OP_COPY_B2B, (p_copy_b2b){.src = HOST + 0x400, .dst = MIRROR + 0xA00, .size = 0x100});
+    PUT(r, OP_COPY_B2B, (p_copy_b2b){.src = HOST + 0x400, .dst = MIRROR + 0xA40, .size = 0x40});   // inside the write above
+    PUT(r, OP_COPY_B2B, (p_copy_b2b){.src = VRAM + 0x1000, .dst = HOST + 0x800, .size = 0x40});
+    PUT(r, OP_CLEAR_BUF, (p_clear_buf){.addr = VRAM + 0x40, .size = 0x20, .value = 0xDEAD});
+    PUT(r, OP_COPY_T2B, (p_copy_b2t){.addr = MIRROR + 0x1000, .tex = tex_a(), .r = region(8, 4, 0, 16, 4, 1)});
+    PUT(r, OP_COPY_STRIDE, (p_copy_stride){0x100});
+    PUT(r, OP_COPY_T2B, (p_copy_b2t){.addr = MIRROR + 0x2000, .tex = tex_a(), .r = region(8, 4, 0, 16, 4, 1)});
+    PUT(r, OP_COPY_STRIDE, (p_copy_stride){0});
+    PUT(r, OP_COPY_IMAGE_STRIDE, (p_copy_stride){0x400});
+    PUT(r, OP_COPY_T2B, (p_copy_b2t){.addr = MIRROR + 0x4000,
+                                     .tex = texture(TEX_ARRAY, 2, NVN_FORMAT_RGBA8, NVN_TEXTURE_TARGET_2D_ARRAY, 8, 8, 4),
+                                     .r = region(0, 0, 1, 8, 8, 2)});
+    PUT(r, OP_COPY_IMAGE_STRIDE, (p_copy_stride){0});
+    PUT(r, OP_COPY_B2T, (p_copy_b2t){.addr = HOST + 0x2000, .tex = tex_a(), .r = region(0, 0, 0, 8, 8, 1)});
+    nvn_tex_rec b = texture(TEX_B, 3, NVN_FORMAT_RGBA8, NVN_TEXTURE_TARGET_2D, 64, 32, 1);
+    PUT(r, OP_COPY_T2T, (p_copy_t2t){.src = tex_a(), .dst = b, .sr = region(0, 0, 0, 32, 16, 1), .dr = region(4, 4, 0, 32, 16, 1)});
+    PUT(r, OP_COPY_T2T, ((p_copy_t2t){.src = tex_a(), .dst = b, .sr = region(0, 0, 0, 16, 8, 1),
+                                      .dr = region(0, 0, 0, 32, 16, 1), .flags = NVN_COPY_FLAGS_LINEAR_FILTER_BIT}));
+    PUT(r, OP_CLEAR_TEX, (p_clear_tex){.tex = tex_a(), .r = region(0, 0, 0, 0, 0, 0), .mask = 0xF, .c = {.f = {1, 0, 0, 1}}});
+    PUT(r, OP_CLEAR_TEX, (p_clear_tex){.tex = tex_a(), .r = region(8, 4, 0, 16, 8, 1), .mask = 0xF, .c = {.f = {0, 1, 0, 1}}});
+    p_clear_tex ds = {.tex = texture(TEX_DEPTH, 4, NVN_FORMAT_DEPTH24_STENCIL8, NVN_TEXTURE_TARGET_2D, 64, 32, 1),
+                      .r = region(0, 0, 0, 64, 32, 1), .mask = 0xF};
+    ds.c.f[0] = 1.0f, ds.c.u[1] = 7;
+    put(r, OP_CLEAR_TEX, &ds, sizeof ds);
+    PUT(r, OP_BIND_PROGRAM, program(1));
+    PUT(r, OP_DISPATCH, (p_dispatch){1, 1, 1, 0});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    VkrStats st;
+    vkr_stats(&st);
+    printf("stats transfers %llu bytes %llu drops %llu writes %llu\n", (ull)st.transfers, (ull)st.transfer_bytes,
+           (ull)st.snapshot_drops, (ull)st.storage_writes);
+    close_fakes();
+    printf("ok transfers\n");
+}
+
+// A transfer that stops by name.
+static void case_xstop(const char *what) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    if (!strcmp(what, "cpu_texture")) {
+        nvn_tex_rec t = texture(HOST + 0x8000, 9, NVN_FORMAT_RGBA8, NVN_TEXTURE_TARGET_2D, 64, 32, 1);
+        PUT(r, OP_COPY_T2B, (p_copy_b2t){.addr = MIRROR + 0x1000, .tex = t, .r = region(0, 0, 0, 8, 8, 1)});
+    } else if (!strcmp(what, "overlap")) {
+        PUT(r, OP_COPY_B2B, (p_copy_b2b){.src = HOST + 0x100, .dst = HOST + 0x140, .size = 0x100});
+    } else if (!strcmp(what, "unaligned_fill")) {
+        PUT(r, OP_CLEAR_BUF, (p_clear_buf){.addr = VRAM + 0x41, .size = 0x20, .value = 1});
+    } else if (!strcmp(what, "bad_stride")) {
+        PUT(r, OP_COPY_STRIDE, (p_copy_stride){6});
+        PUT(r, OP_COPY_B2T, (p_copy_b2t){.addr = HOST + 0x2000, .tex = tex_a(), .r = region(0, 0, 0, 8, 8, 1)});
+    } else if (!strcmp(what, "masked_clear")) {
+        PUT(r, OP_CLEAR_TEX, (p_clear_tex){.tex = tex_a(), .r = region(0, 0, 0, 0, 0, 0), .mask = 0x3});
+    } else if (!strcmp(what, "outside")) {
+        PUT(r, OP_COPY_T2B, (p_copy_b2t){.addr = MIRROR + 0x1000, .tex = tex_a(), .r = region(60, 0, 0, 8, 8, 1)});
+    } else if (!strcmp(what, "mirrored")) {
+        PUT(r, OP_COPY_T2T, (p_copy_t2t){.src = tex_a(), .dst = tex_a(), .sr = region(0, 0, 0, 8, 8, 1),
+                                         .dr = region(8, 8, 0, 8, 8, 1), .flags = NVN_COPY_FLAGS_MIRROR_X_BIT});
+    } else {
+        fprintf(stderr, "unknown stop %s\n", what);
+        exit(2);
+    }
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
     printf("submit returned\n");
+}
+
+// Indirect dispatches: the group counts are the GPU's (a mirror, VRAM, or host memory the frame writes), never read by the CPU.
+static void case_indirect(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    PUT(r, OP_BIND_PROGRAM, program(1));
+    PUT(r, OP_DISPATCH_IND, (p_dispatch_ind){.ind = VRAM + 0x500});
+    PUT(r, OP_DISPATCH_IND, (p_dispatch_ind){.ind = MIRROR + 0x600});
+    PUT(r, OP_DISPATCH, (p_dispatch){2, 1, 1, 0});
+    PUT(r, OP_DISPATCH_IND, (p_dispatch_ind){.ind = VRAM + 0x500});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    close_fakes();
+    printf("ok indirect\n");
 }
 
 // A state that needs a core feature the device does not enable stops by name at the draw.
@@ -666,6 +874,8 @@ int main(int argc, char **argv) {
         const char *m = argv[i + 1];
         if (!strcmp(m, "noflip")) vkr_no_flip = 1;
         else if (!strcmp(m, "nosnapshot")) vkr_no_snapshot = 1;
+        else if (!strcmp(m, "nodrop")) vkr_no_drop = 1;
+        else if (!strcmp(m, "nodeclare")) vkr_no_declare = 1;
         else {
             fprintf(stderr, "unknown mutant %s\n", m);
             return 2;
@@ -677,6 +887,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "compute")) case_compute();
     else if (!strcmp(cs, "conflict_read_first")) case_conflict(0);
     else if (!strcmp(cs, "conflict_write_first")) case_conflict(1);
+    else if (!strcmp(cs, "transfers")) case_transfers();
+    else if (!strcmp(cs, "xstop") && argc >= 3) case_xstop(argv[2]);
+    else if (!strcmp(cs, "indirect")) case_indirect();
     else if (!strcmp(cs, "oplist")) case_oplist();
     else if (!strcmp(cs, "clamp")) case_clamp();
     else if (!strcmp(cs, "stop") && argc >= 3) case_stop((uint32_t)strtoul(argv[2], NULL, 10));

@@ -22,7 +22,7 @@
 // leave open (oot2/vk_pipeline.h vkp_dynamic_states), draws, mesh draws and dispatches, barriers, rendering begin and end.
 // Each vkrec_X below has the parameters of vkCmdX less the command buffer and copies what they point to into the packet,
 // so the caller's storage is free again at once. A structure with a pNext chain has no packet: a named fatal (nothing the
-// replay builds has one). A command the later tickets bring (copies, clears, queries, timestamps, conditional rendering)
+// replay builds has one). A command the later tickets bring (queries, timestamps, conditional rendering)
 // is one more line in VKREC_FIXED or one more hand-written pair in vk_rec_pack.c.
 //
 // Breadcrumbs (D17b, research 16 D2). Every draw, mesh draw and dispatch gets a number in its frame (from 1) and a record
@@ -75,7 +75,9 @@ struct nvn_stage;
     F(SetPolygonModeEXT, (VkPolygonMode v), (v), (cb, a->v), VkPolygonMode v;)                                         \
     F(SetDepthClampEnableEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)                                              \
     F(SetLogicOpEnableEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)                                                 \
-    F(SetDepthClipNegativeOneToOneEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)
+    F(SetDepthClipNegativeOneToOneEXT, (VkBool32 v), (v), (cb, a->v), VkBool32 v;)                                     \
+    F(FillBuffer, (VkBuffer b, VkDeviceSize o, VkDeviceSize n, uint32_t v), (b, o, n, v),                              \
+      (cb, a->b, a->o, a->n, a->v), VkBuffer b; VkDeviceSize o, n; uint32_t v;)
 
 #define VKREC_DRAWS(D)                                                                                                 \
     D(Draw, 'd', (uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi), (vc, ic, fv, fi),                               \
@@ -98,7 +100,8 @@ struct nvn_stage;
     C(BindDescriptorSets) C(PushDescriptorSetKHR) C(PushConstants) C(BindVertexBuffers2) C(SetViewportWithCount)       \
     C(SetScissorWithCount) C(SetVertexInputEXT) C(SetColorBlendEnableEXT) C(SetColorBlendEquationEXT)                  \
     C(SetColorWriteMaskEXT) C(SetBlendConstants) C(PipelineBarrier2) C(BeginRendering) C(EndRendering)               \
-    C(ClearAttachments)
+    C(ClearAttachments) C(CopyBuffer) C(CopyBufferToImage) C(CopyImageToBuffer) C(CopyImage) C(BlitImage)              \
+    C(ClearColorImage) C(ClearDepthStencilImage)
 
 // ---- the calls the recorder makes: the device's entry points, or a test's
 typedef struct VkRecCalls {
@@ -189,6 +192,15 @@ void vkrec_BeginRendering(const VkRenderingInfo *info);
 void vkrec_EndRendering(void);
 void vkrec_ClearAttachments(uint32_t nattachments, const VkClearAttachment *attachments, uint32_t nrects,
                             const VkClearRect *rects);
+// Transfers: one region each, the images in the general layout (every image the replay touches lives there).
+void vkrec_CopyBuffer(VkBuffer src, VkBuffer dst, const VkBufferCopy *region);
+void vkrec_CopyBufferToImage(VkBuffer src, VkImage dst, const VkBufferImageCopy *region);
+void vkrec_CopyImageToBuffer(VkImage src, VkBuffer dst, const VkBufferImageCopy *region);
+void vkrec_CopyImage(VkImage src, VkImage dst, const VkImageCopy *region);
+void vkrec_BlitImage(VkImage src, VkImage dst, const VkImageBlit *region, VkFilter filter);
+void vkrec_ClearColorImage(VkImage image, const VkClearColorValue *color, const VkImageSubresourceRange *range);
+void vkrec_ClearDepthStencilImage(VkImage image, const VkClearDepthStencilValue *value,
+                                  const VkImageSubresourceRange *range);
 
 // ---- breadcrumbs
 typedef struct VkRecCrumb {

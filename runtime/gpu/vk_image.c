@@ -263,6 +263,11 @@ VkImage vkb_image_handle(const VkbImage *i) { return i->image; }
 VkFormat vkb_image_format(const VkbImage *i) { return i->format; }
 int vkb_image_placed(const VkbImage *i) { return i->placed; }
 
+void vkb_image_shape(const VkbImage *i, VkbShape *out) {
+    *out = (VkbShape){(VkImageType)i->key.type, i->key.w, i->key.h, i->key.d, i->key.layers, i->key.levels,
+                      i->key.samples, i->aspect, i->all_aspects, i->format};
+}
+
 void vkb_image_use(VkbImage *i, uint64_t value) {
     uint64_t seen = __atomic_load_n(&i->last_use, __ATOMIC_RELAXED);
     while (seen < value && !__atomic_compare_exchange_n(&i->last_use, &seen, value, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}

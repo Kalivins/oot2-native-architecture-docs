@@ -98,6 +98,19 @@ static int dev_target(const nvn_tex_rec *t, int storage, uint64_t value, VkrTarg
     return 1;
 }
 
+// ---------- the images copies and clears work on
+static int dev_image(const nvn_tex_rec *t, uint64_t value, VkrImage *out) {
+    memset(out, 0, sizeof *out);
+    VkbImage *img = vkb_image_get(&t->tex);
+    if (!img) return 0;
+    vkb_image_use(img, value);
+    VkbShape sh;
+    vkb_image_shape(img, &sh);
+    *out = (VkrImage){vkb_image_handle(img), sh.format, sh.type, sh.aspect, sh.all_aspects, sh.width, sh.height, sh.depth,
+                      sh.layers, sh.levels, sh.samples};
+    return 1;
+}
+
 // ---------- the bindless tables, recorded into the frame's prologue
 static VkDescriptorSet dev_acquire(uint64_t value, const dpool_ref *textures, const dpool_ref *samplers) {
     return vkb_acquire(gpu_vk_prologue(), value, textures, samplers);
@@ -126,7 +139,8 @@ static Chunk *chunk_new(uint32_t size) {
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
                              .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT};
+                                      VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     GPU_VK_OK(vkCreateBuffer(gpu_vk.device, &bi, NULL, &c->buf), "vkCreateBuffer (replay scratch)");
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(gpu_vk.device, c->buf, &req);
@@ -192,6 +206,7 @@ static void dev_frame_end(uint64_t value) {
 const VkReplayOps *vkr_device_ops(void) {
     static VkReplayOps ops = {.graphics = vkp_graphics, .compute = vkp_compute, .binds = dev_binds,
                               .resolve = backing_resolve, .gpu_wrote = backing_gpu_wrote, .target = dev_target,
+                              .image = dev_image,
                               .acquire = dev_acquire, .image_slot = dev_image_slot, .scratch = dev_scratch,
                               .frame_begin = dev_frame_begin, .frame_end = dev_frame_end};
     const VkpLayouts *l = vkp_layouts();   // read at every call: the pipeline builder may open after the first frame

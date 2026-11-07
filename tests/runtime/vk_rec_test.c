@@ -420,6 +420,80 @@ static void VKAPI_CALL fake_ClearAttachments(VkCommandBuffer cb, uint32_t na, co
     ser_Clear(&g_got, na, a, nr, r);
 }
 
+// The transfers: the handles and one region each, the images in the general layout.
+static void ser_CopyBuffer(Buf *b, VkBuffer s, VkBuffer d, const VkBufferCopy *r) {
+    ser_op(b, VKR_CopyBuffer);
+    BPUT(b, s), BPUT(b, d);
+    bput(b, r, sizeof *r);
+}
+static void VKAPI_CALL fake_CopyBuffer(VkCommandBuffer cb, VkBuffer s, VkBuffer d, uint32_t n, const VkBufferCopy *r) {
+    CHECK(cb == FAKE_CB && n == 1);
+    ser_CopyBuffer(&g_got, s, d, r);
+}
+static void ser_CopyBufferToImage(Buf *b, VkBuffer s, VkImage d, const VkBufferImageCopy *r) {
+    ser_op(b, VKR_CopyBufferToImage);
+    BPUT(b, s), BPUT(b, d);
+    bput(b, r, sizeof *r);
+}
+static void VKAPI_CALL fake_CopyBufferToImage(VkCommandBuffer cb, VkBuffer s, VkImage d, VkImageLayout l, uint32_t n,
+                                              const VkBufferImageCopy *r) {
+    CHECK(cb == FAKE_CB && n == 1 && l == VK_IMAGE_LAYOUT_GENERAL);
+    ser_CopyBufferToImage(&g_got, s, d, r);
+}
+static void ser_CopyImageToBuffer(Buf *b, VkImage s, VkBuffer d, const VkBufferImageCopy *r) {
+    ser_op(b, VKR_CopyImageToBuffer);
+    BPUT(b, s), BPUT(b, d);
+    bput(b, r, sizeof *r);
+}
+static void VKAPI_CALL fake_CopyImageToBuffer(VkCommandBuffer cb, VkImage s, VkImageLayout l, VkBuffer d, uint32_t n,
+                                              const VkBufferImageCopy *r) {
+    CHECK(cb == FAKE_CB && n == 1 && l == VK_IMAGE_LAYOUT_GENERAL);
+    ser_CopyImageToBuffer(&g_got, s, d, r);
+}
+static void ser_CopyImage(Buf *b, VkImage s, VkImage d, const VkImageCopy *r) {
+    ser_op(b, VKR_CopyImage);
+    BPUT(b, s), BPUT(b, d);
+    bput(b, r, sizeof *r);
+}
+static void VKAPI_CALL fake_CopyImage(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n,
+                                      const VkImageCopy *r) {
+    CHECK(cb == FAKE_CB && n == 1 && sl == VK_IMAGE_LAYOUT_GENERAL && dl == VK_IMAGE_LAYOUT_GENERAL);
+    ser_CopyImage(&g_got, s, d, r);
+}
+static void ser_BlitImage(Buf *b, VkImage s, VkImage d, const VkImageBlit *r, VkFilter f) {
+    ser_op(b, VKR_BlitImage);
+    BPUT(b, s), BPUT(b, d), BPUT(b, f);
+    bput(b, r, sizeof *r);
+}
+static void VKAPI_CALL fake_BlitImage(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n,
+                                      const VkImageBlit *r, VkFilter f) {
+    CHECK(cb == FAKE_CB && n == 1 && sl == VK_IMAGE_LAYOUT_GENERAL && dl == VK_IMAGE_LAYOUT_GENERAL);
+    ser_BlitImage(&g_got, s, d, r, f);
+}
+static void ser_ClearColorImage(Buf *b, VkImage i, const VkClearColorValue *c, const VkImageSubresourceRange *r) {
+    ser_op(b, VKR_ClearColorImage);
+    BPUT(b, i);
+    bput(b, c, sizeof *c);
+    bput(b, r, sizeof *r);
+}
+static void VKAPI_CALL fake_ClearColorImage(VkCommandBuffer cb, VkImage i, VkImageLayout l, const VkClearColorValue *c,
+                                            uint32_t n, const VkImageSubresourceRange *r) {
+    CHECK(cb == FAKE_CB && n == 1 && l == VK_IMAGE_LAYOUT_GENERAL);
+    ser_ClearColorImage(&g_got, i, c, r);
+}
+static void ser_ClearDepthStencilImage(Buf *b, VkImage i, const VkClearDepthStencilValue *v, const VkImageSubresourceRange *r) {
+    ser_op(b, VKR_ClearDepthStencilImage);
+    BPUT(b, i);
+    bput(b, v, sizeof *v);
+    bput(b, r, sizeof *r);
+}
+static void VKAPI_CALL fake_ClearDepthStencilImage(VkCommandBuffer cb, VkImage i, VkImageLayout l,
+                                                   const VkClearDepthStencilValue *v, uint32_t n,
+                                                   const VkImageSubresourceRange *r) {
+    CHECK(cb == FAKE_CB && n == 1 && l == VK_IMAGE_LAYOUT_GENERAL);
+    ser_ClearDepthStencilImage(&g_got, i, v, r);
+}
+
 // The markers the recorder set, and the draw each preceded.
 #define MAX_MARKERS 4096
 static uint64_t g_marker[MAX_MARKERS], g_last_marker;
@@ -593,6 +667,35 @@ static void send_customs(uint64_t seed) {
     ser_Clear(&g_want, 2, cl, 3, cr);
     vkrec_ClearAttachments(2, cl, 3, cr);
     memset(cl, 0xEE, sizeof cl), memset(cr, 0xEE, sizeof cr);
+
+    // the transfers, each with its region copied into the packet
+    static VkBufferCopy bcopy;
+    static VkBufferImageCopy bic;
+    static VkImageCopy icopy;
+    static VkImageBlit blit;
+    static VkClearColorValue ccv;
+    static VkClearDepthStencilValue dsv;
+    static VkImageSubresourceRange srange;
+    fill_bytes(&bcopy, sizeof bcopy, seed + 7), fill_bytes(&bic, sizeof bic, seed + 8);
+    fill_bytes(&icopy, sizeof icopy, seed + 9), fill_bytes(&blit, sizeof blit, seed + 10);
+    fill_bytes(&ccv, sizeof ccv, seed + 11), fill_bytes(&dsv, sizeof dsv, seed + 12), fill_bytes(&srange, sizeof srange, seed + 13);
+    ser_CopyBuffer(&g_want, (VkBuffer)(uintptr_t)0x9001, (VkBuffer)(uintptr_t)0x9002, &bcopy);
+    vkrec_CopyBuffer((VkBuffer)(uintptr_t)0x9001, (VkBuffer)(uintptr_t)0x9002, &bcopy);
+    ser_CopyBufferToImage(&g_want, (VkBuffer)(uintptr_t)0x9003, (VkImage)(uintptr_t)0x9004, &bic);
+    vkrec_CopyBufferToImage((VkBuffer)(uintptr_t)0x9003, (VkImage)(uintptr_t)0x9004, &bic);
+    ser_CopyImageToBuffer(&g_want, (VkImage)(uintptr_t)0x9005, (VkBuffer)(uintptr_t)0x9006, &bic);
+    vkrec_CopyImageToBuffer((VkImage)(uintptr_t)0x9005, (VkBuffer)(uintptr_t)0x9006, &bic);
+    ser_CopyImage(&g_want, (VkImage)(uintptr_t)0x9007, (VkImage)(uintptr_t)0x9008, &icopy);
+    vkrec_CopyImage((VkImage)(uintptr_t)0x9007, (VkImage)(uintptr_t)0x9008, &icopy);
+    ser_BlitImage(&g_want, (VkImage)(uintptr_t)0x9009, (VkImage)(uintptr_t)0x900a, &blit, VK_FILTER_LINEAR);
+    vkrec_BlitImage((VkImage)(uintptr_t)0x9009, (VkImage)(uintptr_t)0x900a, &blit, VK_FILTER_LINEAR);
+    ser_ClearColorImage(&g_want, (VkImage)(uintptr_t)0x900b, &ccv, &srange);
+    vkrec_ClearColorImage((VkImage)(uintptr_t)0x900b, &ccv, &srange);
+    ser_ClearDepthStencilImage(&g_want, (VkImage)(uintptr_t)0x900c, &dsv, &srange);
+    vkrec_ClearDepthStencilImage((VkImage)(uintptr_t)0x900c, &dsv, &srange);
+    memset(&bcopy, 0xEE, sizeof bcopy), memset(&bic, 0xEE, sizeof bic), memset(&icopy, 0xEE, sizeof icopy);
+    memset(&blit, 0xEE, sizeof blit), memset(&ccv, 0xEE, sizeof ccv), memset(&dsv, 0xEE, sizeof dsv);
+    memset(&srange, 0xEE, sizeof srange);
 }
 
 static void case_pack_roundtrip(void) {

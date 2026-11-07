@@ -9,9 +9,8 @@
 // (GPL-3.0-or-later): runtime/vk_exec.c (passes, the scissor clip of clears), runtime/vk_exec_draw.c:2165-2199 (the flip)
 // and :1012-1032 (c[0]), runtime/vk_pipeline.c:3639-3644 (the front face under the flip: unchanged for the upper-left
 // origin, mirrored for the lower-left one as LAS Recomp does), runtime/vk_usnap.c:1-21 (the snapshot: imported
-// uniform ranges copied at submit, a GPU write over a copy drops it). The code is ours: the replay writes packets, binds
-// through the uni layout's push descriptors and push constant texture slots, and stops by name where DKB drops the copy
-// (the drop rule is the copies ticket's).
+// uniform ranges copied at submit, a GPU write over a copy drops it). The code is ours: the replay writes packets and binds
+// through the uni layout's push descriptors and push constant texture slots. The transfers are vk_replay_xfer.c's.
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,8 +27,7 @@
 #include "oot2/vk_rec.h"
 #include "oot2/vk_replay.h"
 #include "plat.h"
-
-typedef unsigned long long ull;
+#include "vk_replay_int.h"
 
 // NVN shader stages (NVNshaderStage; task and mesh as the ledger numbers them)
 enum { ST_VS = 0, ST_FS = 1, ST_CS = 5, ST_TS = 6, ST_MS = 7, ST_N = 8 };
@@ -50,6 +48,8 @@ enum { ST_VS = 0, ST_FS = 1, ST_CS = 5, ST_TS = 6, ST_MS = 7, ST_N = 8 };
 
 int vkr_no_snapshot;
 int vkr_no_flip;
+int vkr_no_drop;
+int vkr_no_declare;
 
 // ---------- the op list
 const char *vkr_op_ticket(uint32_t op) {
@@ -62,10 +62,9 @@ const char *vkr_op_ticket(uint32_t op) {
     case OP_BLEND_COLOR: case OP_DEPTH_CLAMP: case OP_RENDER_ENABLE: case OP_RASTER_DISCARD: case OP_PRIM_RESTART:
     case OP_PUSH_CONST: case OP_WAIT_SYNC: case OP_SAMPLE_MASK: case OP_DEPTH_BOUNDS: case OP_CONSERVATIVE:
     case OP_SHADING_RATE_IMAGE: case OP_SHADING_RATE_MODE: case OP_SCRATCH: case OP_HINT:
-        return VKR_REPLAYED;
     case OP_COPY_B2B: case OP_UPDATE_UB: case OP_COPY_B2T: case OP_COPY_STRIDE: case OP_COPY_T2B: case OP_COPY_T2T:
     case OP_CLEAR_TEX: case OP_CLEAR_BUF: case OP_COPY_IMAGE_STRIDE:
-        return "copies, clears and uniform updates (ticket 67)";
+        return VKR_REPLAYED;
     case OP_SIGNAL_EVENT: case OP_REPORT_COUNTER: case OP_RESET_COUNTER: case OP_RENDER_COND: case OP_WAIT_EVENT:
         return "reports, events and conditional rendering (ticket 68)";
     case OP_DRAW_MESH: case OP_DRAW_MESH_IND: case OP_GEOMETRY_MODE:
@@ -162,6 +161,7 @@ static struct {
     Rng wrote[WRITES_MAX];
     uint32_t nwrote;
     int wslot;                                // the frame's entry of W
+    int after_xfer;                           // a transfer ran since the last full barrier
 } F;
 
 // What the frames in flight wrote (vkr_writes), a ring of FRAMES_KEPT by replayed frame (timeline values are shared with
@@ -190,6 +190,7 @@ const VkrWrite *vkr_writes(uint64_t value, uint32_t *n) {
 
 void vkr_reset(void) {
     memset(&S, 0, sizeof S);
+    vkr_xfer_reset();
     ledger_track_reset(&S.track);
     S.render = 1, S.line_width = 1.0f, S.sample_mask = ~0u;
     S.chmask.mask = 0xFFFFFFFFu;
@@ -201,8 +202,8 @@ void vkr_reset(void) {
 __attribute__((constructor)) static void replay_init(void) { vkr_reset(); }
 
 // ---------- stops
-__attribute__((noreturn, format(printf, 1, 2))) static void stop(const char *fmt, ...);
-static void stop(const char *fmt, ...) {
+#define stop(...) vkr_stop(__VA_ARGS__)
+void vkr_stop(const char *fmt, ...) {
     char line[512];
     va_list ap;
     va_start(ap, fmt);
@@ -215,6 +216,9 @@ __attribute__((noreturn)) static void stop_op(uint32_t op) {
     stop("%s is not replayed yet: %s", nvn_op_name(op), vkr_op_ticket(op));
 }
 
+const VkReplayOps *vkr_frame_ops(void) { return F.ops; }
+uint64_t vkr_frame_value(void) { return F.value; }
+
 // ---------- the frame's scratch memory
 static Bound scratch(uint32_t bytes, uint32_t align, void **out) {
     Bound b;
@@ -223,6 +227,13 @@ static Bound scratch(uint32_t bytes, uint32_t align, void **out) {
     g_stats.scratch_bytes += bytes;
     if (out) *out = p;
     return b;
+}
+
+void *vkr_scratch(uint32_t bytes, uint32_t align, VkBuffer *buffer, VkDeviceSize *offset) {
+    void *p;
+    Bound b = scratch(bytes, align, &p);
+    *buffer = b.buf, *offset = b.off;
+    return p;
 }
 
 // A zeroed range the size of the largest uniform binding: what an unbound slot reads.
@@ -250,16 +261,30 @@ static Bound bank(BankCache *c, const uint8_t *bytes, uint32_t size) {
 // ---------- the snapshot (D17a) and the frame's GPU writes
 static int overlaps(Rng a, Rng b) { return a.lo < b.hi && b.lo < a.hi; }
 
-static void wrote(uint64_t addr, uint64_t size, int image) {
+// 1 when the frame has declared a GPU write over any byte of [addr, addr + size).
+int vkr_written(uint64_t addr, uint64_t size) {
     Rng r = {addr, addr + size};
-    for (uint32_t i = 0; i < F.nsnaps; i++)
-        if (overlaps(r, F.snaps[i]))
-            stop("a GPU write of [%#llx, %#llx) meets the uniform range [%#llx, %#llx) copied at submit; the copies "
-                 "ticket (67) brings the drop rule", (ull)r.lo, (ull)r.hi, (ull)F.snaps[i].lo, (ull)F.snaps[i].hi);
-    if (F.nwrote == WRITES_MAX) stop("more than %u GPU writes in one submission", WRITES_MAX);
-    F.wrote[F.nwrote++] = r;
-    F.ops->gpu_wrote(addr, size, F.value);
-    g_stats.storage_writes++;
+    for (uint32_t i = 0; i < F.nwrote; i++)
+        if (overlaps(r, F.wrote[i])) return 1;
+    return 0;
+}
+
+// The frame's GPU write of [addr, addr + size): the copies of uniform ranges it touches are dropped (the drop rule: a read
+// of the range after this write binds the live memory, a read before it keeps its copy), and the write is declared to the
+// backing map once, unless a write the frame declared already holds all of it (the write-back reads the bytes at the end
+// of the submission, so the later write is in it).
+void vkr_wrote(uint64_t addr, uint64_t size, int image, uint32_t draw) {
+    Rng r = {addr, addr + size};
+    if (!vkr_no_drop)
+        for (uint32_t i = 0; i < F.nsnaps;) {
+            if (!overlaps(r, F.snaps[i])) {
+                i++;
+                continue;
+            }
+            F.nsnaps--;
+            F.snaps[i] = F.snaps[F.nsnaps], F.snap_at[i] = F.snap_at[F.nsnaps];
+            g_stats.snapshot_drops++;
+        }
     int k = F.wslot;
     if (W[k].n == W[k].cap) {
         uint32_t cap = W[k].cap ? 2 * W[k].cap : 256;
@@ -267,18 +292,19 @@ static void wrote(uint64_t addr, uint64_t size, int image) {
         if (!w) rt_fatal("gfx: vulkan: out of memory for %u written ranges", cap);
         W[k].w = w, W[k].cap = cap;
     }
-    W[k].w[W[k].n++] = (VkrWrite){addr, size, F.draws + 1, (uint8_t)image};   // the draw being prepared
+    W[k].w[W[k].n++] = (VkrWrite){addr, size, draw, (uint8_t)image};
+    for (uint32_t i = 0; i < F.nwrote; i++)
+        if (F.wrote[i].lo <= r.lo && r.hi <= F.wrote[i].hi) return;
+    if (F.nwrote == WRITES_MAX) stop("more than %u GPU writes in one submission", WRITES_MAX);
+    F.wrote[F.nwrote++] = r;
+    if (!vkr_no_declare) F.ops->gpu_wrote(addr, size, F.value);
+    g_stats.storage_writes++;
 }
 
 static Bound snapshot(uint64_t addr, uint64_t size) {
     Rng r = {addr, addr + size};
     for (uint32_t i = 0; i < F.nsnaps; i++)
         if (F.snaps[i].lo == r.lo && F.snaps[i].hi == r.hi) return F.snap_at[i];
-    for (uint32_t i = 0; i < F.nwrote; i++)
-        if (overlaps(r, F.wrote[i]))
-            stop("the uniform range [%#llx, %#llx) is copied at submit after a GPU write of [%#llx, %#llx) in the same "
-                 "submission; the copies ticket (67) brings the drop rule", (ull)r.lo, (ull)r.hi, (ull)F.wrote[i].lo,
-                 (ull)F.wrote[i].hi);
     void *p;
     Bound b = scratch((uint32_t)size, UNIFORM_ALIGN, &p);
     memcpy(p, (const void *)(uintptr_t)addr, size);
@@ -288,13 +314,14 @@ static Bound snapshot(uint64_t addr, uint64_t size) {
 }
 
 // A uniform range: VRAM and mirrors bind as they are (a mirror is a copy taken at submit); host memory the GPU reads
-// live is copied.
+// live is copied, unless the frame wrote it already (the drop rule: the live memory holds the GPU's write, in order).
 static Bound uniform(VknBuf b) {
     if (!b.addr || !b.size) return zero_block();
     uint64_t size = b.size < UNIFORM_MAX ? b.size : UNIFORM_MAX;
     BackingRef ref;
     F.ops->resolve(b.addr, size, F.value, &ref);
-    if (ref.kind == BACKING_IMPORT && !vkr_no_snapshot) return snapshot(b.addr, size);
+    if (ref.kind == BACKING_IMPORT && !vkr_no_snapshot && (vkr_no_drop || !vkr_written(b.addr, size)))
+        return snapshot(b.addr, size);
     g_stats.live_uniforms++;
     return (Bound){(VkBuffer)(uintptr_t)ref.buffer, ref.offset};
 }
@@ -308,6 +335,7 @@ static void full_barrier(void) {
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkrec_PipelineBarrier2(&di);
     g_stats.barriers++;
+    F.after_xfer = 0;
 }
 
 static void pass_end(void) {
@@ -315,6 +343,15 @@ static void pass_end(void) {
     vkrec_EndRendering();
     F.in_pass = 0;
 }
+
+// A transfer is one command outside any pass, after a full barrier; what runs next without a barrier of its own (a
+// dispatch) opens with one.
+void vkr_xfer_begin(void) {
+    pass_end();
+    full_barrier();
+}
+void vkr_xfer_end(void) { F.after_xfer = 1; }
+void vkr_count_transfer(uint64_t bytes) { g_stats.transfers++, g_stats.transfer_bytes += bytes; }
 
 static int target_of(const nvn_tex_rec *t, VkrTarget *out) {
     if (t->tex.d.samples > 1) stop("a multisampled render target (%d samples) is not replayed yet", t->tex.d.samples);
@@ -668,7 +705,7 @@ static void stage_resources(Set1 *s, int st, const nvn_stage *stage, const prog_
         F.ops->resolve(base, range, F.value, &ref);
         put_buffer(s, sb->binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (Bound){(VkBuffer)(uintptr_t)ref.buffer, ref.offset},
                    range);
-        if (sb->write) wrote(base, range, 0);
+        if (sb->write) vkr_wrote(base, range, 0, F.draws + 1);   // the draw being prepared
     }
     if (b->nimg) stop("stage %s binds %u storage image(s): their views by texture ID are not replayed yet", stage->key,
                       b->nimg);
@@ -877,18 +914,30 @@ static void op_draw_idx_ind(const p_draw_idx_ind *d) {
 }
 
 // ---------- dispatches
+// ind: the GPU address of the group counts of an indirect dispatch (0: direct, groups). The counts go into the driver bank
+// c[0] too, and the CPU cannot say what they will be: they may be the output of earlier work of this submission, or of a
+// submission still in flight (a mirror holds the CPU's view, which is behind). So the GPU copies them from the indirect
+// buffer into the bank, which the dispatch has to itself, right before it runs.
 static void dispatch(const uint32_t groups[3], uint64_t ind) {
     if (!S.render) return;
     const nvn_stage *cs = P.id[ST_CS];
     if (!cs) stop("a dispatch with no compute stage bound");
     const ShaderBinds *b = binds_of(cs, SHD_CS);
     pass_end();
+    if (F.after_xfer) full_barrier();
     VkpStage cst = {cs->key, NULL, cs};
     bind_pipeline(1, F.ops->compute(&cst));
     bind_set0(1);
     uint8_t c0[VKN_BANK_BYTES];
     if (!vkn_c0_compute(c0, cs->ctl, cs->ctl_size, groups, (const uint32_t(*)[64])S.root[1], S.ubo[ST_CS], S.ssbo[ST_CS]))
         stop("stage %s: its control section's driver bank layout does not fit %u bytes", cs->key, VKN_BANK_BYTES);
+    BackingRef ref = {0};
+    Bound patch = {0};
+    if (ind) {
+        F.ops->resolve(ind, 12, F.value, &ref);
+        F.c0[ST_CS].valid = 0;   // a bank of its own: stage_resources finds these bytes and binds this copy
+        patch = bank(&F.c0[ST_CS], c0, VKN_BANK_BYTES);
+    }
     Set1 s;
     memset(&s, 0, sizeof s);
     support(&s);
@@ -900,25 +949,18 @@ static void dispatch(const uint32_t groups[3], uint64_t ind) {
         vkrec_Dispatch(groups[0], groups[1], groups[2]);
         return;
     }
-    BackingRef ref;
-    F.ops->resolve(ind, 12, F.value, &ref);
-    vkrec_DispatchIndirect((VkBuffer)(uintptr_t)ref.buffer, ref.offset);
+    VkBuffer buf = (VkBuffer)(uintptr_t)ref.buffer;
+    VkBufferCopy counts = {ref.offset, patch.off + 4, 12};   // the group counts lie at byte 4 of the bank's head
+    full_barrier();
+    vkrec_CopyBuffer(buf, patch.buf, &counts);
+    full_barrier();
+    vkrec_DispatchIndirect(buf, ref.offset);
+    F.c0[ST_CS].valid = 0;   // the bank holds the GPU's counts now, not the CPU's bytes
 }
 
 static void op_dispatch_ind(const p_dispatch_ind *d) {
-    // The group counts go into c[0] too: read at submit from the CPU's view of them, the pool's storage behind an import
-    // or a mirror (an indirect buffer in memory the CPU cannot see, or that this submission writes, waits for the
-    // copies ticket's GPU-side copy).
-    uint32_t g[3];
-    BackingRef ref;
-    F.ops->resolve(d->ind, sizeof g, F.value, &ref);
-    if (ref.kind != BACKING_IMPORT && ref.kind != BACKING_MIRROR)
-        stop("an indirect dispatch whose group counts at %#llx the CPU cannot read (ticket 67)", (ull)d->ind);
-    for (uint32_t i = 0; i < F.nwrote; i++)
-        if (overlaps((Rng){d->ind, d->ind + sizeof g}, F.wrote[i]))
-            stop("an indirect dispatch whose group counts this submission writes (ticket 67)");
-    memcpy(g, (const void *)(uintptr_t)d->ind, sizeof g);
-    dispatch(g, d->ind);
+    static const uint32_t none[3];
+    dispatch(none, d->ind);
 }
 
 // ---------- clears
@@ -1146,7 +1188,8 @@ static void record(const op_hdr *r) {
                     // mode, which acts as a full barrier (architecture: the semantics that must survive)
         if (((const p_hint *)a)->what == NVN_HINT_COMPUTE_OVERLAP) pass_end(), full_barrier();
         break;
-    default: stop_op(r->op);
+    default:
+        if (!vkr_xfer_op(r)) stop_op(r->op);
     }
     ledger_track_op(&S.track, r);
 }

@@ -336,6 +336,51 @@ void vkrec_ClearAttachments(uint32_t nattachments, const VkClearAttachment *atta
     vkrec_publish();
 }
 
+// Transfers: the fixed part holds the region, so the call's pointer is the packet's own.
+typedef struct { VkBuffer s, d; VkBufferCopy r; } A_CopyBuffer;
+void vkrec_CopyBuffer(VkBuffer src, VkBuffer dst, const VkBufferCopy *region) {
+    A_CopyBuffer *a = vkrec_put(VKR_CopyBuffer, sizeof *a);
+    *a = (A_CopyBuffer){src, dst, *region};
+    vkrec_publish();
+}
+typedef struct { VkBuffer s; VkImage d; VkBufferImageCopy r; } A_CopyBufferToImage;
+void vkrec_CopyBufferToImage(VkBuffer src, VkImage dst, const VkBufferImageCopy *region) {
+    A_CopyBufferToImage *a = vkrec_put(VKR_CopyBufferToImage, sizeof *a);
+    *a = (A_CopyBufferToImage){src, dst, *region};
+    vkrec_publish();
+}
+typedef struct { VkImage s; VkBuffer d; VkBufferImageCopy r; } A_CopyImageToBuffer;
+void vkrec_CopyImageToBuffer(VkImage src, VkBuffer dst, const VkBufferImageCopy *region) {
+    A_CopyImageToBuffer *a = vkrec_put(VKR_CopyImageToBuffer, sizeof *a);
+    *a = (A_CopyImageToBuffer){src, dst, *region};
+    vkrec_publish();
+}
+typedef struct { VkImage s, d; VkImageCopy r; } A_CopyImage;
+void vkrec_CopyImage(VkImage src, VkImage dst, const VkImageCopy *region) {
+    A_CopyImage *a = vkrec_put(VKR_CopyImage, sizeof *a);
+    *a = (A_CopyImage){src, dst, *region};
+    vkrec_publish();
+}
+typedef struct { VkImage s, d; VkImageBlit r; VkFilter f; } A_BlitImage;
+void vkrec_BlitImage(VkImage src, VkImage dst, const VkImageBlit *region, VkFilter filter) {
+    A_BlitImage *a = vkrec_put(VKR_BlitImage, sizeof *a);
+    *a = (A_BlitImage){src, dst, *region, filter};
+    vkrec_publish();
+}
+typedef struct { VkImage i; VkClearColorValue c; VkImageSubresourceRange r; } A_ClearColorImage;
+void vkrec_ClearColorImage(VkImage image, const VkClearColorValue *color, const VkImageSubresourceRange *range) {
+    A_ClearColorImage *a = vkrec_put(VKR_ClearColorImage, sizeof *a);
+    *a = (A_ClearColorImage){image, *color, *range};
+    vkrec_publish();
+}
+typedef struct { VkImage i; VkClearDepthStencilValue v; VkImageSubresourceRange r; } A_ClearDepthStencilImage;
+void vkrec_ClearDepthStencilImage(VkImage image, const VkClearDepthStencilValue *value,
+                                  const VkImageSubresourceRange *range) {
+    A_ClearDepthStencilImage *a = vkrec_put(VKR_ClearDepthStencilImage, sizeof *a);
+    *a = (A_ClearDepthStencilImage){image, *value, *range};
+    vkrec_publish();
+}
+
 // ---------- the executor
 void vkrec_exec(const VkRecExec *x, uint32_t op, const void *p) {
     const VkRecCalls *calls = x->calls;
@@ -429,6 +474,41 @@ void vkrec_exec(const VkRecExec *x, uint32_t op, const void *p) {
     case VKR_ClearAttachments: {
         const A_ClearAttachments *a = p;
         calls->ClearAttachments(cb, a->na, a->a, a->nr, a->r);
+        return;
+    }
+    case VKR_CopyBuffer: {
+        const A_CopyBuffer *a = p;
+        calls->CopyBuffer(cb, a->s, a->d, 1, &a->r);
+        return;
+    }
+    case VKR_CopyBufferToImage: {
+        const A_CopyBufferToImage *a = p;
+        calls->CopyBufferToImage(cb, a->s, a->d, VK_IMAGE_LAYOUT_GENERAL, 1, &a->r);
+        return;
+    }
+    case VKR_CopyImageToBuffer: {
+        const A_CopyImageToBuffer *a = p;
+        calls->CopyImageToBuffer(cb, a->s, VK_IMAGE_LAYOUT_GENERAL, a->d, 1, &a->r);
+        return;
+    }
+    case VKR_CopyImage: {
+        const A_CopyImage *a = p;
+        calls->CopyImage(cb, a->s, VK_IMAGE_LAYOUT_GENERAL, a->d, VK_IMAGE_LAYOUT_GENERAL, 1, &a->r);
+        return;
+    }
+    case VKR_BlitImage: {
+        const A_BlitImage *a = p;
+        calls->BlitImage(cb, a->s, VK_IMAGE_LAYOUT_GENERAL, a->d, VK_IMAGE_LAYOUT_GENERAL, 1, &a->r, a->f);
+        return;
+    }
+    case VKR_ClearColorImage: {
+        const A_ClearColorImage *a = p;
+        calls->ClearColorImage(cb, a->i, VK_IMAGE_LAYOUT_GENERAL, &a->c, 1, &a->r);
+        return;
+    }
+    case VKR_ClearDepthStencilImage: {
+        const A_ClearDepthStencilImage *a = p;
+        calls->ClearDepthStencilImage(cb, a->i, VK_IMAGE_LAYOUT_GENERAL, &a->v, 1, &a->r);
         return;
     }
     default: rt_fatal("gfx: vulkan: recorder: a packet of operation %u that no command has", op);

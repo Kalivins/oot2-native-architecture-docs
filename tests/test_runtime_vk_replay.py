@@ -15,11 +15,14 @@ bound handles, bank 24 the pushed root tables, the support buffer the viewport; 
 at submit (the copy holds the bytes of that moment, and the next submission takes a copy of its own) while a mirror binds
 live; a storage buffer binds from its bank's words, rounded down to 16 bytes, and one the module writes is declared and
 listed; a texture's push constant slot holds its bindless slot and its sampler; draws, indexed and indirect draws, direct
-and indirect dispatches and clears become their packets; a GPU write over a copied uniform range stops by name in either
-order; every op of the list is replayed or stops by name with its ticket; a recording that is not whole stops by name.
+and indirect dispatches and clears become their packets (an indirect dispatch's counts are copied by the GPU into a bank
+of its own); a GPU write over a copied uniform range drops the copy, so that every later read of the range is live; copies,
+fills, updates and texture clears are one transfer command each behind a full barrier, with the channel's strides, their
+writes into memory the CPU can see declared once; every op of the list is replayed or stops by name with its ticket; a recording that is not whole stops by name.
 
 Each check of the ticket's new behaviour has a counter-run, a test-only switch of the replay that breaks the mechanism
-(vkr_no_flip: the origin's flip; vkr_no_snapshot: the uniform copy at submit). The check must then fail.
+(vkr_no_flip: the origin's flip; vkr_no_snapshot: the uniform copy at submit; vkr_no_drop: the drop rule;
+vkr_no_declare: the declaration of a transfer's write). The check must then fail.
 
 Run: python -m unittest discover -s tests -v
 """
@@ -48,7 +51,8 @@ REPLAYED = {
     "STENCIL", "POLY_OFFSET", "DRAW", "DRAW_IDX", "DRAW_IDX_IND", "DISPATCH", "DISPATCH_IND", "BARRIER", "SET_TEX_POOL",
     "SET_SAMP_POOL", "BLEND_COLOR", "DEPTH_CLAMP", "RENDER_ENABLE", "RASTER_DISCARD", "PRIM_RESTART", "PUSH_CONST",
     "WAIT_SYNC", "SAMPLE_MASK", "DEPTH_BOUNDS", "CONSERVATIVE", "SHADING_RATE_IMAGE", "SHADING_RATE_MODE", "SCRATCH",
-    "HINT",
+    "HINT", "COPY_B2B", "UPDATE_UB", "COPY_B2T", "COPY_STRIDE", "COPY_T2B", "COPY_T2T", "CLEAR_TEX", "CLEAR_BUF",
+    "COPY_IMAGE_STRIDE",
 }
 
 
@@ -141,7 +145,8 @@ def check_banks(out: str) -> None:
 def check_storage(out: str) -> None:
     w = writes(frame(out, 1), 9)
     assert len(w) == 3 and all(x == "SB buf=0xb3 off=0x100 range=0x44" for x in w), w
-    assert out.count("op wrote V+0x100 0x44 frame 1\n") == 3 and "op wrote V+0x100 0x44 frame 2\n" in out
+    # declared once a frame: the later writes of the same range lie inside the first
+    assert out.count("op wrote V+0x100 0x44 frame 1\n") == 1 and "op wrote V+0x100 0x44 frame 2\n" in out
 
 
 def check_push_slot(out: str) -> None:
@@ -166,6 +171,53 @@ def check_draws(out: str) -> None:
     assert "BindPipeline 0 0x9a" in f and "BindDescriptorSets 0 0x6100 0 0x5e7" in f
     assert f"op graphics {VS_KEY} {PS_KEY} colors=1 c0=37 depth=0 stencil=0" in out
     assert [p for p in frame(out, 2) if p.startswith("Draw")] == ["Draw 3 1 3 0"]
+
+
+def check_drop(out: str, want: list[str]) -> None:
+    """The vertex stage's uniform binding (binding 2) of each draw of the frame starts with the text given for it."""
+    w = writes(frame(out, 1), 2)
+    assert len(w) == len(want) and all(x.startswith(t) for x, t in zip(w, want)), w
+
+
+def check_transfers(out: str) -> None:
+    f = frame(out, 1)
+    barrier = "PipelineBarrier2 full=1"
+    names = ("CopyBuffer", "FillBuffer", "CopyImage", "CopyBufferToImage", "CopyImageToBuffer", "BlitImage", "ClearColorImage",
+             "ClearDepthStencilImage", "BeginRendering")
+    at = [i for i, p in enumerate(f) if p.split(" ")[0] in names and i > 1]
+    assert len(at) == 14, at
+    assert all(f[i - 1] == barrier for i in at), "a transfer is not right behind a full barrier"
+    got = [f[i] for i in at]
+    mir, host, vram = 0xB2, 0xB1, 0xB3
+    area = "aspect=0x1 level=0 layers=0+1"
+    want = [
+        f"CopyBuffer 0x5c->{mir:#x} 0->{0x900} size=8",                           # UpdateUniformBuffer through scratch
+        f"CopyBuffer {host:#x}->{mir:#x} {0x400}->{0xA00} size=256",              # host to mirror
+        f"CopyBuffer {host:#x}->{mir:#x} {0x400}->{0xA40} size=64",               # inside the write above
+        f"CopyBuffer {vram:#x}->{host:#x} {0x1000}->{0x800} size=64",             # VRAM to host
+        f"FillBuffer {vram:#x} 64 32 {0xDEAD}",
+        # the region's blocks tightly packed, then at a 256-byte row stride, then two layers at a 1 KiB image stride
+        f"CopyImageToBuffer img=0x1001 buf={mir:#x} off={0x1000} row=16 imgh=4 {area} at=8,4,0 ext=16x4x1",
+        f"CopyImageToBuffer img=0x1001 buf={mir:#x} off={0x2000} row=64 imgh=4 {area} at=8,4,0 ext=16x4x1",
+        f"CopyImageToBuffer img=0x1002 buf={mir:#x} off={0x4000} row=8 imgh=32 aspect=0x1 level=0 layers=1+2 at=0,0,0 ext=8x8x1",
+        f"CopyBufferToImage buf={host:#x} img=0x1001 off={0x2000} row=8 imgh=8 {area} at=0,0,0 ext=8x8x1",
+        f"CopyImage 0x1001->0x1003 src {area} at=0,0,0 dst {area} at=4,4,0 ext=32x16x1",
+        f"BlitImage 0x1001->0x1003 filter=1 src {area} 0,0,0..16,8,1 dst {area} 0,0,0..32,16,1",
+        "ClearColorImage 0x1001 color=1,0,0,1 aspect=0x1 level=0+1 layers=0+1",
+        "BeginRendering 0,0 64x32 layers=1 colors=1 [0x7125 layout=1 load=0 store=0]",   # the part of a level, in a pass
+        "ClearDepthStencilImage 0x1004 depth=1 stencil=7 aspect=0x6 level=0+1 layers=0+1",
+    ]
+    assert got == want, [(g, w) for g, w in zip(got, want) if g != w]
+    part = f.index(want[12])
+    assert f[part + 1] == "ClearAttachments aspect=0x1 att=0 color=0,1,0,1 rect=8,4 16x8 layers=0+1", f[part + 1]
+    assert f[part + 2] == "EndRendering"
+    # the dispatch after the last transfer opens with a barrier of its own
+    assert f[f.index("BindPipeline 1 0x9c") - 1] == barrier
+    # the writes into memory the CPU can see are declared once each (the copy inside an earlier write adds none)
+    writes_ = [line for line in out.splitlines() if line.startswith("op wrote ")]
+    assert writes_ == ["op wrote M+0x900 0x8 frame 1", "op wrote M+0xa00 0x100 frame 1", "op wrote H+0x800 0x40 frame 1",
+                       "op wrote V+0x40 0x20 frame 1", "op wrote M+0x1000 0x100 frame 1", "op wrote M+0x2000 0x340 frame 1",
+                       "op wrote M+0x4000 0x500 frame 1"], writes_
 
 
 _BUILT: dict[str, object] = {}
@@ -222,7 +274,7 @@ class GraphicsTest(ReplayBase):
         for check in self.CHECKS:
             with self.subTest(check=check.__name__):
                 check(out)
-        self.assertIn("stats frames 2 draws 4 clears 1 passes 2 snapshots 2 live 8 writes 4", out)
+        self.assertIn("stats frames 2 draws 4 clears 1 passes 2 snapshots 2 live 8 writes 2", out)
 
     def test_counter_run_without_the_flip(self) -> None:
         out = self.passing("graphics", "--mutant", "noflip")
@@ -256,16 +308,51 @@ class GraphicsTest(ReplayBase):
         self.assertEqual(self.stopping("clamp"), "FATAL: gfx: vulkan: replay of submission 1, after 0 draws and dispatches: "
                                                  "depth clamp: the depthClamp feature is not enabled")
 
-    def test_a_write_over_a_copied_uniform_stops_by_name(self) -> None:
-        line = self.stopping("conflict_read_first")
-        self.assertRegex(line, r"^FATAL: gfx: vulkan: replay of submission 1, after 0 draws and dispatches: a GPU write "
-                               r"of \[0x[0-9a-f]+, 0x[0-9a-f]+\) meets the uniform range \[0x[0-9a-f]+, 0x[0-9a-f]+\) "
-                               r"copied at submit; the copies ticket \(67\) brings the drop rule$")
-        line = self.stopping("conflict_write_first")
-        self.assertRegex(line, r"^FATAL: gfx: vulkan: replay of submission 1, after 1 draws and dispatches: the uniform "
-                               r"range \[0x[0-9a-f]+, 0x[0-9a-f]+\) is copied at submit after a GPU write of "
-                               r"\[0x[0-9a-f]+, 0x[0-9a-f]+\) in the same submission; the copies ticket \(67\) brings the "
-                               r"drop rule$")
+    def test_a_gpu_write_drops_the_uniform_copy_and_later_reads_are_live(self) -> None:
+        # read first: draw 1 reads the copy (taken at submit), its pixel stage writes the range, draw 2 reads it live
+        out = self.passing("conflict_read_first")
+        check_drop(out, ["UB buf=0x5c ", "UB buf=0xb1 off=0x100 range=0x40"])
+        self.assertIn("stats snapshots 1 drops 1 ", out)
+        # write first: draw 1 writes it with the uniform unbound, the draw that binds it afterwards reads it live
+        out = self.passing("conflict_write_first")
+        check_drop(out, ["UB buf=0x5c off=0x1100 range=0x10000 zero", "UB buf=0xb1 off=0x100 range=0x40"])
+        self.assertIn("stats snapshots 0 drops 0 ", out)
+
+    def test_counter_run_without_the_drop_rule(self) -> None:
+        # the copy outlives the write (read first), and a read after a write is copied anyway (write first): both stale
+        out = self.passing("conflict_read_first", "--mutant", "nodrop")
+        with self.assertRaises(AssertionError):
+            check_drop(out, ["UB buf=0x5c ", "UB buf=0xb1 off=0x100 range=0x40"])
+        out = self.passing("conflict_write_first", "--mutant", "nodrop")
+        with self.assertRaises(AssertionError):
+            check_drop(out, ["UB buf=0x5c off=0x1100 range=0x10000 zero", "UB buf=0xb1 off=0x100 range=0x40"])
+
+    def test_transfers_become_their_packets(self) -> None:
+        out = self.passing("transfers")
+        check_transfers(out)
+        self.assertIn("stats transfers 14 bytes 22504 drops 0 writes 7", out)
+
+    def test_counter_run_without_declaring_the_writes(self) -> None:
+        out = self.passing("transfers", "--mutant", "nodeclare")
+        with self.assertRaises(AssertionError):
+            check_transfers(out)
+        self.assertEqual(out.count("op wrote"), 0)
+
+    def test_a_transfer_that_cannot_be_replayed_stops_by_name(self) -> None:
+        prefix = "FATAL: gfx: vulkan: replay of submission 1, after 0 draws and dispatches: "
+        want = {
+            "cpu_texture": "CopyTextureToBuffer over a texture with no image (NVN format 0x25, 64x32)",
+            "overlap": "a buffer copy of 0x100 bytes from ",
+            "unaligned_fill": "a buffer fill of 0x20 bytes at ",
+            "bad_stride": "CopyBufferToTexture with a copy row stride of 6 bytes over 8 blocks of 4 bytes",
+            "masked_clear": "ClearTexture with channel mask 0x3: a masked clear needs a draw",
+            "outside": "CopyTextureToBuffer over the region 60,0,0 8x8x1 outside level 0 of a 64x32 texture",
+            "mirrored": "CopyTextureToTexture with copy flags 0x4: a mirrored copy is not replayed yet",
+        }
+        for what, text in want.items():
+            with self.subTest(stop=what):
+                line = self.stopping("xstop", what)
+                self.assertTrue(line.startswith(prefix + text), line)
 
 
 class ComputeTest(ReplayBase):
@@ -280,8 +367,9 @@ class ComputeTest(ReplayBase):
         self.assertNotIn("BeginRendering", " ".join(f))
         c0 = writes(f, 1)
         self.assertEqual(len(c0), 2)
-        for x, groups in zip(c0, ((4, 2, 1), (5, 6, 7))):
-            self.assertEqual([word(x, o) for o in (4, 8, 12)], list(groups), x)
+        # a direct dispatch's counts are in its bank; an indirect one's are the GPU's, copied in just before it runs
+        for x, groups in zip(c0, ((4, 2, 1), (0, 0, 0))):
+            self.assertEqual([word(x, o) for o in (4, 8, 12)], [g or None for g in groups], x)
             self.assertEqual((word(x, 0x230), word(x, 0x238)), (0x30007000, 0x80), x)   # uniform row 2
             self.assertEqual((word(x, 0x320), word(x, 0x328)), (0x40000300, 0x20), x)   # storage row 1
         roots = writes(f, 3)
@@ -289,6 +377,24 @@ class ComputeTest(ReplayBase):
         self.assertEqual((word(roots[0], 0x208), word(roots[0], 0x20c)), (0x11, 0x22))
         self.assertEqual(writes(f, 4), ["SB buf=0xb3 off=0x300 range=0x20"] * 2)
         self.assertNotIn("op wrote", out)   # the module only reads it
+
+
+    def test_an_indirect_dispatch_has_its_counts_copied_by_the_gpu_into_a_bank_of_its_own(self) -> None:
+        f = frame(self.passing("indirect"), 1)
+        barrier = "PipelineBarrier2 full=1"
+        copies = [i for i, p in enumerate(f) if p.startswith("CopyBuffer")]
+        self.assertEqual(len(copies), 3)
+        banks = [x for x in writes(f, 1)]
+        self.assertEqual(len(banks), 4)   # three indirect dispatches and one direct
+        for i, buf, ind in zip(copies, ("0xb3", "0xb2", "0xb3"), (1280, 1536, 1280)):
+            self.assertEqual((f[i - 1], f[i + 1]), (barrier, barrier))
+            self.assertRegex(f[i], rf"^CopyBuffer {buf}->0x5c {ind}->\d+ size=12$")
+            self.assertEqual(f[i + 2], f"DispatchIndirect {buf} {ind}")
+        # each copy lands at byte 4 of the bank its dispatch binds, and no two dispatches share a bank
+        dst = [int(re.search(r"->(\d+) ", f[i]).group(1)) - 4 for i in copies]
+        bank_offsets = [int(re.search(r" off=(0x[0-9a-f]+) ", x).group(1), 16) for x in banks]
+        self.assertEqual([bank_offsets[0], bank_offsets[1], bank_offsets[3]], dst)
+        self.assertEqual(len(set(bank_offsets)), 4)
 
 
 class OpListTest(ReplayBase):

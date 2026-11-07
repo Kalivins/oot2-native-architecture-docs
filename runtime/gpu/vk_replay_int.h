@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 The oot2-native contributors
+//
+// What the replay's walk (vk_replay.c) gives its transfers (vk_replay_xfer.c): the frame being replayed, the named stop,
+// the frame's scratch memory, the pass and barrier rules, and the declaration of a GPU write. Private to runtime/gpu.
+#pragma once
+#include <stdint.h>
+
+#include "oot2/vk_replay.h"
+
+typedef unsigned long long ull;
+
+// The ops and the value of the frame being replayed.
+const VkReplayOps *vkr_frame_ops(void);
+uint64_t vkr_frame_value(void);
+
+// A named fatal that says which submission and draw it stopped after.
+__attribute__((noreturn, format(printf, 1, 2))) void vkr_stop(const char *fmt, ...);
+
+// `bytes` of the frame's scratch memory (a named fatal when there is none): the pointer, and what binds it.
+void *vkr_scratch(uint32_t bytes, uint32_t align, VkBuffer *buffer, VkDeviceSize *offset);
+
+// A transfer's opening: the render pass ends and a full memory barrier separates it from what came before (D18).
+void vkr_xfer_begin(void);
+// A transfer's close: the next op that reads memory without a barrier of its own (a dispatch) opens with one.
+void vkr_xfer_end(void);
+
+// The frame's GPU write over [addr, addr + size): the uniform ranges copied at submit that it touches are dropped (D17a), a
+// write the frame declared already is not declared again, and a new one is declared to the backing map (backing_gpu_wrote)
+// and listed (vkr_writes). `image` 1 for a storage image's storage; `draw` the number of the draw or dispatch that
+// writes it, 0 for a copy, fill or update.
+void vkr_wrote(uint64_t addr, uint64_t size, int image, uint32_t draw);
+// 1 when the frame has declared a GPU write over any byte of [addr, addr + size).
+int vkr_written(uint64_t addr, uint64_t size);
+
+// A transfer of `bytes` bytes, for the statistics.
+void vkr_count_transfer(uint64_t bytes);
+
+// One op of the transfers, or 0 when it is not one of them. `r` is the record.
+int vkr_xfer_op(const op_hdr *r);
+// Forget the copy strides (vkr_reset).
+void vkr_xfer_reset(void);

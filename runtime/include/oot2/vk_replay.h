@@ -31,8 +31,11 @@
 //                the sampler ID in bits 20 to 31
 //   snapshot     a uniform range in host memory the GPU reads live (an import) is copied into the frame's scratch at
 //                submit, and the draw binds the copy (D17a); a mirror is already a copy taken at submit (oot2/backing.h),
-//                and VRAM is the GPU's. A GPU write of the same submission over a copied range, in either order, is a
-//                named stop until the copies ticket brings the drop rule
+//                and VRAM is the GPU's. The drop rule: a GPU write of the same submission over a copied range (an update
+//                of a uniform buffer, a buffer copy or fill, a texture copied to a buffer, a storage store) drops the
+//                copy, and every read of the range after the write binds the live memory, which the GPU wrote in order;
+//                the reads before it keep their copy. A range written whole or in part is read live from then on
+//                (DKB Recomp's vk_usnap_drop does the same).
 //   modes        nvn_depth_mode NEAR_IS_MINUS_W sets depth clip control's -1 to 1 range (dynamic state); ZERO_TO_ONE
 //                Vulkan's own. nvn_window_origin_mode LOWER_LEFT flips Y through the viewport (a negative height from the
 //                viewport's top), the translator's convention (window origin upper left, Y flipped by the viewport)
@@ -40,6 +43,16 @@
 // Passes (D18). Rendering begins lazily at the first draw or clear after a render target change, with every image in
 // the general layout, loading and storing; a render target change or a barrier ends the pass, and a full memory barrier
 // separates passes. A barrier inside a pass ends it.
+//
+// Transfers (vk_replay_xfer.c). Buffer and texture copies, buffer fills, texture clears and uniform updates are one
+// transfer command each, after the end of the open pass and a full memory barrier; the next dispatch or transfer opens
+// with a barrier too. A copy's two sides are resolved through the backing map in the frame's submission, a write into
+// memory the CPU can see is declared (backing_gpu_wrote: a mirror writes it back to guest memory once the frame is done,
+// an import is the guest's own memory), and the row and image strides of the buffer side are the channel's
+// (OP_COPY_STRIDE and OP_COPY_IMAGE_STRIDE, 0 meaning tightly packed). A texture is its image in the general layout
+// (oot2/vk_image.h), so a copy needs one: a texture over memory the CPU can see (the texture arena) or in a format the
+// device lacks is a named stop. A dispatch's indirect group counts are copied by the GPU into the driver bank c[0] just
+// before the dispatch: they may be the output of earlier work of the frame, or of an earlier frame still in flight.
 //
 // Named stops. Every op of nvn_obj.h's list is replayed or stops by name (a named fatal, rt_fatal: the replay has no
 // guest CPU to stop): vkr_op_ticket names the ticket a stopped op waits for, and the stop's message names the op and
@@ -62,7 +75,7 @@ struct nvn_stage;
 // ---- the op list: replayed, or the ticket a stopped op waits for
 #define VKR_REPLAYED NULL
 // NULL for an op this replay makes packets of (or ignores by contract, as OP_HINT), else the name of what it waits for
-// ("copies (ticket 64)", ...). Past OP_COUNT_: "unknown".
+// ("reports, events and conditional rendering (ticket 68)", ...). Past OP_COUNT_: "unknown".
 const char *vkr_op_ticket(uint32_t op);
 
 // ---- what the replay needs of a device (the device's, or a test's stand-ins: continuous integration checks the
@@ -73,6 +86,16 @@ typedef struct VkrTarget {
     uint32_t width, height, layers;
     VkImageAspectFlags aspect;   // colour, or depth and stencil as the format has them
 } VkrTarget;
+
+// A texture's image for a copy or a clear: the image the texture's storage stands on, in the general layout.
+typedef struct VkrImage {
+    VkImage image;
+    VkFormat format;
+    VkImageType type;
+    VkImageAspectFlags aspect;       // the one a copy takes (depth for a depth-stencil format, unless the texture reads stencil)
+    VkImageAspectFlags all_aspects;  // every aspect of the format (a clear takes them all)
+    uint32_t width, height, depth, layers, levels, samples;   // level 0; layers: a cube's six faces and an array's layers
+} VkrImage;
 
 typedef struct VkReplayOps {
     // The pipeline builder (vkp_graphics, vkp_compute) and the layouts the replay binds against.
@@ -87,6 +110,9 @@ typedef struct VkReplayOps {
     // A render target or storage image: the texture as the record holds it, for the frame `value`; 0 when no image
     // stands on its storage (a named stop follows). The view lives until the frame is done.
     int (*target)(const nvn_tex_rec *t, int storage, uint64_t value, VkrTarget *out);
+    // The image a texture's storage stands on, for a copy or a clear in the frame `value`: 0 when none does (a named
+    // stop follows).
+    int (*image)(const nvn_tex_rec *t, uint64_t value, VkrImage *out);
     // The bindless tables for the frame (vkb_acquire, recorded into the frame's prologue) and the slot of a texture ID
     // seen as a view type (vkb_image_slot); UINT32_MAX for none.
     VkDescriptorSet (*acquire)(uint64_t value, const dpool_ref *textures, const dpool_ref *samplers);
@@ -118,12 +144,16 @@ void vkr_reset(void);
 extern int vkr_no_snapshot;
 // Tests only: while non-zero, the window origin's Y flip is not applied (the counter-run of the origin mode).
 extern int vkr_no_flip;
+// Tests only: while non-zero, a GPU write drops no uniform copy (the counter-run of the drop rule).
+extern int vkr_no_drop;
+// Tests only: while non-zero, a GPU write is declared to no one: not to the backing map (the counter-run of the write-back).
+extern int vkr_no_declare;
 
-// ---- what the last frames wrote: the storage and image ranges a draw or dispatch may write (the copies ticket's
-// write-back reads them), for the frame `value`; *n how many. Kept for the frames in flight.
+// ---- what the last frames wrote: the storage and image ranges a draw or dispatch may write, and the ranges a copy, a
+// fill or an update wrote, for the frame `value`; *n how many. Kept for the frames in flight.
 typedef struct VkrWrite {
     uint64_t addr, size;
-    uint32_t draw;     // the draw or dispatch's number in its frame, from 1
+    uint32_t draw;     // the draw or dispatch's number in its frame, from 1; 0 for a copy, a fill or an update
     uint8_t image;     // 1 for a storage image's storage, 0 for a storage buffer
 } VkrWrite;
 const VkrWrite *vkr_writes(uint64_t value, uint32_t *n);
@@ -131,6 +161,8 @@ const VkrWrite *vkr_writes(uint64_t value, uint32_t *n);
 typedef struct VkrStats {
     uint64_t frames, records, draws, dispatches, clears, passes, barriers;
     uint64_t snapshots, snapshot_bytes;             // uniform ranges copied at submit (D17a)
+    uint64_t snapshot_drops;                        // copies a GPU write of the same submission dropped
+    uint64_t transfers, transfer_bytes;             // copies, fills, updates and texture clears, and the bytes they move
     uint64_t live_uniforms;                         // uniform ranges bound live (a mirror or VRAM)
     uint64_t storage_writes;                        // storage ranges declared written
     uint64_t unregistered_textures;                 // slots whose texture ID had no entry (the placeholder is read)
