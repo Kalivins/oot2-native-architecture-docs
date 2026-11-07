@@ -426,8 +426,8 @@ static void host_present(uint64_t w, uint64_t i) {
 
 static uint64_t g_pace_seq[1024], g_pace_due[1024];
 static int g_npace;
-static void seam_pace(uint64_t seq, uint64_t due) {
-    CHECK(g_npace < 1024);
+static void seam_pace(uint64_t seq, uint64_t due, uint64_t count) {
+    CHECK(g_npace < 1024 && count == ((due * 31250000ull + 59) / 60));   // the due count of that tick, by hand
     g_pace_seq[g_npace] = seq, g_pace_due[g_npace++] = due;
 }
 static void seam_present(const tex_t *t, const int crop[4]) {

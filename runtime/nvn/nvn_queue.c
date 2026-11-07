@@ -226,7 +226,7 @@ static void sync_return(Cpu *c, uint32_t result, int traced, uint64_t began) {
 
 // NVNsyncWaitResult nvnSyncWait(const NVNsync *s, uint64_t timeout_ns): ALREADY_SIGNALED when the sync is done at the
 // call, CONDITION_SATISFIED when it is reached while waiting, TIMEOUT_EXPIRED otherwise. Done is the fence value (the
-// back end's fence_done) and, for a window's acquire sync, the tick (the virtual 60 Hz clock has reached `ready`). The
+// back end's fence_done) and, for a window's acquire sync, the count `ready` (the virtual clock has reached it). The
 // state is read at the call, for the answer at once, and again when the wait starts, which picks up the acquire that
 // fenced a sync not fenced yet; an acquire that fences the sync again once the wait is on (a game reuses one sync) does
 // not move it. The tick is waited for with the virtual core given up, no lock held; the timeout, from the call to the
@@ -240,9 +240,9 @@ NVN_API(nvnSyncWait) {
     int traced = nvn_trace_on();
     if (traced)
         nvn_trace("sync-enter", 0, "timeout %llu ready %llu fenced %u", (unsigned long long)timeout,
-                  (unsigned long long)ready, fenced);
+                  (unsigned long long)rt_sched_slot_of(ready, RT_VSYNC_HZ), fenced);   // the tick it falls in
     if (fenced) {
-        if (b->fence_done() >= fence && (!ready || rt_vsync_tick() >= ready)) {
+        if (b->fence_done() >= fence && (!ready || rt_vsync_counter() >= ready)) {
             b->cpu_synced(fence);
             sync_return(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, traced, began);
             return;
@@ -256,7 +256,7 @@ NVN_API(nvnSyncWait) {
     if (wait_fenced(s, timeout, start)) {
         sync_state(s, &fence, &ready);   // the pair of the acquire or queue that fenced it
         ok = 1;
-        if (ready) ok = rt_vsync_wait_tick_for(ready, left(timeout, start));
+        if (ready) ok = rt_vsync_wait_counter_for(ready, left(timeout, start));
         if (ok) ok = b->fence_wait(fence, left(timeout, start));
     }
     rt_kernel_block_end(token);

@@ -73,7 +73,8 @@ typedef enum RtSettingSource {
 //            OOT2_VSYNC_P99_US)
 //   type     BOOL takes 0 or 1; INT takes a decimal integer from min to max; ENUM takes one of names, '|'-separated,
 //            and its value is the name's index (min and max unused)
-//   default  a value of the key's type (for ENUM, an index into names)
+//   default  a value of the key's type (for ENUM, an index into names); an INT default outside min..max is an off value
+//            that the key takes as well (frame_rate_target: 0, or 20 to 120)
 //   what     one line for the menu and the listing
 // A key whose consumer a later ticket builds is added by that ticket, with its consumer; research/103-settings-store.md
 // lists the keys tickets in flight are to register.
@@ -86,6 +87,8 @@ typedef enum RtSettingSource {
       "where AcquireTexture's pacing hold is: sync, in the sync the call returns, as on the console; acquire, in the call") \
     X(timer_resolution, PACING, BOOL, RESTART, 1, 0, 1, NULL,                                                          \
       "hold a 0.5 ms system timer resolution while the game runs; 0 leaves the system's")                              \
+    X(frame_rate_target, PACING, INT, LIVE, 0, 20, 120, NULL,                                                          \
+      "fixed frame rate: pace presents on their own schedule at this many a second, whatever interval the game asks for; 0 is off") \
     X(page_release, DEBUG, ENUM, RESTART, 0, 0, 0, "off|count|release",                                                \
       "page ranges of lever L1: off, counted only, or counted and released")                                          \
     X(census, DEBUG, BOOL, RESTART, 0, 0, 1, NULL,                                                                     \
@@ -196,5 +199,6 @@ typedef void (*RtSettingHook)(const RtSettingChange *change, void *ctx);
 void rt_settings_hook(int id, RtSettingHook fn, void *ctx);   // at most 32 hooks; fatal past that
 
 // The modules that own live keys apply them through hooks bound at start-up, after rt_settings_load and before the game
-// runs; each applies its keys' values once as it binds. runtime/nvn/nvn_settings.c: hold_ticks and hold_placement.
+// runs; each applies its keys' values once as it binds. runtime/nvn/nvn_settings.c: hold_ticks, hold_placement and
+// frame_rate_target.
 void nvn_settings_bind(void);

@@ -25,6 +25,14 @@
 // on (oot2/capture.h), the present also marks the frame boundary and appends the frame's records to the capture's buffer
 // in memory; the capture measures what that costs.
 //
+// The fixed rate (ticket 111; research 94 F11). With the settings store's frame_rate_target N (20 to 120; 0, the default,
+// is off) the gate runs on a second schedule of N slots a second on the same origin (oot2/vsync.h, rt_sched_*): a present
+// takes the slot in progress, the next acquire is released at the slot after it, and the game's own interval is ignored
+// (the records keep it). The gate, the due instants and win_t.pace and target are counts of the system counter, so a
+// change of N, read at each acquire and present, moves the gate at once and compares on one scale; with no target every
+// count is the due count of a tick of the 60 Hz clock and the gate is ticket 88's, tick for tick. The vsync events stay on
+// the clock thread's 60 Hz ticks whatever N is.
+//
 // Adapted from oot-pc-recomp runtime/nvn_api_obj.c at 8e09aaa (GPL-3.0-or-later), as DKB Recomp carries it at 9d8fa02,
 // which ports MacNativeGames games/totk/third_party/d2r_gfx/gfx/nvn/hle_nvn.c at b75be8cf (MIT, Copyright (c) 2026
 // jhaizhou; licenses/dkb-xlate-MIT.txt): the builder and its defaults (the device kept, interval 1), the textures and
@@ -109,6 +117,19 @@ static void hold_log(void) {
     g_hold_log = 0;
     plat_mutex_unlock(&g_pace_lock);
     if (h) rt_log("nvn: experiment E2: every present is held for %d ticks, whatever the game asks for", h);
+}
+
+// The target rate N (the store's frame_rate_target; 0: none), read at every acquire and present with no lock held (the
+// store's first read may exit), so a change applies from the next one. hz_of is the schedule the gate runs on: the target's,
+// or the clock's own 60 when there is none.
+static int64_t fixed_rate(void) { return rt_setting(RT_SET_frame_rate_target); }
+static uint32_t hz_of(int64_t rate) { return rate ? (uint32_t)rate : RT_VSYNC_HZ; }
+
+// The gate count `periods` slots after the slot that the instant `due` falls in, on the schedule of hz slots a second:
+// computed from the slot's index, never as due plus a period, so the grid is the schedule's own (research 55 D2) and an
+// hour never drifts.
+static uint64_t gate_of(uint64_t due, uint32_t hz, uint64_t periods) {
+    return rt_sched_due_counter(rt_sched_slot_of(due, hz) + periods, hz);
 }
 
 void nvn_acquire_wait(int mode) {
@@ -257,13 +278,24 @@ NVN_API(nvnWindowAcquireTexture) {
     sync_t *s = arg_p(c, 1) ? nvn_sync_arg(c, 1, "WindowAcquireTexture") : NULL;
     uint64_t entered = nvn_trace_on() ? plat_now_ns() : 0;
     int mode = placement();
+    int64_t rate = fixed_rate();
+    uint32_t hz = hz_of(rate);
     plat_mutex_lock(&g_pace_lock);
     int interval = w->interval, hold = hold_locked(), presented = w->presents != 0;
-    uint64_t due = w->pace;
-    // With the hold on, a game that asks for interval 0 is held too: effective = max(interval, hold).
-    if (hold > interval) interval = hold;
-    // The gate tick; 0: no wait (the first acquire, interval 0 or less).
-    uint64_t target = presented && interval > 0 ? due + (uint64_t)interval : 0;
+    uint64_t due = w->pace, periods;
+    if (rate) {
+        // A target's period replaces the game's interval: one slot of its schedule, whatever the game asked for (the
+        // records keep that). The E2 hold, in ticks of the 60 Hz clock, is a floor of it, rounded up to whole slots so the
+        // gate stays on the schedule and is never shorter than the hold.
+        periods = ((uint64_t)hold * hz + RT_VSYNC_HZ - 1) / RT_VSYNC_HZ;
+        if (periods < 1) periods = 1;
+    } else {
+        // With the hold on, a game that asks for interval 0 is held too: effective = max(interval, hold).
+        if (hold > interval) interval = hold;
+        periods = interval > 0 ? (uint64_t)interval : 0;
+    }
+    // The gate count; 0: no wait (the first acquire, interval 0 or less with no target).
+    uint64_t target = presented && periods ? gate_of(due, hz, periods) : 0;
     // The present of this acquire may not be due before it, where the game presents before it waits on the sync. Only
     // the default placement has a sync to wait on, and a game that passes none is not held at all.
     w->target = mode == NVN_ACQUIRE_WAIT_SYNC && s ? target : 0;
@@ -271,9 +303,9 @@ NVN_API(nvnWindowAcquireTexture) {
     hold_log();
     if (entered) nvn_trace("acq-enter", 1, "interval %d hold %d placement %d", w->interval, hold, mode);
     if (mode == NVN_ACQUIRE_WAIT_ACQUIRE) {
-        if (target && rt_vsync_tick() < target) {
+        if (target && rt_vsync_counter() < target) {
             int token = rt_kernel_block_begin();
-            rt_vsync_wait_tick(target);
+            rt_vsync_wait_counter(target);
             rt_kernel_block_end(token);
         }
         if (s) nvn_sync_fence(s, 2, w->fence[i]);
@@ -281,7 +313,8 @@ NVN_API(nvnWindowAcquireTexture) {
         nvn_sync_acquire(s, w->fence[i], target);
     }
     if (entered)
-        nvn_trace("acq-return", 0, "gate %llu waited_ns %llu", (unsigned long long)target,
+        nvn_trace("acq-return", 0, "gate %llu waited_ns %llu",
+                  (unsigned long long)(target ? rt_sched_slot_of(target, RT_VSYNC_HZ) : 0),   // as a tick, like the rest
                   (unsigned long long)(plat_now_ns() - entered));
     ret_x(c, NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS);
 }
@@ -295,32 +328,36 @@ NVN_API(nvnQueuePresentTexture) {
                          w->ntex);
     int crop[4];
     crop_of(w, crop);
-    uint64_t tick = rt_vsync_tick();
+    int64_t rate = fixed_rate();
+    uint32_t hz = hz_of(rate);
+    // When the slot in progress began: the due count of the tick (or of the target's slot) that the clock is in
+    uint64_t start = rt_sched_due_counter(rt_sched_slot(hz), hz);
     int mode = placement();
     plat_mutex_lock(&g_pace_lock);
-    // The tick in progress, or under the default placement the gate tick of the acquire since the last present when the
+    // The slot in progress, or under the default placement the gate count of the acquire since the last present when the
     // clock has not reached it (a present before the wait on the sync). Under the old placement the clock is always at
-    // the gate tick, and a target left by an acquire made before a live flip to it is not taken: its due is the tick in
-    // progress, as the placement promises. And never before the previous due, which is a tick the clock already reached
-    // or an earlier gate tick: the guard only keeps a due tick from going back.
-    uint64_t due = mode == NVN_ACQUIRE_WAIT_SYNC && w->target > tick ? w->target : tick, seq = ++g_count;
+    // the gate, and a target left by an acquire made before a live flip to it is not taken: its due is the slot in
+    // progress, as the placement promises. And never before the previous due, which is a count the clock already reached
+    // or an earlier gate: the guard only keeps a due count from going back.
+    uint64_t due = mode == NVN_ACQUIRE_WAIT_SYNC && w->target > start ? w->target : start, seq = ++g_count;
     if (w->presents && w->pace > due) due = w->pace;
+    uint64_t due_tick = rt_sched_slot_of(due, RT_VSYNC_HZ);   // the tick of the 60 Hz clock that instant falls in
     w->target = 0;
     w->pace = due;
     w->presents++;
     w->ticket[i] = w->presents;
-    g_ring[seq % NVN_PRESENT_RING] = (NvnPresentRecord){.seq = seq, .due = due, .requested = w->interval,
-                                                         .held = hold_locked(), .texture = i,
-                                                         .placement = mode};
+    g_ring[seq % NVN_PRESENT_RING] = (NvnPresentRecord){.seq = seq, .due = due_tick, .due_count = due,
+                                                         .requested = w->interval, .held = hold_locked(), .texture = i,
+                                                         .placement = mode, .target = (int32_t)rate};
     int hold = hold_locked();
     plat_mutex_unlock(&g_pace_lock);
     hold_log();
     if (nvn_trace_on())
         nvn_trace("present", 1, "seq %llu due %llu interval %d hold %d placement %d", (unsigned long long)seq,
-                  (unsigned long long)due, w->interval, hold, mode);
+                  (unsigned long long)due_tick, w->interval, hold, mode);
     w->fence[i] = __atomic_load_n(&q->last, __ATOMIC_ACQUIRE);
     const GfxBackend *b = gfx_backend();
-    if (b->present_pace) b->present_pace(seq, due);
+    if (b->present_pace) b->present_pace(seq, due_tick, due);
     b->present((const tex_t *)w->tex[i], crop);
     capture_present(seq);   // before the census, whose frame limit may end the run here
     nvn_census_present(seq);

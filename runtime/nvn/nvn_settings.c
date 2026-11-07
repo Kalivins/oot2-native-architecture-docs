@@ -7,6 +7,7 @@
 // a program that never binds the store, such as ticket 88's tests: once bound, the call wins over that reading, and the
 // store, which reads the same variable, holds the value. hold_placement (ticket 95) is read by nvn_window.c from the
 // store at every acquire and present, so its hook only says when it changed; nvn_acquire_wait overrides it.
+// frame_rate_target (ticket 111) is read the same way, and its hook only says when it changed.
 #include "oot2/nvn_pace.h"
 #include "oot2/runtime.h"
 #include "oot2/settings.h"
@@ -40,10 +41,23 @@ static void apply_placement(const RtSettingChange *c, void *ctx) {
     log_placement(c->value, c->from);
 }
 
+static void log_rate(int64_t rate, const char *from) {
+    if (rate) rt_log("nvn: fixed frame rate: presents are paced at %lld a second on a schedule of their own, whatever "
+                     "interval the game asks for (frame_rate_target = %lld, %s)", (long long)rate, (long long)rate, from);
+    else rt_log("nvn: no fixed frame rate: the game's own interval on the 60 Hz clock (frame_rate_target = 0, %s)", from);
+}
+
+static void apply_rate(const RtSettingChange *c, void *ctx) {
+    (void)ctx;
+    if (c->pending) return;   // a live key is never pending
+    log_rate(c->value, c->from);
+}
+
 void nvn_settings_bind(void) {
     // the hooks first, so no change falls between a read and its hook
     rt_settings_hook(RT_SET_hold_ticks, apply_hold, NULL);
     rt_settings_hook(RT_SET_hold_placement, apply_placement, NULL);
+    rt_settings_hook(RT_SET_frame_rate_target, apply_rate, NULL);
     const char *from;
     rt_setting_source(RT_SET_hold_ticks, &from);
     int64_t hold = rt_setting(RT_SET_hold_ticks);
@@ -52,4 +66,7 @@ void nvn_settings_bind(void) {
     int64_t placement = rt_setting(RT_SET_hold_placement);
     rt_setting_source(RT_SET_hold_placement, &from);
     if (placement) log_placement(placement, from);
+    int64_t rate = rt_setting(RT_SET_frame_rate_target);
+    rt_setting_source(RT_SET_frame_rate_target, &from);
+    if (rate) log_rate(rate, from);
 }

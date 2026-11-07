@@ -27,21 +27,41 @@ uint64_t rt_vsync_due_ns(uint64_t n);
 // The current tick: the n whose due time has come and whose successor's has not (0 before tick 1 is due).
 uint64_t rt_vsync_tick(void);
 
+// Other schedules on the same origin (ticket 111; architecture D22's fixed frame rate). A schedule of `hz` slots a second
+// has its slot m due when the system counter reaches ceil(m * 31,250,000 / hz), from the origin and m alone, never by
+// adding a rounded period, so an hour is exactly 3600 * hz slots whatever hz is. At RT_VSYNC_HZ its slots are the
+// clock's ticks, and at a divisor of it (30, 20) slot m is tick m * 60 / hz exactly. Nothing here moves the clock
+// thread, whose events stay on the 60 Hz ticks. hz is 1 or more (0 is a fatal).
+uint64_t rt_sched_due_counter(uint64_t m, uint32_t hz);
+// floor(counter * hz / 31,250,000): the slot of the schedule that the system-counter value `counter` falls in, whose due
+// count is at or before it and whose successor's is after it.
+uint64_t rt_sched_slot_of(uint64_t counter, uint32_t hz);
+// The system counter now, in counts from the origin (the clock's own time: the driver's when driven), and the host time
+// (rt_vsync_now_ns's clock) at which it reads `count`.
+uint64_t rt_vsync_counter(void);
+uint64_t rt_vsync_counter_ns(uint64_t count);
+// The slot of the schedule in progress now: rt_sched_slot_of(rt_vsync_counter(), hz); at RT_VSYNC_HZ the current tick.
+uint64_t rt_sched_slot(uint32_t hz);
+
 // Block the calling host thread until the current tick is n or later (it returns at once when it already is). The wait is
 // on the clock alone, never on the clock thread or its events, and never early: undriven it sleeps until the due time
 // of tick n on the host's clock, driven it follows the driver's time (a test moves it). The caller gives its virtual
 // core up around the call when it is a guest thread (rt_kernel_block_begin); the NVN2 front end's SyncWait on a window's
 // acquire sync (runtime/nvn/nvn_queue.c) and, under the old placement, its AcquireTexture (runtime/nvn/nvn_window.c) are
-// the callers.
+// the callers. rt_vsync_wait_counter is the same wait on a due count instead of a tick, which is what a slot of any
+// other schedule is: the thread sleeps until that instant (one timed sleep, no spin, no thread of its own), so a fixed
+// frame rate adds no waiter that burns a processor.
 void rt_vsync_wait_tick(uint64_t n);
+void rt_vsync_wait_counter(uint64_t count);
 
 // The clock's own time in nanoseconds: the driver's when the clock is driven, plat_now_ns otherwise. A timeout that
 // belongs with a tick is measured on this clock.
 uint64_t rt_vsync_now_ns(void);
 // rt_vsync_wait_tick with a timeout (relative, on rt_vsync_now_ns's clock; UINT64_MAX: none): 1 when the current tick
 // is n or later, 0 when the timeout ran out first. A timeout of 0 never waits. The NVN2 front end's SyncWait waits on a
-// window's acquire sync this way (runtime/nvn/nvn_queue.c).
+// window's acquire sync this way (runtime/nvn/nvn_queue.c). rt_vsync_wait_counter_for waits for a due count.
 int rt_vsync_wait_tick_for(uint64_t n, uint64_t timeout_ns);
+int rt_vsync_wait_counter_for(uint64_t count, uint64_t timeout_ns);
 
 // Signal the event whose writable end this is at every tick from the next one (rt_kernel_event_create, or a system
 // event the service layer bound). The same event bound twice is signalled once per tick. At most 8 events.

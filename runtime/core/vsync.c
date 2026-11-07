@@ -34,20 +34,34 @@ static int driven(void) { return __atomic_load_n(&g_driven, __ATOMIC_ACQUIRE); }
 static uint64_t origin_ns(void) { return driven() ? g_drv.origin_ns : counter_origin_ns(); }
 static uint64_t now_ns(void) { return driven() ? g_drv.now(g_drv.ctx) : plat_now_ns(); }
 
-// ceil(n * COUNTER_HZ / RT_VSYNC_HZ): from the origin and n alone, never a sum of rounded periods
-uint64_t rt_vsync_due_counter(uint64_t n) {
-    return (uint64_t)(((unsigned __int128)n * COUNTER_HZ + RT_VSYNC_HZ - 1) / RT_VSYNC_HZ);
+// ceil(m * COUNTER_HZ / hz): from the origin and m alone, never a sum of rounded periods. The clock's ticks are the
+// schedule at RT_VSYNC_HZ; a schedule at 30 or 20 has its slot m at tick 2m or 3m exactly, since m * COUNTER_HZ / 30 and
+// 2m * COUNTER_HZ / 60 are the same rational and round the same way.
+uint64_t rt_sched_due_counter(uint64_t m, uint32_t hz) {
+    if (!hz) rt_fatal("rt_sched_due_counter: a schedule of 0 Hz");
+    return (uint64_t)(((unsigned __int128)m * COUNTER_HZ + hz - 1) / hz);
 }
 
-uint64_t rt_vsync_due_ns(uint64_t n) { return origin_ns() + rt_vsync_due_counter(n) * COUNTER_NS; }
+// floor(counter * hz / COUNTER_HZ) is the m with due_counter(m) <= counter < due_counter(m + 1)
+uint64_t rt_sched_slot_of(uint64_t counter, uint32_t hz) {
+    if (!hz) rt_fatal("rt_sched_slot_of: a schedule of 0 Hz");
+    return (uint64_t)((unsigned __int128)counter * hz / COUNTER_HZ);
+}
 
-// floor(counter * RT_VSYNC_HZ / COUNTER_HZ) is the n with due_counter(n) <= counter < due_counter(n + 1)
-uint64_t rt_vsync_tick(void) {
+uint64_t rt_vsync_due_counter(uint64_t n) { return rt_sched_due_counter(n, RT_VSYNC_HZ); }
+
+uint64_t rt_vsync_counter_ns(uint64_t count) { return origin_ns() + count * COUNTER_NS; }
+
+uint64_t rt_vsync_due_ns(uint64_t n) { return rt_vsync_counter_ns(rt_vsync_due_counter(n)); }
+
+uint64_t rt_vsync_counter(void) {
     uint64_t now = now_ns(), origin = origin_ns();
-    if (now < origin) return 0;
-    uint64_t counter = (now - origin) / COUNTER_NS;
-    return (uint64_t)((unsigned __int128)counter * RT_VSYNC_HZ / COUNTER_HZ);
+    return now < origin ? 0 : (now - origin) / COUNTER_NS;
 }
+
+uint64_t rt_sched_slot(uint32_t hz) { return rt_sched_slot_of(rt_vsync_counter(), hz); }
+
+uint64_t rt_vsync_tick(void) { return rt_sched_slot(RT_VSYNC_HZ); }
 
 // The host's wait: absolute deadline, never early (plat_sleep_ns is late by up to PLAT_SLEEP_LATE_NS, never early, and
 // the loop covers a wake-up that comes back sooner anyway).
@@ -60,38 +74,41 @@ static void wait_until(uint64_t due) {
     else host_wait_until(due);
 }
 
-// Driven, the time moves only when the test moves it: poll rt_vsync_tick(), yielding for the first stretch and then
-// sleeping, so a lockstep driver finds the waiter quickly and an idle one costs no processor.
-void rt_vsync_wait_tick(uint64_t n) {
+// Driven, the time moves only when the test moves it: poll rt_vsync_counter(), yielding for the first stretch and then
+// sleeping, so a lockstep driver finds the waiter quickly and an idle one costs no processor. Undriven, one timed sleep
+// to the instant, on the calling thread: a tick and a slot of any other schedule are the same wait, a due count.
+void rt_vsync_wait_counter(uint64_t count) {
     if (!driven()) {
-        while (rt_vsync_tick() < n) host_wait_until(rt_vsync_due_ns(n));
+        while (rt_vsync_counter() < count) host_wait_until(rt_vsync_counter_ns(count));
         return;
     }
     uint64_t start = plat_now_ns();
-    while (rt_vsync_tick() < n) {
+    while (rt_vsync_counter() < count) {
         if (plat_now_ns() - start < 50000000ull) plat_yield();
         else plat_sleep_ns(1000000ull);
     }
 }
 
+void rt_vsync_wait_tick(uint64_t n) { rt_vsync_wait_counter(rt_vsync_due_counter(n)); }
+
 uint64_t rt_vsync_now_ns(void) { return now_ns(); }
 
 // With a timeout the wait is measured on the clock the tick is (now_ns: the driver's when driven), so a test's time and
-// the deadline agree; undriven, the sleep is cut at the deadline and never runs past the due time of tick n.
-int rt_vsync_wait_tick_for(uint64_t n, uint64_t timeout_ns) {
-    if (rt_vsync_tick() >= n) return 1;
+// the deadline agree; undriven, the sleep is cut at the deadline and never runs past the due time of the count.
+int rt_vsync_wait_counter_for(uint64_t count, uint64_t timeout_ns) {
+    if (rt_vsync_counter() >= count) return 1;
     if (timeout_ns == UINT64_MAX) {
-        rt_vsync_wait_tick(n);
+        rt_vsync_wait_counter(count);
         return 1;
     }
     uint64_t deadline = now_ns() + timeout_ns;
     if (deadline < timeout_ns) deadline = UINT64_MAX;   // saturate
     uint64_t start = plat_now_ns();
-    while (rt_vsync_tick() < n) {
+    while (rt_vsync_counter() < count) {
         uint64_t now = now_ns();
         if (now >= deadline) return 0;
         if (!driven()) {
-            uint64_t due = rt_vsync_due_ns(n);
+            uint64_t due = rt_vsync_counter_ns(count);
             host_wait_until(due < deadline ? due : deadline);
         } else if (plat_now_ns() - start < 50000000ull) {
             plat_yield();
@@ -100,6 +117,10 @@ int rt_vsync_wait_tick_for(uint64_t n, uint64_t timeout_ns) {
         }
     }
     return 1;
+}
+
+int rt_vsync_wait_tick_for(uint64_t n, uint64_t timeout_ns) {
+    return rt_vsync_wait_counter_for(rt_vsync_due_counter(n), timeout_ns);
 }
 
 static void clock_main(void *arg) {

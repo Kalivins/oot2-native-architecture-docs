@@ -129,19 +129,22 @@ _Static_assert(sizeof(prog_t) <= 0xa0, "NVN2 program allocation stride");
 
 // A sync (runtime/nvn/nvn_queue.c): fenced 0 until a queue (1) or a window's acquire (2) gives it fence value `fence`,
 // done once the back end's fence_done reaches it. A window's acquire (default placement, oot2/nvn_pace.h) also gives it
-// `ready`, a tick of the virtual 60 Hz clock: the sync is done once the clock has reached it as well (0: no tick)
+// `ready`, a count of the system counter from the virtual clock's origin (oot2/vsync.h): the sync is done once the clock
+// has reached it as well (0: none). It is the due count of a tick of the 60 Hz clock, or of a slot of the fixed rate's
+// schedule when the game runs at one (ticket 111)
 typedef struct { uint32_t magic, fenced; uint64_t fence, ready; } sync_t;                            FITS(sync_t, NVNsync);
 typedef struct { const pool_t *pool; int64_t off; } ev_builder_t;                             FITS(ev_builder_t, NVNeventBuilder);
 typedef struct { uint32_t magic; volatile uint32_t *val; } ev_t;                              FITS(ev_t, NVNevent);
 
 typedef struct { NVNdevice *dev; void *native; int32_t ntex, interval, active; NVNtexture *tex[4]; } win_builder_t;
 FITS(win_builder_t, NVNwindowBuilder);
-// pace: the due tick of the window's last present (the virtual 60 Hz clock's tick, oot2/nvn_pace.h; read once presents is
-// not 0); avail[i] is the donors' pacing time and stays unused: the acquire gate counts ticks
+// pace: the due count of the window's last present, in system-counter counts from the virtual clock's origin (the due
+// count of a 60 Hz tick, or of a slot of the fixed rate's schedule; oot2/nvn_pace.h; read once presents is not 0);
+// avail[i] is the donors' pacing time and stays unused: the acquire gate counts ticks or slots
 // fence[i]: the fence value the queue had reached when texture i was last presented (0: never), what its acquire sync
 // waits for (runtime/nvn/nvn_window.c)
-// target: the tick the newest acquire since the last present made its sync ready at (0: none), where the present's due
-// tick may not be earlier (oot2/nvn_pace.h); written and read under the pace lock
+// target: the count the newest acquire since the last present made its sync ready at (0: none), where the present's due
+// count may not be earlier (oot2/nvn_pace.h); written and read under the pace lock
 typedef struct { uint32_t magic; void *native; int32_t ntex, interval, next, active, crop[4]; NVNtexture *tex[4]; uint64_t presents, avail[4], pace, ticket[4], fence[4], target; } win_t;   // ticket[i]: ticket of the most recent present of image i
 FITS(win_t, NVNwindow);
 

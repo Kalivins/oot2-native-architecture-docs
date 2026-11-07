@@ -22,6 +22,20 @@
 // game presents on. The old placement, NVN_ACQUIRE_WAIT_ACQUIRE, blocks inside the acquire until the gate tick (the
 // guest thread's virtual core given up) and signals the sync at once; there the present's due tick is the tick in
 // progress, as before. Both placements use the same gate tick, so the E2 hold below works under both.
+//
+// A fixed frame rate (ticket 111, research 94 F11). The settings store's key frame_rate_target N (0, the default: off;
+// 20 to 120; live, read at every acquire and present) gives the gate a second schedule of N slots a second on the same
+// origin as the clock's ticks (oot2/vsync.h, rt_sched_*): slot m is due at the system-counter count ceil(m * 31,250,000 /
+// N), computed from m, never as a sum of periods. A present takes the slot in progress (its due count is when that slot
+// began, or the gate count of its acquire if that is later), the next acquire is released at the slot after the one the
+// due instant falls in, and the game's interval is ignored while a target is set: the target's period replaces it, and the
+// record keeps what the game asked for (requested) beside the target (target). The E2 hold, in ticks of the 60 Hz clock,
+// floors the period in whole slots, rounded up, so the gate stays on the schedule and is never shorter than the hold. The
+// gate counts, win_t.pace and target, and the sync's ready are system-counter counts, not ticks, so a change of N moves
+// the gate to the new schedule at once: the slot is taken from the due count by the rate in force at the acquire. With no
+// target the count of a tick is its due count and everything above holds tick for tick. At 30 and 20 the schedule is every
+// second and third tick, and at 60 it is the ticks themselves. The game's vsync events stay on the clock thread's 60 Hz
+// ticks whatever N is; the wait on a count is one timed sleep on the waiting thread, never a thread of its own.
 #pragma once
 #include <stdint.h>
 
@@ -31,11 +45,14 @@
 typedef struct NvnPresentRecord {
     uint64_t seq;        // 1 for the first present of the process, across windows
     uint64_t due;        // the tick the present took (under the default placement it can be a tick still to come: see above)
+    uint64_t due_count;  // the same instant exactly, in system-counter counts from the clock's origin (oot2/vsync.h)
     uint64_t shown;      // the tick the back end says it was shown at; 0 when unknown (the null back end, not yet)
     int32_t requested;   // the window's present interval at the call
     int32_t held;        // the hold in effect at the call
     int32_t texture;     // the window texture index presented
     int32_t placement;   // NvnAcquireWait in effect at the call
+    int32_t target;      // frame_rate_target in force at the call (0: none)
+    int32_t pad;         // zero; the setting-events record is to take it
 } NvnPresentRecord;
 
 #define NVN_PRESENT_RING 512   // records kept: the newest this many presents

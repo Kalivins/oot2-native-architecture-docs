@@ -156,7 +156,8 @@ static int parse_value(const RtSettingRow *r, const char *s, size_t n, int64_t *
         v = v * 10 + d;
     }
     int64_t x = i ? -(int64_t)v : (int64_t)v;
-    if (x < r->min || x > r->max) return 0;
+    // A default outside min..max is the key's off value and is taken as well (frame_rate_target: 0, or 20 to 120).
+    if ((x < r->min || x > r->max) && x != r->def) return 0;
     *out = x;
     return 1;
 }
@@ -166,7 +167,10 @@ static const char *takes(const RtSettingRow *r, char *out, size_t size) {
     if (r->type == RT_SETTING_BOOL) {
         snprintf(out, size, "0 or 1");
     } else if (r->type == RT_SETTING_INT) {
-        snprintf(out, size, "an integer from %lld to %lld", (long long)r->min, (long long)r->max);
+        if (r->def < r->min || r->def > r->max)   // a default outside the range is an off value, taken as well
+            snprintf(out, size, "an integer from %lld to %lld, or %lld", (long long)r->min, (long long)r->max,
+                     (long long)r->def);
+        else snprintf(out, size, "an integer from %lld to %lld", (long long)r->min, (long long)r->max);
     } else {
         size_t k = 0;
         int64_t i = 0;

@@ -51,6 +51,8 @@ TOOL_VARIABLES = {"OOT2_CC", "OOT2_NINJA", "OOT2_CONFIG", "OOT2_VSYNC_P99_US"}
 # The variables the runtime read before the store, each now a key's environment name (ticket 103).
 OLD_VARIABLES = {"OOT2_GFX": "gfx", "OOT2_HOLD_TICKS": "hold_ticks", "OOT2_PAGE_RELEASE": "page_release",
                  "OOT2_CENSUS": "census", "OOT2_CENSUS_FRAMES": "census_frames"}
+# Keys whose default is an off value below their range (frame_rate_target: 0, or 20 to 120; ticket 111).
+OFF_VALUE_KEYS = {"frame_rate_target"}
 
 
 def clean_env(**extra: str) -> dict[str, str]:
@@ -147,8 +149,11 @@ class SettingsTest(unittest.TestCase):
             self.assertIn(group, GROUPS)
             self.assertIn(apply, {"live", "restart", "prepare"})
             self.assertIn(kind, {"bool", "int", "enum"})
-            self.assertLessEqual(int(low), int(default))
-            self.assertLessEqual(int(default), int(high))
+            if key in OFF_VALUE_KEYS:   # the default is an off value outside the range (ticket 111)
+                self.assertGreater(int(low), int(default))
+            else:
+                self.assertLessEqual(int(low), int(default))
+                self.assertLessEqual(int(default), int(high))
             if kind == "enum":
                 self.assertEqual(int(high), len(names.split("|")) - 1)
             if kind == "bool":
@@ -232,6 +237,19 @@ class SettingsTest(unittest.TestCase):
                 self.assertEqual(done.stderr, line)
         for done in self.refused("lazy", OOT2_PAGE_RELEASE="yes"):
             self.assertEqual(done.stderr, "oot2: OOT2_PAGE_RELEASE=yes: page_release takes off, count or release\n")
+
+    def test_the_target_rate_takes_0_or_20_to_120_and_nothing_between(self) -> None:
+        # ticket 111: the key's default, 0, is its off value and lies outside 20..120, so it is taken as well
+        for value in ("0", "20", "40", "100", "120"):
+            for done in self.passes("show", "--set", f"frame_rate_target={value}"):
+                self.assertEqual(keys_of(done.stdout)["frame_rate_target"], (value, "command line", "--set"))
+        for value in ("1", "19", "121", "-1", "60.5", "off"):
+            for done in self.refused("show", "--set", f"frame_rate_target={value}"):
+                self.assertEqual(done.stderr, f"oot2: --set frame_rate_target={value}: frame_rate_target takes an "
+                                              f"integer from 20 to 120, or 0\n")
+        for done in self.refused("lazy", OOT2_FRAME_RATE_TARGET="19"):
+            self.assertEqual(done.stderr, "oot2: OOT2_FRAME_RATE_TARGET=19: frame_rate_target takes an integer from "
+                                          "20 to 120, or 0\n")
 
     def test_an_unknown_key_or_a_word_without_a_value_on_the_command_line_exits_2(self) -> None:
         for done in self.refused("show", "--set", "nosuch=1"):
