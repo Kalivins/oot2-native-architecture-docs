@@ -457,6 +457,9 @@ VALIDATION = re.compile(r"^validation errors (\d+) warnings (\d+)$", re.M)
 STATS = re.compile(r"^replay frames (\d+) records (\d+) draws (\d+) dispatches (\d+) clears (\d+) passes (\d+) barriers (\d+)$", re.M)
 SNAPS = re.compile(r"^replay snapshots (\d+) snapshot_bytes (\d+) live_uniforms (\d+) storage_writes (\d+) "
                    r"unregistered_textures (\d+) scratch_bytes (\d+)$", re.M)
+LOSS = re.compile(r"^replay draw_ops (\d+) render_off (\d+) skipped (\d+) lost (\d+)$", re.M)
+MISS = re.compile(r"^miss graphics (\d+) compute (\d+) drains (\d+) drained_submissions (\d+) skipped_draws (\d+) "
+                  r"late_builds (\d+)$", re.M)
 
 
 def program() -> Path:
@@ -754,6 +757,38 @@ class T23Test(DeviceTestCase):
 
     def test_lights_scenario_matches_the_reference(self) -> None:
         self.check_matches(self.case(self.t23, "lights"), indexed=True)
+
+
+class MissTest(DeviceTestCase):
+    """The first draw of a pair nobody built (ticket 64): the replay's miss path drains, builds and resumes."""
+
+    def numbers(self, got: Replay) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        loss, miss = LOSS.search(got.done.stdout), MISS.search(got.done.stdout)
+        self.assertTrue(loss and miss, got.report())
+        return tuple(map(int, loss.groups())), tuple(map(int, miss.groups()))
+
+    def test_a_draw_whose_pipeline_nobody_built_misses_once_and_matches_the_reference(self) -> None:
+        case = self.case(self.s2, "base")
+        exp = reference_image(case)
+        folder = Path(WORK) / "t63" / case.name
+        for validation in VALIDATIONS:
+            got = self.replay(case, validation=validation, flags=("--cold",))
+            self.assertEqual((got.errors, got.warnings), (0, 0), got.report())
+            (draw_ops, render_off, skipped, lost), (graphics, compute, drains, drained, skipped_draws, late) = self.numbers(got)
+            # one draw recorded, replayed, none skipped or lost; one graphics miss, one drain (the queue was idle), no skip
+            self.assertEqual((got.stats.get("draws"), draw_ops, render_off, skipped, lost), (1, 1, 0, 0, 0), got.report())
+            self.assertEqual((graphics, compute, drains, skipped_draws, late), (1, 0, 1, 0, 0), got.report())
+            rep = compare(case, exp, got, validation, folder)
+            print(f"\ncold {validation}: {summary(rep)}; misses {graphics}, drains {drains} ({drained} submissions)")
+            self.assertEqual(rep["mismatches"], 0, summary(rep))
+            self.assertGreater(rep["pixels"][ref.COLOR], 0, summary(rep))
+            self.assertTrue(rep["pass"], summary(rep))
+
+    def test_a_prebuilt_pipeline_is_no_miss_and_nothing_is_lost(self) -> None:
+        got = self.replay(self.case(self.s2, "base"), validation="on")
+        (draw_ops, render_off, skipped, lost), (graphics, compute, drains, drained, skipped_draws, late) = self.numbers(got)
+        self.assertEqual((draw_ops, render_off, skipped, lost), (1, 0, 0, 0), got.report())
+        self.assertEqual((graphics, compute, drains, drained, skipped_draws, late), (0, 0, 0, 0, 0, 0), got.report())
 
 
 class ViewportTest(DeviceTestCase):

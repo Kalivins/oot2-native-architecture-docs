@@ -179,7 +179,13 @@ void vkr_set_ops(const VkReplayOps *ops) { g_ops = ops; }
 
 static const VkReplayOps *ops_now(void) { return g_ops ? g_ops : vkr_device_ops(); }
 
-void vkr_stats(VkrStats *out) { *out = g_stats; }
+void vkr_stats(VkrStats *out) {
+    *out = g_stats;
+    // Every draw and dispatch record is replayed, skipped by name or not made because rendering was off: what is left is
+    // GPU work lost (research 119: Hookshot's dark characters and bare foliage were work lost at start), 0 by contract.
+    uint64_t accounted = g_stats.draws + g_stats.dispatches + g_stats.render_off + g_stats.skipped;
+    out->lost = g_stats.draw_ops > accounted ? g_stats.draw_ops - accounted : accounted - g_stats.draw_ops;
+}
 
 const VkrWrite *vkr_writes(uint64_t value, uint32_t *n) {
     for (int i = 0; i < FRAMES_KEPT; i++)
@@ -738,6 +744,55 @@ static void support(Set1 *s) {
 }
 
 // ---------- draws
+// The frame that last drew into or cleared each image that stood as a render target (the miss path may skip a draw only
+// where the targets hold an earlier frame's picture, oot2/vk_miss.h). A small table: a frame has a few dozen targets
+// (research 17: 127 target changes a Forest frame, over far fewer images); an image that falls out is taken to hold
+// nothing, which makes its draws wait, not skip.
+#define STAMPS 128
+static struct {
+    uint64_t image, frame;
+} T[STAMPS];
+static uint32_t T_next;
+
+static void stamp_image(uint64_t image) {
+    if (!image) return;
+    for (uint32_t i = 0; i < STAMPS; i++)
+        if (T[i].image == image) {
+            T[i].frame = F.value;
+            return;
+        }
+    T[T_next % STAMPS].image = image, T[T_next % STAMPS].frame = F.value;
+    T_next++;
+}
+
+static uint64_t stamp_of(uint64_t image) {
+    for (uint32_t i = 0; i < STAMPS; i++)
+        if (T[i].image == image) return T[i].frame;
+    return 0;
+}
+
+static void stamp_targets(void) {
+    for (uint32_t i = 0; i < F.ncolor; i++) stamp_image(F.color[i].image);
+    if (F.has_depth) stamp_image(F.depth.image);
+}
+
+// 1 when every target of the pass was drawn into or cleared by an earlier frame and not yet by this one.
+static int targets_hold_earlier_picture(void) {
+    int any = 0;
+    for (uint32_t i = 0; i < F.ncolor; i++) {
+        if (!F.color[i].image) continue;
+        uint64_t t = stamp_of(F.color[i].image);
+        if (!t || t >= F.value) return 0;
+        any = 1;
+    }
+    if (F.has_depth && F.depth.image) {
+        uint64_t t = stamp_of(F.depth.image);
+        if (!t || t >= F.value) return 0;
+        any = 1;
+    }
+    return any;
+}
+
 // The bound program's stage records and code addresses, kept beside the ledger's tracker (which keeps the records).
 static struct {
     const nvn_stage *id[ST_N];
@@ -760,6 +815,9 @@ static void bind_program(const p_bind_program *p) {
         }
     }
     vkrec_stages(P.id[ST_VS] ? P.id[ST_VS] : P.id[ST_MS], P.id[ST_FS], P.id[ST_TS]);
+    // The device counts the stage keys a live program holds, to know when a released program's pipelines may go.
+    // Every bind, not only a new serial: a program finalized since the last bind must take its keys back.
+    if (p->serial && F.ops->program_bound) F.ops->program_bound(p->serial, p->id, p->nstage < 6 ? p->nstage : 6);
 }
 
 typedef struct {
@@ -842,7 +900,11 @@ static void vertex_input(const ShaderBinds *vb) {
 
 // The pipeline, the state and the resources of a graphics draw; 0 when rendering is disabled.
 static int draw_prepare(int prim, uint32_t base_instance, VkBool32 *restart_out) {
-    if (!S.render) return 0;
+    g_stats.draw_ops++;
+    if (!S.render) {
+        g_stats.render_off++;
+        return 0;
+    }
     if (P.id[ST_TS] || P.id[ST_MS]) stop("a vertex draw with task or mesh stages bound (ticket 73)");
     const nvn_stage *vs = P.id[ST_VS], *fs = P.id[ST_FS];
     if (!vs) stop("a draw with no vertex stage bound");
@@ -856,7 +918,15 @@ static int draw_prepare(int prim, uint32_t base_instance, VkBool32 *restart_out)
     VkBool32 restart = (VkBool32)S.restart_en;
     *restart_out = restart;
     VkpStage vst = {vs->key, NULL, vs}, fst = {fs->key, NULL, fs};
-    bind_pipeline(0, F.ops->graphics(&vst, &fst, &F.formats));
+    // A pipeline that is not ready and may be skipped (oot2/vk_miss.h) answers NULL: nothing of the draw is written, so
+    // the state the frame keeps (the bound pipeline, the dynamic state, the buffers) is as the draw before left it.
+    VkPipeline pipe = F.ops->graphics(&vst, &fst, &F.formats, targets_hold_earlier_picture());
+    if (!pipe) {
+        g_stats.skipped++;
+        return 0;
+    }
+    bind_pipeline(0, pipe);
+    stamp_targets();
     bind_set0(0);
     dyn_emit(topo, restart);
     vertex_input(vb);
@@ -919,7 +989,11 @@ static void op_draw_idx_ind(const p_draw_idx_ind *d) {
 // submission still in flight (a mirror holds the CPU's view, which is behind). So the GPU copies them from the indirect
 // buffer into the bank, which the dispatch has to itself, right before it runs.
 static void dispatch(const uint32_t groups[3], uint64_t ind) {
-    if (!S.render) return;
+    g_stats.draw_ops++;
+    if (!S.render) {
+        g_stats.render_off++;
+        return;
+    }
     const nvn_stage *cs = P.id[ST_CS];
     if (!cs) stop("a dispatch with no compute stage bound");
     const ShaderBinds *b = binds_of(cs, SHD_CS);
@@ -988,6 +1062,7 @@ static void op_clear_color(const p_clear_color *c) {
     memcpy(a.clearValue.color.float32, c->rgba, sizeof c->rgba);
     VkClearRect r = {clear_rect(), 0, F.pass_layers};
     if (r.rect.extent.width && r.rect.extent.height) vkrec_ClearAttachments(1, &a, 1, &r);
+    stamp_image(F.color[c->index].image);
     g_stats.clears++;
 }
 
@@ -1005,6 +1080,7 @@ static void op_clear_ds(const p_clear_ds *c) {
     if (!a.aspectMask) return;
     VkClearRect r = {clear_rect(), 0, F.pass_layers};
     if (r.rect.extent.width && r.rect.extent.height) vkrec_ClearAttachments(1, &a, 1, &r);
+    stamp_image(F.depth.image);
     g_stats.clears++;
 }
 

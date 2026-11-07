@@ -136,9 +136,15 @@ static void make_stages(void) {
 }
 
 // ---------- the stand-in ops
-static VkPipeline op_graphics(const VkpStage *vs, const VkpStage *ps, const VkpFormats *f) {
+static int g_skip_next;   // the next graphics get answers NULL, a draw to skip (the miss path's answer)
+static VkPipeline op_graphics(const VkpStage *vs, const VkpStage *ps, const VkpFormats *f, int may_skip) {
+    (void)may_skip;
     lput(&g_ops, "op graphics %s %s colors=%u c0=%d depth=%d stencil=%d\n", vs->key, ps->key, f->ncolor,
          f->ncolor ? (int)f->color[0] : 0, (int)f->depth, (int)f->stencil);
+    if (g_skip_next) {
+        g_skip_next = 0;
+        return VK_NULL_HANDLE;
+    }
     return (VkPipeline)(uintptr_t)0x9A;
 }
 static VkPipeline op_compute(const VkpStage *cs) {
@@ -174,10 +180,11 @@ static int op_target(const nvn_tex_rec *t, int storage, uint64_t value, VkrTarge
     if (storage) return 0;
     if (t->tex.d.format == NVN_FORMAT_DEPTH24_STENCIL8)
         *out = (VkrTarget){(VkImageView)(uintptr_t)0x7D00, VK_FORMAT_D24_UNORM_S8_UINT, t->tex.d.width,
-                           t->tex.d.height, 1, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT};
+                           t->tex.d.height, 1, VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT, 0x7D00};
     else
         *out = (VkrTarget){(VkImageView)(uintptr_t)(0x7100 + (uint32_t)t->tex.d.format), VK_FORMAT_R8G8B8A8_UNORM,
-                           t->tex.d.width, t->tex.d.height, 1, VK_IMAGE_ASPECT_COLOR_BIT};
+                           t->tex.d.width, t->tex.d.height, 1, VK_IMAGE_ASPECT_COLOR_BIT,
+                           0x7100 + (uint32_t)t->tex.d.format};
     return 1;
 }
 // A texture's image: the handle names the texture's serial; storage in host memory has none (the texture arena's).
@@ -650,6 +657,28 @@ static void case_graphics(void) {
     printf("ok graphics\n");
 }
 
+// A draw whose pipeline the miss path skipped (the op answers NULL) writes nothing at all: no bind, no state, no draw.
+// The draw after it is complete (it carries every bind a first draw needs), and the recorded-against-replayed count
+// accounts for both.
+static void case_skip(int silent) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    graphics_state(r);
+    g_skip_next = 1;
+    PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .first = 0, .count = 3, .instances = 1});
+    PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .first = 3, .count = 3, .instances = 1});
+    if (silent) PUT(r, OP_RENDER_ENABLE, (p_flag){.value = 0});   // a draw the game turned rendering off for
+    if (silent) PUT(r, OP_DRAW, (p_draw){.prim = NVN_DRAW_PRIMITIVE_TRIANGLES, .first = 6, .count = 3, .instances = 1});
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    VkrStats st;
+    vkr_stats(&st);
+    printf("stats draw_ops %llu draws %llu skipped %llu render_off %llu lost %llu\n", (ull)st.draw_ops, (ull)st.draws,
+           (ull)st.skipped, (ull)st.render_off, (ull)st.lost);
+    close_fakes();
+    printf("ok %s\n", silent ? "skip_render_off" : "skip");
+}
+
 static void case_depth(void) {
     open_fakes();
     Rec *r = rec_begin(0);
@@ -883,6 +912,8 @@ int main(int argc, char **argv) {
     }
     const char *cs = argv[1];
     if (!strcmp(cs, "graphics")) case_graphics();
+    else if (!strcmp(cs, "skip")) case_skip(0);
+    else if (!strcmp(cs, "skip_render_off")) case_skip(1);
     else if (!strcmp(cs, "depth")) case_depth();
     else if (!strcmp(cs, "compute")) case_compute();
     else if (!strcmp(cs, "conflict_read_first")) case_conflict(0);

@@ -24,6 +24,7 @@
 #include "oot2/gpu_vk.h"
 #include "oot2/runtime.h"
 #include "oot2/vk_bindless.h"
+#include "oot2/vk_miss.h"
 #include "oot2/vk_rec.h"
 #include "oot2/vk_replay.h"
 #include "plat.h"
@@ -444,6 +445,7 @@ void gpu_vk_close(void) {
         vkrec_close();   // the frames handed over, submitted (nothing when the replay never opened the recorder)
         gpu_sync_finish();
         vkr_device_close();
+        vkm_close();   // the builds still running, the releases that were waiting, the summary of the misses
         vkb_close();
         backing_close();
         gpu_vk_stop_timeline();

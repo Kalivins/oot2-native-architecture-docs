@@ -130,7 +130,7 @@ uint64_t gpu_sync_begin(void) {
     s->next = NULL;
     s->value = value;
     s->n = 0;
-    g_open = s;
+    __atomic_store_n(&g_open, s, __ATOMIC_RELEASE);
     return value;
 }
 
@@ -150,7 +150,7 @@ void gpu_sync_effect(GpuEffect fn, void *arg) {
 void gpu_sync_end(void) {
     Sub *s = g_open;
     if (!s) rt_fatal("gpu: the end of a submission that was not begun");
-    g_open = NULL;
+    __atomic_store_n(&g_open, NULL, __ATOMIC_RELEASE);
     plat_mutex_lock(&g_lock);
     *g_tail = s;
     g_tail = &s->next;
@@ -184,6 +184,14 @@ uint64_t gpu_sync_done(void) { return __atomic_load_n(&g_done, __ATOMIC_ACQUIRE)
 uint64_t gpu_sync_handed(void) { return __atomic_load_n(&g_handed, __ATOMIC_ACQUIRE); }
 
 uint64_t gpu_sync_issued(void) { return __atomic_load_n(&g_issued, __ATOMIC_ACQUIRE); }
+
+// The open submission's value. The record is read once and its value is final from gpu_sync_begin on; a submission that
+// ends while it is read leaves the record on the free list, where its value is stale, so the answer is only used
+// together with gpu_sync_handed: it names the open submission when it equals the newest value handed out.
+uint64_t gpu_sync_open(void) {
+    const Sub *s = __atomic_load_n(&g_open, __ATOMIC_ACQUIRE);
+    return s ? __atomic_load_n(&s->value, __ATOMIC_RELAXED) : 0;
+}
 
 void gpu_sync_finish(void) {
     plat_mutex_lock(&g_lock);

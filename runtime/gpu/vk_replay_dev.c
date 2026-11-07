@@ -21,6 +21,7 @@
 #include "oot2/vk_bindless.h"
 #include "oot2/vk_format.h"
 #include "oot2/vk_image.h"
+#include "oot2/vk_miss.h"
 #include "oot2/vk_pipeline.h"
 #include "oot2/vk_rec.h"
 #include "oot2/vk_replay.h"
@@ -94,7 +95,7 @@ static int dev_target(const nvn_tex_rec *t, int storage, uint64_t value, VkrTarg
     GPU_VK_OK(vkCreateImageView(gpu_vk.device, &vi, NULL, &view), "vkCreateImageView (a render target)");
     vkrec_effect(view_gone, (void *)(uintptr_t)view);
     uint32_t w = t->tex.d.width >> level, h = t->tex.d.height >> level;
-    *out = (VkrTarget){view, row->vk, w ? w : 1, h ? h : 1, layers, aspect};
+    *out = (VkrTarget){view, row->vk, w ? w : 1, h ? h : 1, layers, aspect, (uint64_t)(uintptr_t)vkb_image_handle(img)};
     return 1;
 }
 
@@ -194,7 +195,10 @@ static void *dev_scratch(uint64_t value, uint32_t bytes, uint32_t align, VkBuffe
 }
 
 // ---------- around a frame
-static void dev_frame_begin(void) { backing_sync(); }
+static void dev_frame_begin(void) {
+    backing_sync();
+    vkm_retire();   // the pipelines of programs the game finalized, once the timeline has passed their last frame
+}
 
 static void dev_frame_end(uint64_t value) {
     vkb_image_flush(gpu_vk_prologue());   // the images made for the frame, to the general layout before its work
@@ -204,7 +208,8 @@ static void dev_frame_end(uint64_t value) {
 }
 
 const VkReplayOps *vkr_device_ops(void) {
-    static VkReplayOps ops = {.graphics = vkp_graphics, .compute = vkp_compute, .binds = dev_binds,
+    static VkReplayOps ops = {.graphics = vkm_graphics, .compute = vkm_compute, .program_bound = vkm_program_bound,
+                              .binds = dev_binds,
                               .resolve = backing_resolve, .gpu_wrote = backing_gpu_wrote, .target = dev_target,
                               .image = dev_image,
                               .acquire = dev_acquire, .image_slot = dev_image_slot, .scratch = dev_scratch,

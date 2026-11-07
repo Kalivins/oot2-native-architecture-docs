@@ -288,6 +288,18 @@ class GraphicsTest(ReplayBase):
             check_snapshot(out)
         check_flip(out)
 
+    def test_a_draw_the_miss_path_skipped_writes_nothing_and_every_record_is_accounted_for(self) -> None:
+        out = self.passing("skip")
+        f = frame(out, 1)
+        draws = [p for p in f if p.startswith("Draw")]
+        self.assertEqual(draws, ["Draw 3 1 3 0"], draws)      # the second draw only
+        self.assertEqual(f.count("BindPipeline 0 0x9a"), 1)    # the first one bound nothing
+        self.assertIn("stats draw_ops 2 draws 1 skipped 1 render_off 0 lost 0", out)
+
+    def test_a_draw_with_rendering_off_is_counted_as_that_and_not_as_lost(self) -> None:
+        out = self.passing("skip_render_off")
+        self.assertIn("stats draw_ops 3 draws 1 skipped 1 render_off 1 lost 0", out)
+
     def test_depth_targets_and_clears(self) -> None:
         f = frame(self.passing("depth"), 1)
         self.assertEqual(f, [

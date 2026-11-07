@@ -188,12 +188,25 @@ static VkPipeline obj_get(const char *key, const char *ref0, const char *ref1, B
 
 // ---------- creation
 
-static void require_idle(const char *what, const char *key) {
-    uint64_t handed = gpu_sync_handed(), done = gpu_sync_done();
-    if (handed != done)
+// The queue is idle when every submission handed out before the one being replayed is done: the open submission holds
+// the gate and has put nothing on the queue yet (its commands are in the recorder's ring or in a command buffer that is
+// not submitted), so the miss path (vk_miss.c) can drain and then build in the middle of a frame. `late` is NULL for
+// an ordinary get; the miss path passes a flag it sets when it stopped waiting for this build, and from then on the
+// build runs beside work in flight, the one place the rule yields (oot2/vk_miss.h).
+// The open submission is left out only for a miss-path build (`late` not NULL): the miss path holds the gate, so nothing
+// submits while it builds. Any other caller keeps the strict rule: between vkQueueSubmit2 and the end of the submission
+// the open record still names a submission that is on the queue.
+static void require_idle(const char *what, const char *key, const int *late) {
+    if (late && __atomic_load_n(late, __ATOMIC_ACQUIRE)) return;
+    uint64_t handed = gpu_sync_handed(), open = gpu_sync_open(), done = gpu_sync_done();
+    uint64_t queued = late && open && open == handed ? handed - 1 : handed;
+    if (queued != done) {
+        // the replay may have stopped waiting for this build, and put the frame on the queue, since the flag was read
+        if (late && __atomic_load_n(late, __ATOMIC_ACQUIRE)) return;
         rt_fatal("gfx: vulkan: %s for stage %s with work in flight (submissions up to %llu handed out, %llu done): no "
                  "pipeline is created while a submission is in flight (architecture section 6.1)", what, key,
-                 (unsigned long long)handed, (unsigned long long)done);
+                 (unsigned long long)queued, (unsigned long long)done);
+    }
 }
 
 static void check_capabilities(const VkpStage *s, const VkpModule *m) {
@@ -329,11 +342,12 @@ typedef struct VertexCtx {
     const VkpModule *module;
     ShdPad pad[MAX_PADS];
     int npad;
+    const int *late;
 } VertexCtx;
 
 static VkPipeline build_vertex_library(void *c) {
     VertexCtx *x = c;
-    require_idle("a pre-rasterization library would be created", x->stage->key);
+    require_idle("a pre-rasterization library would be created", x->stage->key, x->late);
     check_capabilities(x->stage, x->module);
     const uint32_t *code = x->module->code;
     size_t words = x->module->bytes / 4;
@@ -364,11 +378,12 @@ static VkPipeline build_vertex_library(void *c) {
 typedef struct FragmentCtx {
     const VkpStage *stage;
     const VkpModule *module;
+    const int *late;
 } FragmentCtx;
 
 static VkPipeline build_fragment_library(void *c) {
     FragmentCtx *x = c;
-    require_idle("a fragment library would be created", x->stage->key);
+    require_idle("a fragment library would be created", x->stage->key, x->late);
     check_capabilities(x->stage, x->module);
     VkShaderModule m = make_module(x->module->code, x->module->bytes / 4);
     PipeInfo pi;
@@ -378,10 +393,16 @@ static VkPipeline build_fragment_library(void *c) {
     return p;
 }
 
+typedef struct OutputCtx {
+    const VkpFormats *formats;
+    const int *late;
+} OutputCtx;
+
 static VkPipeline build_output_library(void *c) {
-    require_idle("an output library would be created", "(attachment formats)");
+    const OutputCtx *x = c;
+    require_idle("an output library would be created", "(attachment formats)", x->late);
     PipeInfo pi;
-    pipe_info(&pi, PART_OUTPUT, VK_NULL_HANDLE, c);
+    pipe_info(&pi, PART_OUTPUT, VK_NULL_HANDLE, x->formats);
     return create_graphics(pi.gp, K_LIBRARY, 0, "vkCreateGraphicsPipelines (fragment output library)");
 }
 
@@ -396,15 +417,45 @@ static void formats_text(const VkpFormats *f, char *out, size_t cap) {
 typedef struct LinkCtx {
     const VkpStage *vs, *ps;
     const VkpFormats *formats;
+    const int *late;
     char vkey[KEY_MAX], pkey[KEY_MAX], okey[KEY_MAX];
 } LinkCtx;
+
+static int obj_ready(const char *key) {
+    uint32_t h = hash_key(key);
+    plat_mutex_lock(&P.lock);
+    Obj *o = find_locked(h, key);
+    int ready = o && o->ready;
+    plat_mutex_unlock(&P.lock);
+    return ready;
+}
+
+// One library made on a helper thread beside the caller's own (the miss path's workers: the vertex and the fragment
+// library of a pipeline do not depend on each other, and the driver compiles on the calling thread).
+typedef struct LibJob {
+    const char *key, *ref;
+    BuildFn fn;
+    void *ctx;
+    int done;   // under P.lock
+} LibJob;
+
+#define HELPER_STACK (8ull << 20)
+
+static void lib_job_main(void *arg) {
+    LibJob *j = arg;
+    obj_get(j->key, j->ref, NULL, j->fn, j->ctx);
+    plat_mutex_lock(&P.lock);
+    j->done = 1;   // j is not touched after the unlock
+    plat_cond_broadcast(&P.cond);
+    plat_mutex_unlock(&P.lock);
+}
 
 static VkPipeline build_link(void *c) {
     LinkCtx *x = c;
     VkpModule vm, pm;
     vkp_module(x->vs, SHD_VS, &vm);
     vkp_module(x->ps, SHD_PS, &pm);
-    VertexCtx vx = {.stage = x->vs, .module = &vm};
+    VertexCtx vx = {.stage = x->vs, .module = &vm, .late = x->late};
     char pads[MAX_PADS * 16 + 8], why[256], dg[24], shape[256];
     if (!vkp_unpad) {
         vx.npad = shd_pad_set(&vm.desc, &pm.desc, vx.pad, MAX_PADS, why, sizeof why);
@@ -416,17 +467,28 @@ static VkPipeline build_link(void *c) {
     shd_pad_text(vx.pad, vx.npad, pads, sizeof pads);
     digest_text(x->vs, dg, sizeof dg);
     snprintf(x->vkey, sizeof x->vkey, "v|%s%s|%s", x->vs->key, dg, pads);
-    VkPipeline pre = obj_get(x->vkey, x->vs->key, NULL, build_vertex_library, &vx);
     digest_text(x->ps, dg, sizeof dg);
     snprintf(x->pkey, sizeof x->pkey, "f|%s%s", x->ps->key, dg);
-    FragmentCtx fx = {.stage = x->ps, .module = &pm};
-    VkPipeline frag = obj_get(x->pkey, x->ps->key, NULL, build_fragment_library, &fx);
+    FragmentCtx fx = {.stage = x->ps, .module = &pm, .late = x->late};
     char ft[96];
     formats_text(x->formats, ft, sizeof ft);
     snprintf(x->okey, sizeof x->okey, "o|%s", ft);
-    VkPipeline out = obj_get(x->okey, NULL, NULL, build_output_library, (void *)x->formats);
+    OutputCtx ox = {.formats = x->formats, .late = x->late};
+    // The vertex and the fragment library build side by side when neither exists: the fragment one on a helper thread.
+    LibJob fj = {x->pkey, x->ps->key, build_fragment_library, &fx, 0};
+    PlatThread *helper = NULL;
+    if (!obj_ready(x->vkey) && !obj_ready(x->pkey)) helper = plat_thread_start(lib_job_main, &fj, HELPER_STACK);
+    VkPipeline pre = obj_get(x->vkey, x->vs->key, NULL, build_vertex_library, &vx);
+    VkPipeline out = obj_get(x->okey, NULL, NULL, build_output_library, &ox);
+    if (helper) {
+        plat_mutex_lock(&P.lock);
+        while (!fj.done) plat_cond_wait(&P.cond, &P.lock);
+        plat_mutex_unlock(&P.lock);
+        plat_thread_free(helper);
+    }
+    VkPipeline frag = obj_get(x->pkey, x->ps->key, NULL, build_fragment_library, &fx);
 
-    require_idle("a pipeline would be linked", x->vs->key);
+    require_idle("a pipeline would be linked", x->vs->key, x->late);
     VkPipeline libs[4] = {P.vi, pre, frag, out};
     VkPipelineLibraryCreateInfoKHR li = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR, .libraryCount = 4,
                                          .pLibraries = libs};
@@ -435,29 +497,51 @@ static VkPipeline build_link(void *c) {
     return create_graphics(gp, K_LINK, 0, "vkCreateGraphicsPipelines (fast link)");
 }
 
-VkPipeline vkp_graphics(const VkpStage *vs, const VkpStage *ps, const VkpFormats *formats) {
-    if (!P.open) rt_fatal("gfx: vulkan: vkp_graphics before vkp_open");
-    if (formats->ncolor > VKP_MAX_COLOR) rt_fatal("gfx: vulkan: a pipeline with %u colour attachments", formats->ncolor);
-    LinkCtx x = {.vs = vs, .ps = ps, .formats = formats};
-    char vd[24], pd[24], ft[96], key[KEY_MAX];
+void vkp_graphics_key(const VkpStage *vs, const VkpStage *ps, const VkpFormats *formats, char *out, size_t cap) {
+    char vd[24], pd[24], ft[96];
     digest_text(vs, vd, sizeof vd);
     digest_text(ps, pd, sizeof pd);
     formats_text(formats, ft, sizeof ft);
-    snprintf(key, sizeof key, "g|%s%s|%s%s|%s", vs->key, vd, ps->key, pd, ft);
+    snprintf(out, cap, "g|%s%s|%s%s|%s", vs->key, vd, ps->key, pd, ft);
+}
+
+VkPipeline vkp_graphics_ex(const VkpStage *vs, const VkpStage *ps, const VkpFormats *formats, const int *late) {
+    if (!P.open) rt_fatal("gfx: vulkan: vkp_graphics before vkp_open");
+    if (formats->ncolor > VKP_MAX_COLOR) rt_fatal("gfx: vulkan: a pipeline with %u colour attachments", formats->ncolor);
+    LinkCtx x = {.vs = vs, .ps = ps, .formats = formats, .late = late};
+    char key[KEY_MAX];
+    vkp_graphics_key(vs, ps, formats, key, sizeof key);
     return obj_get(key, vs->key, ps->key, build_link, &x);
+}
+
+VkPipeline vkp_graphics(const VkpStage *vs, const VkpStage *ps, const VkpFormats *formats) {
+    return vkp_graphics_ex(vs, ps, formats, NULL);
+}
+
+VkPipeline vkp_find_graphics(const VkpStage *vs, const VkpStage *ps, const VkpFormats *formats) {
+    if (!P.open) return VK_NULL_HANDLE;
+    char key[KEY_MAX];
+    vkp_graphics_key(vs, ps, formats, key, sizeof key);
+    uint32_t h = hash_key(key);
+    plat_mutex_lock(&P.lock);
+    Obj *o = find_locked(h, key);
+    VkPipeline p = o && o->ready ? o->pipe : VK_NULL_HANDLE;
+    plat_mutex_unlock(&P.lock);
+    return p;
 }
 
 // ---------- compute pipelines
 
 typedef struct ComputeCtx {
     const VkpStage *stage;
+    const int *late;
 } ComputeCtx;
 
 static VkPipeline build_compute(void *c) {
     const VkpStage *s = ((ComputeCtx *)c)->stage;
     VkpModule m;
     vkp_module(s, SHD_CS, &m);
-    require_idle("a compute pipeline would be created", s->key);
+    require_idle("a compute pipeline would be created", s->key, ((ComputeCtx *)c)->late);
     check_capabilities(s, &m);
     VkShaderModule sm = make_module(m.code, m.bytes / 4);
     VkPipelineCreationFeedback fb = {0}, stage_fb = {0};
@@ -479,13 +563,32 @@ static VkPipeline build_compute(void *c) {
     return p;
 }
 
-VkPipeline vkp_compute(const VkpStage *cs) {
-    if (!P.open) rt_fatal("gfx: vulkan: vkp_compute before vkp_open");
-    ComputeCtx x = {.stage = cs};
-    char dg[24], key[KEY_MAX];
+static void compute_key(const VkpStage *cs, char *out, size_t cap) {
+    char dg[24];
     digest_text(cs, dg, sizeof dg);
-    snprintf(key, sizeof key, "c|%s%s", cs->key, dg);
+    snprintf(out, cap, "c|%s%s", cs->key, dg);
+}
+
+VkPipeline vkp_compute_ex(const VkpStage *cs, const int *late) {
+    if (!P.open) rt_fatal("gfx: vulkan: vkp_compute before vkp_open");
+    ComputeCtx x = {.stage = cs, .late = late};
+    char key[KEY_MAX];
+    compute_key(cs, key, sizeof key);
     return obj_get(key, cs->key, NULL, build_compute, &x);
+}
+
+VkPipeline vkp_compute(const VkpStage *cs) { return vkp_compute_ex(cs, NULL); }
+
+VkPipeline vkp_find_compute(const VkpStage *cs) {
+    if (!P.open) return VK_NULL_HANDLE;
+    char key[KEY_MAX];
+    compute_key(cs, key, sizeof key);
+    uint32_t h = hash_key(key);
+    plat_mutex_lock(&P.lock);
+    Obj *o = find_locked(h, key);
+    VkPipeline p = o && o->ready ? o->pipe : VK_NULL_HANDLE;
+    plat_mutex_unlock(&P.lock);
+    return p;
 }
 
 // ---------- warming (prepare's pipeline step, tools/pipebuild)

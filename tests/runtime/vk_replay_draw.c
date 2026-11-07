@@ -6,7 +6,10 @@
 //
 //   vk_replay_draw probe
 //   vk_replay_draw draw DRAW OUT --pack PACK [--depth-out FILE] [--depth-mode near_is_minus_w|near_is_zero]
-//                  [--origin lower_left|upper_left] [--imports] [--no-snapshot] [--no-flip] [--rewrite-uniform]
+//                  [--origin lower_left|upper_left] [--imports] [--no-snapshot] [--no-flip] [--rewrite-uniform] [--cold]
+//
+// --cold leaves the pair's pipeline unbuilt, so that the first draw is a miss: the replay's miss path (oot2/vk_miss.h)
+// drains, builds and resumes, and the image must be the one a prebuilt pipeline gives.
 //
 // `probe` opens the Vulkan device and closes it again: "ok probe", or the named fatal of a machine that has none.
 //
@@ -59,6 +62,7 @@
 #include "oot2/memory.h"
 #include "oot2/nvn_program.h"
 #include "oot2/runtime.h"
+#include "oot2/vk_miss.h"
 #include "oot2/vk_pipeline.h"
 #include "oot2/vk_rec.h"
 #include "oot2/vk_replay.h"
@@ -144,7 +148,7 @@ typedef struct {
 typedef struct {
     const char *draw, *out, *pack, *depth_out;
     int depth_mode, origin;   // NVNdepthMode, NVNwindowOriginMode
-    int imports, no_snapshot, no_flip, rewrite;
+    int imports, no_snapshot, no_flip, rewrite, cold;
 } Opts;
 
 static void usage(const char *why) {
@@ -548,6 +552,13 @@ static void print_stats(void) {
     printf("replay snapshots %llu snapshot_bytes %llu live_uniforms %llu storage_writes %llu unregistered_textures %llu "
            "scratch_bytes %llu\n", (ull)s.snapshots, (ull)s.snapshot_bytes, (ull)s.live_uniforms, (ull)s.storage_writes,
            (ull)s.unregistered_textures, (ull)s.scratch_bytes);
+    printf("replay draw_ops %llu render_off %llu skipped %llu lost %llu\n", (ull)s.draw_ops, (ull)s.render_off,
+           (ull)s.skipped, (ull)s.lost);
+    VkmStats m;
+    vkm_stats(&m);
+    printf("miss graphics %llu compute %llu drains %llu drained_submissions %llu skipped_draws %llu late_builds %llu\n",
+           (ull)m.graphics_misses, (ull)m.compute_misses, (ull)m.drains, (ull)m.drained_submissions,
+           (ull)m.skipped_draws, (ull)m.late_builds);
 }
 
 static void run_draw(const Opts *o) {
@@ -610,7 +621,8 @@ static void run_draw(const Opts *o) {
     VkpFormats formats = {1, {VK_FORMAT_R32G32B32A32_SFLOAT}, d.depth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED,
                           VK_FORMAT_UNDEFINED};
     VkpStage vs = {.key = ids[0]->key, .shape = ids[0]}, ps = {.key = ids[1]->key, .shape = ids[1]};
-    CHECK(vkp_graphics(&vs, &ps, &formats) != VK_NULL_HANDLE);
+    if (!o->cold) CHECK(vkp_graphics(&vs, &ps, &formats) != VK_NULL_HANDLE);
+    else CHECK(vkp_find_graphics(&vs, &ps, &formats) == VK_NULL_HANDLE);   // a miss, by construction
 
     // the buffers
     Buf vbuf[4], ibuf = {0}, ubo[MAX_UBO], sbo[MAX_SBO];
@@ -768,6 +780,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--no-snapshot")) o.no_snapshot = 1;
         else if (!strcmp(argv[i], "--no-flip")) o.no_flip = 1;
         else if (!strcmp(argv[i], "--rewrite-uniform")) o.rewrite = 1;
+        else if (!strcmp(argv[i], "--cold")) o.cold = 1;
         else usage("unknown argument");
     }
     if (!o.pack) usage("--pack is needed");

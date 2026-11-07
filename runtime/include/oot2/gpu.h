@@ -78,6 +78,9 @@ int gpu_sync_wait(uint64_t value, uint64_t timeout_ns);
 uint64_t gpu_sync_done(void);     // the newest value done
 uint64_t gpu_sync_handed(void);   // the newest value handed out
 uint64_t gpu_sync_issued(void);   // the newest value whose GPU work was submitted
+// The value of the submission that is open (begun, not ended), or 0: its work is not on the queue yet. Read it with
+// gpu_sync_handed: it is the open submission when the two are equal.
+uint64_t gpu_sync_open(void);
 void gpu_sync_finish(void);       // returns once every value handed out before the call is done
 
 // ---- the device-loss report's file (vk_loss.c)

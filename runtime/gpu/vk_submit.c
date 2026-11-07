@@ -30,6 +30,7 @@
 #include "oot2/gpu_vk.h"
 #include "oot2/runtime.h"
 #include "oot2/vk_image.h"
+#include "oot2/vk_miss.h"
 #include "oot2/vk_replay.h"
 #include "plat.h"
 
@@ -239,9 +240,9 @@ static void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion
 }
 // The serial's host objects may go: the image when nothing holds it. The entry at its ID stays (oot2/bindless.h).
 static void vk_texture_release(const tex_t *t) { bindless_texture_release(t); }
-// Nothing is kept for programs, no copy of pool storage exists and the GPU writes nothing the CPU reads: these have
-// nothing to do yet.
-static void vk_program_release(const prog_t *p) { (void)p; }
+// A finalized program's stage keys lose one reference; a key nothing holds any more has its pipelines destroyed once the
+// timeline has passed the last frame that could use them (oot2/vk_miss.h).
+static void vk_program_release(const prog_t *p) { vkm_program_release(p->serial); }
 // The CPU's view of mirrored pool storage (oot2/backing.h, Mirrors).
 static void vk_guest_written(uint64_t addr, uint64_t size) { backing_guest_written(addr, size); }
 static void vk_guest_read(uint64_t addr, uint64_t size) { backing_guest_read(addr, size); }

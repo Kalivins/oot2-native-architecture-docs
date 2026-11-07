@@ -14,7 +14,8 @@
 //
 // What a draw or dispatch resolves, at the record (VkReplayOps below; the device's own in runtime/gpu/vk_replay_dev.c):
 //   pipeline     the stages' job keys and the attachment formats, through the pipeline builder's blocking get
-//                (oot2/vk_pipeline.h); one not built yet is the builder's named stop, until the miss ticket
+//                (oot2/vk_pipeline.h) through the miss path (oot2/vk_miss.h): one not built yet is drained for, built, and
+//                a graphics draw past the bound is skipped (nothing of it is written)
 //   buffers      vertex, index, uniform, storage and indirect ranges through the backing map's resolver
 //                (oot2/backing.h), in the frame's submission
 //   banks        per stage the driver bank c[0] (the storage buffer table at the stage's base, the base instance, the
@@ -85,6 +86,7 @@ typedef struct VkrTarget {
     VkFormat format;
     uint32_t width, height, layers;
     VkImageAspectFlags aspect;   // colour, or depth and stencil as the format has them
+    uint64_t image;              // the image's identity across frames (the miss path's rule on skipping; 0: none)
 } VkrTarget;
 
 // A texture's image for a copy or a clear: the image the texture's storage stands on, in the general layout.
@@ -98,9 +100,15 @@ typedef struct VkrImage {
 } VkrImage;
 
 typedef struct VkReplayOps {
-    // The pipeline builder (vkp_graphics, vkp_compute) and the layouts the replay binds against.
-    VkPipeline (*graphics)(const VkpStage *vs, const VkpStage *ps, const VkpFormats *formats);
+    // The pipeline of a graphics draw and of a dispatch (the device's: the miss path, oot2/vk_miss.h) and the layouts
+    // the replay binds against. graphics answers NULL for a draw to skip, which it does only when may_skip is set (every
+    // colour and depth target of the pass holds an earlier frame's picture); compute never does.
+    VkPipeline (*graphics)(const VkpStage *vs, const VkpStage *ps, const VkpFormats *formats, int may_skip);
     VkPipeline (*compute)(const VkpStage *cs);
+    // A bind of a program (by serial, with its stage records), at every bind: the device counts the stage keys live
+    // programs hold, and a repeated bind of a serial changes nothing unless the program was finalized since
+    // (oot2/vk_miss.h). May be NULL.
+    void (*program_bound)(uint64_t serial, const struct nvn_stage *const *stages, int n);
     VkPipelineLayout graphics_layout, compute_layout;
     // The description of a stage (oot2/shader_desc.h), parsed once per stage record and kept: NULL is a named stop.
     const struct ShaderBinds *(*binds)(const struct nvn_stage *s);
@@ -167,5 +175,10 @@ typedef struct VkrStats {
     uint64_t storage_writes;                        // storage ranges declared written
     uint64_t unregistered_textures;                 // slots whose texture ID had no entry (the placeholder is read)
     uint64_t scratch_bytes;
+    // Recorded against replayed (research 119, P3): the draw and dispatch records that reached the replay, those not made
+    // because the game had rendering off, and the graphics draws skipped for a pipeline not ready (oot2/vk_miss.h).
+    // lost is what none of those accounts for: draw_ops less draws, dispatches, render_off and skipped (in either
+    // direction), 0 by contract; read it before judging a picture.
+    uint64_t draw_ops, render_off, skipped, lost;
 } VkrStats;
 void vkr_stats(VkrStats *out);
