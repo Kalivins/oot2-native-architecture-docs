@@ -335,6 +335,20 @@ def kit_or_skip() -> Path:
     return Path(named).resolve()
 
 
+class WorkflowTest(unittest.TestCase):
+    """The Windows job builds the kit before the tests, stops when it cannot, and requires the tests that need it."""
+
+    def test_windows_builds_the_kit_before_the_tests_and_requires_the_tests_that_need_it(self) -> None:
+        text = (ROOT / ".github" / "workflows" / "windows-build.yml").read_text(encoding="utf-8")
+        step = text[text.index("- name: Build SDL3"):]
+        step = step[:step.index("\n      - name:", 1)]
+        self.assertNotIn("continue-on-error", step)
+        self.assertIn("python tools/fetch_sdl3.py --dest $kit", step)
+        self.assertIn('"SDL3_DIR=$kit" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV', step)
+        self.assertIn('OOT2_REQUIRE_SDL3: "1"', text)
+        self.assertLess(text.index("python tools/fetch_sdl3.py"), text.index("python -m unittest discover -s tests -v"))
+
+
 class RealKitTest(unittest.TestCase):
     """The kit built for real: its headers under the runtime's warning flags, and a program linked and run."""
 
