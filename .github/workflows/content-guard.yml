@@ -115,6 +115,22 @@ jobs:
           python tools/fetch_dav1d.py --no-asm --dest "$RUNNER_TEMP/dav1d-kit"
           echo "DAV1D_DIR=$RUNNER_TEMP/dav1d-kit" >> "$GITHUB_ENV"
 
+      # libopus, the decoder behind the game's hardware Opus decoder, built by tools/fetch_opus.py from Xiph's release
+      # archive (checked against a pinned SHA-256) with the runner's clang, in plain C: the same library as on Windows. This
+      # step has not been run on a Linux runner when it was written: it must not stop the guard, so a failure leaves the kit
+      # out and the decoder test skips with its stated reason (no kit).
+      - name: Cache the libopus kit
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/opus-kit
+          key: opus-kit-${{ runner.os }}-${{ hashFiles('tools/fetch_opus.py') }}
+
+      - name: Build libopus
+        continue-on-error: true
+        run: |
+          python tools/fetch_opus.py --dest "$RUNNER_TEMP/opus-kit"
+          echo "OPUS_DIR=$RUNNER_TEMP/opus-kit" >> "$GITHUB_ENV"
+
       # SDL3, the window layer of the game (window, Vulkan surface, input), built by tools/fetch_sdl3.py from its release
       # archive (checked against a pinned SHA-256) with CMake, Ninja and the runner's clang. Not run on a runner when it was
       # written, and a Linux build needs the X11 or Wayland development packages, which the script checks for (it refuses
