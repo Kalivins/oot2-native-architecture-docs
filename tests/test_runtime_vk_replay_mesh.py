@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from test_runtime_gpu import EXIT_FATAL, NO_VULKAN, ROOT, build_program, case_env, clang_or_skip, fatal_lines, vulkan_or_skip
 
@@ -40,10 +41,14 @@ def translator_path() -> Path | None:
     if override:
         found = shutil.which(override)
         path = Path(found or override).resolve()
-        return path if path.is_file() else None
-    name = "oot2-xlate.exe" if os.name == "nt" else "oot2-xlate"
-    hits = sorted((ROOT / "build" / "xlate" / "publish").rglob(name))
-    return hits[0] if hits else None
+        result = path if path.is_file() else None
+    else:
+        name = "oot2-xlate.exe" if os.name == "nt" else "oot2-xlate"
+        hits = sorted((ROOT / "build" / "xlate" / "publish").rglob(name))
+        result = hits[0] if hits else None
+    if result is None and os.environ.get("OOT2_REQUIRE_XLATE"):
+        raise RuntimeError("OOT2_REQUIRE_XLATE is set but no oot2-xlate executable was found")
+    return result
 
 
 def stage_artifact(work: Path, name: str, stage: str, code: bytes) -> tuple[str, dict]:
@@ -178,6 +183,22 @@ class VulkanProbeTest(unittest.TestCase):
         done = subprocess.CompletedProcess(["vk_replay_draw", "probe"], 1, "", "unexpected probe error\n")
         with self.assertRaisesRegex(RuntimeError, "Vulkan probe failed"):
             require_usable_vulkan(done)
+
+
+class TranslatorRequirementTest(unittest.TestCase):
+    def test_missing_translator_fails_when_the_environment_requires_it(self) -> None:
+        with mock.patch.dict(os.environ, {"OOT2_REQUIRE_XLATE": "1"}, clear=False):
+            os.environ.pop("OOT2_XLATE", None)
+            with mock.patch.object(Path, "rglob", return_value=[]):
+                with self.assertRaisesRegex(RuntimeError, "OOT2_REQUIRE_XLATE is set"):
+                    translator_path()
+
+    def test_missing_translator_remains_optional_without_the_requirement(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("OOT2_REQUIRE_XLATE", None)
+            os.environ.pop("OOT2_XLATE", None)
+            with mock.patch.object(Path, "rglob", return_value=[]):
+                self.assertIsNone(translator_path())
 
 
 class MeshReplayTest(unittest.TestCase):
