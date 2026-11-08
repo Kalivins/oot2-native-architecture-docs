@@ -73,6 +73,7 @@ ROWS = {
     "Exclusive fullscreen at 60 Hz": ("Display", "greyed", "-"),
     "Overlay (frame time)": ("Display", "live", "overlay"),
     "Audio output": ("Audio", "greyed", "-"),
+    "Stick dead zone": ("Input", "live", "input_dead_zone"),
     "Controls": ("Input", "greyed", "-"),
     "Enhancements": ("Enhancements", "greyed", "-"),
     "Counters": ("Debug", "live", "counters"),

@@ -30,6 +30,8 @@
 #include "hos.h"
 #include "plat.h"
 
+#include "oot2/hid_input.h"
+
 typedef struct {
     int64_t sampling;
     uint64_t buttons;
@@ -160,8 +162,14 @@ static void npad_states(Cpu *c, uint32_t want) {
     plat_mutex_lock(&lock);
     HidNpadState s = {.sampling = ++sample};
     int live = want == STYLE_FULL_KEY && enabled && allowed && id == PAD_ID && (styles & want);
+    if (live) {
+        HidHostInput in;
+        hid_host_input_read(&in);
+        s.buttons = in.buttons;
+        s.lx = in.lx, s.ly = in.ly, s.rx = in.rx, s.ry = in.ry;
+        s.attributes = ATTR_CONNECTED;
+    }
     plat_mutex_unlock(&lock);
-    if (live) s.attributes = ATTR_CONNECTED;
     ONCE("hid: GetNpadStates first asked: style %u, id %#x, count %d", want, id, max);
     give(c, 0, &s, sizeof s, "GetNpadStates");
     ret_x(c, 1);
@@ -294,6 +302,14 @@ static int vib_handle(Cpu *c, int i, const char *fn, uint32_t *raw) {
     return side_of(v);
 }
 
+// An amplitude in 0..1 to SDL_RumbleGamepad's 0..0xFFFF strength (the frequency the value names is not played: SDL's two
+// motors are fixed-frequency).
+static uint16_t rumble_strength(float amp) {
+    if (!(amp > 0.0f)) return 0;
+    if (amp >= 1.0f) return 0xFFFFu;
+    return (uint16_t)(amp * 65535.0f);
+}
+
 static void play(int side, const HidVibrationValue *v) {
     if (side < 0) return;
     HidVibrationValue val = *v;
@@ -306,7 +322,11 @@ static void play(int side, const HidVibrationValue *v) {
              (double)val.amp_low, (double)val.freq_low, (double)val.amp_high, (double)val.freq_high);
     plat_mutex_lock(&lock);
     vib_last[side] = val;
+    // The left device's low-frequency component drives SDL's low-frequency motor, the right device's high-frequency
+    // component its high-frequency motor. The window thread plays the newest request on the open gamepad.
+    HidRumble r = {rumble_strength(vib_last[0].amp_low), rumble_strength(vib_last[1].amp_high), 100};
     plat_mutex_unlock(&lock);
+    hid_rumble_publish(&r);
 }
 
 // Result detail::InitializeVibrationDevice(const VibrationDeviceHandle &), and the public form
