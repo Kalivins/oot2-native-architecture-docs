@@ -114,6 +114,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dav1d-dir", type=Path,
                    help="dav1d kit made by tools/fetch_dav1d.py, for the AV1 decoder of the movies (default: the "
                         "DAV1D_DIR variable)")
+    p.add_argument("--opus-dir", type=Path,
+                   help="libopus kit made by tools/fetch_opus.py, for the game's Opus audio (default: the OPUS_DIR "
+                        "variable; without one Opus streams make no sound)")
     p.add_argument("--sdl3-dir", type=Path,
                    help="SDL3 kit made by tools/fetch_sdl3.py, for the window, the Vulkan surface and the input devices "
                         "(default: the SDL3_DIR variable; without one the game shows no window)")

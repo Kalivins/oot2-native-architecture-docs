@@ -106,7 +106,8 @@ def toolchain(ctx: Context, imgui: bool = False) -> build_game.Toolchain:
         return build_game.find_toolchain(check.compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None),
                                          imgui=imgui_folder(ctx) if imgui and not prebuilt else None,
                                          dav1d_dir=getattr(ctx.options, "dav1d_dir", None),
-                                         sdl3_dir=getattr(ctx.options, "sdl3_dir", None), prebuilt=prebuilt)
+                                         sdl3_dir=getattr(ctx.options, "sdl3_dir", None),
+                                         opus_dir=getattr(ctx.options, "opus_dir", None), prebuilt=prebuilt)
     except build_game.BuildError as e:
         raise PrepareError(str(e)) from None
 
@@ -121,6 +122,12 @@ def vulkan_key(ctx: Context) -> list:
     include = build_game.vulkan_include(getattr(ctx.options, "vulkan_sdk", None))
     kit = build_game.find_dav1d(getattr(ctx.options, "dav1d_dir", None))
     return build_game.vulkan_inputs(include, build_game.find_glslang(include)) + build_game.dav1d_inputs(kit)
+
+
+def opus_key(ctx: Context) -> list:
+    """The part of the link step's key that the libopus kit gives: its library and header (build_game.opus_inputs), so
+    that a new kit links again and a build with none says so."""
+    return build_game.opus_inputs(build_game.find_opus(getattr(ctx.options, "opus_dir", None)))
 
 
 def sdl3_key(ctx: Context) -> list:
@@ -324,7 +331,7 @@ class Link(Step):
         return fingerprint("link-1", TOOLS / "build_game.py", build_game.RUNTIME / "include" if prebuilt else
                            build_game.RUNTIME, compiler_id(ctx),
                            " ".join(build_game.RT_FLAGS + build_game.LINK_FLAGS), ctx.dest / EXEFS / "main.npdm",
-                           *romfs_key(ctx), *vulkan_key(ctx), *sdl3_key(ctx), "prebuilt" if prebuilt else imgui_key())
+                           *romfs_key(ctx), *vulkan_key(ctx), *opus_key(ctx), *sdl3_key(ctx), "prebuilt" if prebuilt else imgui_key())
 
     def current(self, ctx: Context, record: dict) -> bool:
         exe = ctx.dest / build_game.EXE_NAME

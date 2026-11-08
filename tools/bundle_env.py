@@ -34,6 +34,7 @@ XLATE = f"bin/oot2-xlate{EXE}"
 PYTHON_HOME = "python"
 RUNTIME_LIB = "runtime/liboot2rt.a"
 DAV1D_KIT = "runtime/dav1d"
+OPUS_KIT = "runtime/opus"
 SDL3_KIT = "runtime/sdl3"
 VULKAN_SDK = "vulkan"
 ZBIC_ARCHIVE = "third_party/zbic-source.tar.gz"
@@ -95,6 +96,10 @@ def dav1d_kit() -> Path | None:
     return folder(DAV1D_KIT)
 
 
+def opus_kit() -> Path | None:
+    return folder(OPUS_KIT)
+
+
 def sdl3_kit() -> Path | None:
     return folder(SDL3_KIT)
 
@@ -124,6 +129,6 @@ def environment(env: dict[str, str] | None = None) -> dict[str, str]:
         return out
     out["PATH"] = os.pathsep.join(folders + [p for p in out.get("PATH", "").split(os.pathsep) if p])
     for name in ("VULKAN_SDK", "VK_SDK_PATH", "OOT2_CC", "OOT2_CXX", "OOT2_NINJA", "OOT2_XLATE", "OOT2_GLSLANG",
-                 "OOT2_IMGUI", "OOT2_RUNTIME_LIB", "DAV1D_DIR", "SDL3_DIR", "PYTHONPATH", "PYTHONHOME"):
+                 "OOT2_IMGUI", "OOT2_RUNTIME_LIB", "DAV1D_DIR", "OPUS_DIR", "SDL3_DIR", "PYTHONPATH", "PYTHONHOME"):
         out.pop(name, None)
     return out

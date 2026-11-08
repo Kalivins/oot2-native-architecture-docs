@@ -122,7 +122,7 @@ static uint64_t acall(Cpu *a, int i, uint64_t x0, uint64_t x1) {
     rt_call(a, g_audio[i]);
     return a->x[0];
 }
-static int opus_case(void) { return !strcmp(g_case, "opus"); }
+static int opus_case(void) { return !strcmp(g_case, "opus") || !strcmp(g_case, "opus_libopus"); }
 // An NVN2 entry point called from the host thread by its synthetic address.
 static uint64_t nvn(Cpu *a, const char *name, uint64_t x0, uint64_t x1, uint64_t x2) {
     a->x[0] = x0, a->x[1] = x1, a->x[2] = x2;
@@ -264,6 +264,93 @@ static char *read_census(const char *folder) {
     return buf;
 }
 
+#ifdef OOT2_OPUS
+// ---- the Opus overrides with libopus behind them (built with the kit; tests/test_runtime_opus.py)
+#include <math.h>
+#include <opus/opus.h>
+
+#define OPUS_OUT (HEAP + 0x10000)   // the guest's pcm buffer, OPUS_OUT_SIZE bytes
+#define OPUS_IN (HEAP + 0x100000)   // the guest's input: a frame and bytes after it
+#define OPUS_OUT_SIZE 0x20000u
+#define CODEC_INVALID 0x1fcd1u
+
+static void put_be32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24), p[1] = (uint8_t)(v >> 16), p[2] = (uint8_t)(v >> 8), p[3] = (uint8_t)v;
+}
+
+// One decode call through the override: x0 the object, x1 and x2 where consumed and samples go, x3 the pcm and x4 its size,
+// x5 the input and x6 its size. Returns the codec result.
+static uint64_t opus_call(Cpu *a, uint64_t obj, uint64_t out_size, uint64_t in_size) {
+    a->x[0] = obj, a->x[1] = HEAP + 0x500, a->x[2] = HEAP + 0x508, a->x[3] = OPUS_OUT, a->x[4] = out_size;
+    a->x[5] = OPUS_IN, a->x[6] = in_size;
+    rt_call(a, g_audio[A_OPUS_DECODE]);
+    return a->x[0];
+}
+
+// A stream that libopus's encoder makes from a tone is wrapped in Nintendo's frame (the 8-byte big-endian header of the payload
+// size and the final range) and decoded by the override. The samples are what libopus's own decoder gives for the same
+// packets, `samples` counts frames of one channel, `consumed` is the frame and not the bytes the call offered, the output past
+// the samples is untouched whatever room the guest gives (the override caps its decode at 120 ms), a header range that is not
+// the decoder's is logged once and the samples are kept, a range of 0 is not compared, and a payload size the input cannot
+// hold, like a pcm buffer too small for the packet, is refused.
+static void opus_stream(Cpu *a, uint64_t obj, int rate, int channels, int wrong_ranges) {
+    const int frame = rate / 50;
+    a->x[0] = obj, a->x[1] = (uint64_t)rate, a->x[2] = (uint64_t)channels, a->x[3] = 0, a->x[4] = 0x9000, a->x[5] = 0;
+    rt_call(a, g_audio[A_OPUS_INIT]);
+    CHECK(a->x[0] == 0);
+    int err = 0;
+    OpusEncoder *enc = opus_encoder_create(rate, channels, OPUS_APPLICATION_AUDIO, &err);
+    CHECK(enc && err == OPUS_OK);
+    CHECK(opus_encoder_ctl(enc, OPUS_SET_BITRATE(64000 * channels)) == OPUS_OK);
+    OpusDecoder *ref = opus_decoder_create(rate, channels, &err);
+    CHECK(ref && err == OPUS_OK);
+    int16_t tone[960 * 2], want[960 * 2];
+    uint8_t packet[1500];
+    for (int p = 0; p < 12; p++) {
+        for (int i = 0; i < frame; i++)
+            for (int c = 0; c < channels; c++)
+                tone[i * channels + c] =
+                    (int16_t)lrint(12000.0 * sin(6.283185307179586 * (c ? 1000.0 : 500.0) * (double)(p * frame + i) / rate));
+        int n = opus_encode(enc, tone, frame, packet, sizeof packet);
+        CHECK(n > 0);
+        opus_uint32 range = 0;
+        CHECK(opus_encoder_ctl(enc, OPUS_GET_FINAL_RANGE(&range)) == OPUS_OK);
+        CHECK(opus_decode(ref, packet, n, want, frame, 0) == frame);
+        uint32_t header_range = range;   // packets 0 to 7 carry the encoder's range; then wrong ones; the last carries 0
+        if (p >= 8 && p < 8 + wrong_ranges) header_range = range ^ 0x5a5a5a5au;
+        if (p == 11) header_range = 0;
+        uint8_t *in = (uint8_t *)(uintptr_t)OPUS_IN;
+        put_be32(in, (uint32_t)n), put_be32(in + 4, header_range);
+        memcpy(in + 8, packet, (size_t)n);
+        memset(in + 8 + n, 0xa5, 17);   // the bytes after the frame
+        memset((void *)(uintptr_t)OPUS_OUT, 0x55, OPUS_OUT_SIZE);
+        memset((void *)(uintptr_t)(HEAP + 0x500), 0xff, 16);
+        CHECK(opus_call(a, obj, OPUS_OUT_SIZE, (uint64_t)n + 8 + 17) == 0);
+        uint64_t consumed;
+        int32_t samples;
+        memcpy(&consumed, (const void *)(uintptr_t)(HEAP + 0x500), 8);
+        memcpy(&samples, (const void *)(uintptr_t)(HEAP + 0x508), 4);
+        CHECK(consumed == (uint64_t)n + 8);   // the frame, not the 17 bytes offered after it
+        CHECK(samples == frame);              // for one channel
+        const uint8_t *out = (const uint8_t *)(uintptr_t)OPUS_OUT;
+        size_t bytes = (size_t)frame * (size_t)channels * sizeof(int16_t);
+        CHECK(!memcmp(out, want, bytes));
+        for (size_t i = bytes; i < OPUS_OUT_SIZE; i++) CHECK(out[i] == 0x55);
+    }
+    uint8_t *in = (uint8_t *)(uintptr_t)OPUS_IN;
+    put_be32(in, 1000), put_be32(in + 4, 0);   // a payload size the 40 bytes of input cannot hold
+    CHECK(opus_call(a, obj, OPUS_OUT_SIZE, 40) == CODEC_INVALID);
+    int n = opus_encode(enc, tone, frame, packet, sizeof packet);
+    CHECK(n > 0);
+    put_be32(in, (uint32_t)n), put_be32(in + 4, 0);
+    memcpy(in + 8, packet, (size_t)n);
+    CHECK(opus_call(a, obj, (uint64_t)frame * (uint64_t)channels * 2 - 2, (uint64_t)n + 8) == CODEC_INVALID);   // a sample short
+    CHECK(acall(a, A_OPUS_FINALIZE, obj, 0) == 0);
+    opus_decoder_destroy(ref);
+    opus_encoder_destroy(enc);
+}
+#endif
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: hos_test CASE DIR\n");
@@ -335,6 +422,20 @@ int main(int argc, char **argv) {
             const HosNote *n = hos_note(OPUS_SYMBOLS[i]);
             CHECK(n && !strcmp(n->status, HOS_IMPLEMENTED) && n->why[0]);
         }
+    } else if (!strcmp(g_case, "opus_libopus")) {
+#ifdef OOT2_OPUS
+        boot(dir);
+        Cpu a;
+        memset(&a, 0, sizeof a);
+        a.excl_addr = ~0ull;
+        // mono first, whose last packet has a header range of 0 and logs nothing; then stereo with two wrong header ranges,
+        // which log once
+        opus_stream(&a, HEAP + 0x420, 16000, 1, 0);
+        opus_stream(&a, HEAP + 0x400, 48000, 2, 2);
+#else
+        fprintf(stderr, "opus_libopus needs a libopus kit\n");
+        return 2;
+#endif
     } else if (!strcmp(g_case, "service_census")) {
         boot(dir);
         rt_kernel_run(G(2), 0);

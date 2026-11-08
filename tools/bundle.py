@@ -4,7 +4,7 @@
 """Build the release bundle (architecture D24c): one folder, and one zip of it, that a player's Windows machine prepares
 the game from without installing a toolchain.
 
-    py -3.14 -I tools/bundle.py --out DIR [--cache DIR] [--xlate FILE] [--runtime-lib FILE --dav1d-dir DIR]
+    py -3.14 -I tools/bundle.py --out DIR [--cache DIR] [--xlate FILE] [--runtime-lib FILE --dav1d-dir DIR --opus-dir DIR --sdl3-dir DIR --vulkan-sdk DIR]
                                 [--no-zip] [--allow-dirty]
 
 What goes in, by kind (every piece has a row in THIRD_PARTY_NOTICES.md whose first cell names `bundle/<component>/`):
@@ -17,6 +17,8 @@ What goes in, by kind (every piece has a row in THIRD_PARTY_NOTICES.md whose fir
   oot2-runtime the runtime library, built here with the bundle's own compiler (tools/build_game.py --make-runtime-lib):
                the runtime, Dear ImGui and Volk inside, the shaders embedded
   dav1d        the AV1 decoder (libdav1d.a with its headers), linked into the program as in a normal build
+  opus         the Opus decoder (libopus.a with its header and licence text, the kit tools/fetch_opus.py lays out),
+               linked into the program as in a normal build
   sdl3         the window library (libSDL3.a with its headers and notices, the kit tools/fetch_sdl3.py lays out),
                linked into the program as in a normal build
   vulkan-headers  the Vulkan headers the host probe compiles against
@@ -34,8 +36,8 @@ deleted. The zip is deterministic (sorted entries, fixed dates and modes), so th
 
 Needs Windows (expand.exe and msiexec unpack the installer's Tcl/Tk), network on the first run, and, unless --xlate and
 --runtime-lib are given, git, the .NET 10 SDK and Visual Studio's build tools (the translator) and the network for the
-kits that tools/fetch_vulkan.py, tools/fetch_imgui.py, tools/fetch_dav1d.py and tools/fetch_sdl3.py make (the last
-needs CMake on PATH). Exit codes: 0 done, 1 a download,
+kits that tools/fetch_vulkan.py, tools/fetch_imgui.py, tools/fetch_dav1d.py, tools/fetch_opus.py and tools/fetch_sdl3.py make
+(the last needs CMake on PATH). Exit codes: 0 done, 1 a download,
 a check or a build failed, 2 bad command line.
 """
 
@@ -169,6 +171,7 @@ COMPONENTS = {c.name: c for c in (
     Component("oot2-xlate", "the shader translator"),
     Component("oot2-runtime", "the runtime library"),
     Component("dav1d", "the AV1 decoder"),
+    Component("opus", "the Opus decoder"),
     Component("sdl3", "the window library"),
     Component("vulkan-headers", "the Vulkan headers"),
     Component("zbic-source", "the ZBIC decoder's source archive"),
@@ -529,25 +532,26 @@ def run(cmd: list[str], say: Callable[[str], None], env: dict | None = None, cwd
         raise BundleError(f"{Path(str(cmd[1] if len(cmd) > 1 else cmd[0])).name} failed (exit code {r.returncode})")
 
 
-def build_runtime_lib(stage_root: Path, cache: Path, say: Callable[[str], None]) -> tuple[Path, Path, Path, Path]:
+def build_runtime_lib(stage_root: Path, cache: Path, say: Callable[[str], None]) -> tuple[Path, Path, Path, Path, Path]:
     """The runtime library, built with the bundle's own compiler and Ninja (so that the toolchain subset is proven by
-    building the runtime), from the kits tools/fetch_vulkan.py, tools/fetch_imgui.py and tools/fetch_dav1d.py make.
-    Returns the library, the dav1d kit, the SDL3 kit and the Vulkan SDK folder."""
+    building the runtime), from the kits tools/fetch_vulkan.py, tools/fetch_imgui.py, tools/fetch_dav1d.py and
+    tools/fetch_opus.py make. Returns the library, the dav1d kit, the libopus kit, the SDL3 kit and the Vulkan SDK folder."""
     cc, ninja = stage_root / "llvm" / "bin" / "clang.exe", stage_root / "bin" / "ninja.exe"
-    env = {k: v for k, v in os.environ.items() if k not in ("VULKAN_SDK", "VK_SDK_PATH", "DAV1D_DIR", "PYTHONPATH",
-                                                            "PYTHONHOME") and not k.startswith("OOT2_")}
+    env = {k: v for k, v in os.environ.items() if k not in ("VULKAN_SDK", "VK_SDK_PATH", "DAV1D_DIR", "OPUS_DIR",
+                                                            "PYTHONPATH", "PYTHONHOME") and not k.startswith("OOT2_")}
     env["PATH"] = os.pathsep.join([str(stage_root / "llvm" / "bin"), str(stage_root / "bin"), env.get("PATH", "")])
     py = [sys.executable, "-I"]
     vulkan, imgui, dav1d, out = cache / "vulkan-kit", cache / "imgui", cache / "dav1d-kit", cache / "runtime-lib"
-    sdl3 = cache / "sdl3-kit"
+    sdl3, opus = cache / "sdl3-kit", cache / "opus-kit"
     run([*py, ROOT / "tools" / "fetch_vulkan.py", "--dest", vulkan], say)
     run([*py, ROOT / "tools" / "fetch_imgui.py", "--dest", imgui], say)
     run([*py, ROOT / "tools" / "fetch_dav1d.py", "--dest", dav1d, "--cc", cc, "--ninja", ninja], say, env)
+    run([*py, ROOT / "tools" / "fetch_opus.py", "--dest", opus, "--cc", cc, "--ninja", ninja], say, env)
     run([*py, ROOT / "tools" / "fetch_sdl3.py", "--dest", sdl3, "--cc", cc, "--ninja", ninja], say, env)
     shutil.rmtree(out, ignore_errors=True)
     run([*py, ROOT / "tools" / "build_game.py", "--make-runtime-lib", "--out", out, "--cc", cc, "--ninja", ninja,
-         "--vulkan-sdk", vulkan, "--imgui", imgui, "--dav1d-dir", dav1d, "--sdl3-dir", sdl3], say, env)
-    return out / "liboot2rt.a", dav1d, sdl3, vulkan
+         "--vulkan-sdk", vulkan, "--imgui", imgui, "--dav1d-dir", dav1d, "--opus-dir", opus, "--sdl3-dir", sdl3], say, env)
+    return out / "liboot2rt.a", dav1d, opus, sdl3, vulkan
 
 
 def build_translator(cache: Path, say: Callable[[str], None]) -> Path:
@@ -559,7 +563,25 @@ def build_translator(cache: Path, say: Callable[[str], None]) -> Path:
     return hits[0]
 
 
-def stage_runtime(stage: Stage, lib: Path, dav1d: Path, sdl3: Path, vulkan: Path) -> None:
+OPUS_FILES = ("lib/libopus.a", "include/opus/opus.h", "include/opus/opus_defines.h", "include/opus/opus_types.h",
+              "include/opus/opus_multistream.h")
+
+
+def stage_opus(stage: Stage, opus: Path) -> None:
+    """The libopus kit as build_game.find_opus reads it (the library and the headers), with the kit's licence text in
+    licenses/opus/. A file the kit lacks is a named failure: the program could not link without it. The library carries the
+    encoder too, on purpose: it is the one libopus.a the kit builds, and the runtime's tests make their streams with it.
+    """
+    for rel in OPUS_FILES:
+        if not (opus / rel).is_file():
+            raise BundleError(f"the libopus kit {opus} has no {rel}: tools/fetch_opus.py lays it out")
+        stage.put("opus", f"{bundle_env.OPUS_KIT}/{rel}", opus / rel)
+    for path in sorted((opus / "licenses").rglob("*")):
+        if path.is_file():
+            stage.put("opus", f"licenses/opus/{path.name}", path)
+
+
+def stage_runtime(stage: Stage, lib: Path, dav1d: Path, opus: Path, sdl3: Path, vulkan: Path) -> None:
     stage.put("oot2-runtime", bundle_env.RUNTIME_LIB, lib)
     for rel in ("lib/libdav1d.a", "include/dav1d/dav1d.h", "include/dav1d/common.h", "include/dav1d/data.h",
                 "include/dav1d/headers.h", "include/dav1d/picture.h", "include/dav1d/version.h"):
@@ -568,6 +590,7 @@ def stage_runtime(stage: Stage, lib: Path, dav1d: Path, sdl3: Path, vulkan: Path
     for path in sorted((dav1d / "licenses").rglob("*")):
         if path.is_file():
             stage.put("dav1d", f"licenses/dav1d/{path.name}", path)
+    stage_opus(stage, opus)
     # The SDL3 kit whole: build_game.find_sdl3 refuses a folder that is not exactly what fetch_sdl3.py laid out.
     for path in sorted(p for p in sdl3.rglob("*") if p.is_file()):
         rel = path.relative_to(sdl3).as_posix()
@@ -669,8 +692,23 @@ def finish(stage: Stage, version: str, commit: str, notices_text: str, say: Call
     return rows
 
 
+def check_kits(runtime_lib: Path | None, dav1d_dir: Path | None, opus_dir: Path | None, sdl3_dir: Path | None,
+               vulkan_dir: Path | None) -> None:
+    """A runtime library given by the caller is linked into programs with the kits it was built from, so the bundle must
+    carry them: each one missing is named, before anything is downloaded. With no library given, build_runtime_lib makes
+    them all."""
+    if runtime_lib is None:
+        return
+    missing = [flag for flag, kit in (("--dav1d-dir", dav1d_dir), ("--opus-dir", opus_dir), ("--sdl3-dir", sdl3_dir),
+                                      ("--vulkan-sdk", vulkan_dir)) if kit is None]
+    if missing:
+        raise BundleError(f"--runtime-lib needs {', '.join(missing)} as well (the kits it was built from)")
+
+
 def build(root: Path, out: Path, cache: Path, xlate: Path | None, runtime_lib: Path | None,
-          dav1d_dir: Path | None, sdl3_dir: Path | None, vulkan_dir: Path | None, make_zip: bool, say: Callable[[str], None] = print) -> Path:
+          dav1d_dir: Path | None, opus_dir: Path | None, sdl3_dir: Path | None, vulkan_dir: Path | None, make_zip: bool,
+          say: Callable[[str], None] = print) -> Path:
+    check_kits(runtime_lib, dav1d_dir, opus_dir, sdl3_dir, vulkan_dir)
     commit = subprocess.run(["git", "-C", str(root), "rev-parse", "--short=12", "HEAD"], capture_output=True,
                             text=True).stdout.strip() or "unknown"
     version = f"oot2-native-bundle-{commit}"
@@ -689,10 +727,8 @@ def build(root: Path, out: Path, cache: Path, xlate: Path | None, runtime_lib: P
     stage_ninja(stage, inputs[NINJA.name])
     if runtime_lib is None:
         say("bundle: the runtime library, built with the bundle's own compiler")
-        runtime_lib, dav1d_dir, sdl3_dir, vulkan_dir = build_runtime_lib(stage_dir, cache, say)
-    elif dav1d_dir is None or sdl3_dir is None or vulkan_dir is None:
-        raise BundleError("--runtime-lib needs --dav1d-dir, --sdl3-dir and --vulkan-sdk as well (the kits it was built from)")
-    stage_runtime(stage, runtime_lib, dav1d_dir, sdl3_dir, vulkan_dir)
+        runtime_lib, dav1d_dir, opus_dir, sdl3_dir, vulkan_dir = build_runtime_lib(stage_dir, cache, say)
+    stage_runtime(stage, runtime_lib, dav1d_dir, opus_dir, sdl3_dir, vulkan_dir)
     say("bundle: the shader translator")
     stage_translator(stage, xlate or build_translator(cache, say))
     stage_zbic(stage, cache, say)
@@ -714,6 +750,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--xlate", type=Path, help="a built oot2-xlate.exe (default: build it with tools/build_xlate.py)")
     ap.add_argument("--runtime-lib", type=Path, help="a runtime library built before (default: build it)")
     ap.add_argument("--dav1d-dir", type=Path, help="the dav1d kit that library was built with")
+    ap.add_argument("--opus-dir", type=Path, help="the libopus kit that library was built with")
     ap.add_argument("--sdl3-dir", type=Path, help="the SDL3 kit that library was built with")
     ap.add_argument("--vulkan-sdk", type=Path, help="the Vulkan SDK folder that library was built with")
     ap.add_argument("--no-zip", action="store_true", help="leave the folder, write no zip")
@@ -726,8 +763,8 @@ def main(argv: list[str] | None = None) -> int:
             raise BundleError("the working tree has uncommitted changes; the bundle is built from a commit "
                               "(--allow-dirty builds from the tree as it is)")
         cache = (args.cache or args.out / "cache").resolve()
-        build(ROOT, args.out.resolve(), cache, args.xlate, args.runtime_lib, args.dav1d_dir, args.sdl3_dir, args.vulkan_sdk,
-              not args.no_zip)
+        build(ROOT, args.out.resolve(), cache, args.xlate, args.runtime_lib, args.dav1d_dir, args.opus_dir, args.sdl3_dir,
+              args.vulkan_sdk, not args.no_zip)
     except BundleError as e:
         print(f"bundle: {e}", file=sys.stderr)
         return 1

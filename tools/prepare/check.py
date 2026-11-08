@@ -106,6 +106,7 @@ class Check(Step):
         ctx.reporter.say(f"check: build tools: {build_tools(ctx)}")
         ctx.reporter.say(f"check: menu library: {imgui_note(ctx)}")
         ctx.reporter.say(f"check: window library: {sdl3_note(ctx)}")
+        ctx.reporter.say(f"check: Opus decoder: {opus_note(ctx)}")
         ctx.reporter.say(f"check: lift tools: {lift_tools()}")
         ctx.reporter.say(f"check: shader tools: {shader_tools(ctx)}")
         lines, warnings = vulkan_report(host.get("vulkan"), host.get("vulkan_items") or [])
@@ -231,7 +232,8 @@ def build_tools(ctx: Context) -> str:
         lib = runtime_lib(ctx)
         tools = find_toolchain(compiler(ctx), vulkan_sdk=getattr(ctx.options, "vulkan_sdk", None),
                                dav1d_dir=getattr(ctx.options, "dav1d_dir", None),
-                               sdl3_dir=getattr(ctx.options, "sdl3_dir", None), prebuilt=lib is not None)
+                               sdl3_dir=getattr(ctx.options, "sdl3_dir", None),
+                               opus_dir=getattr(ctx.options, "opus_dir", None), prebuilt=lib is not None)
     except BuildError as e:
         raise PrepareError(f"{e}.") from None
     if lib is not None:
@@ -274,6 +276,17 @@ def av1_note(tools) -> str:
     if tools.dav1d:
         return f"AV1 decoder dav1d kit {tools.dav1d}"
     return "no dav1d kit (the movies cannot play: run tools/fetch_dav1d.py and set DAV1D_DIR)"
+
+
+def opus_note(ctx: Context) -> str:
+    """The decoder behind the hardware Opus override (runtime/audio) comes from a libopus kit (tools/fetch_opus.py).
+    Said here, not refused, when there is none: the game then builds and runs with no sound from Opus streams, so a
+    build for other work needs no kit."""
+    import build_game
+    kit = build_game.find_opus(getattr(ctx.options, "opus_dir", None))
+    if kit:
+        return f"libopus kit {kit}"
+    return "no libopus kit (Opus streams make no sound: run tools/fetch_opus.py and set OPUS_DIR)"
 
 
 def sdl3_note(ctx: Context) -> str:

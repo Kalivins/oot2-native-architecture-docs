@@ -589,7 +589,7 @@ class PiecesTest(unittest.TestCase):
         include = build_game.cmd_arg(build_game.rel(kit / "include", out))
         lib = build_game.cmd_arg(build_game.rel(kit / "lib" / "libSDL3.a", out))
         for name in ("rtflags", "cxxflags"):   # every file of the runtime, C and C++, as the platform layer and the menu need
-            self.assertIn(f" -DOOT2_WITH_SDL3=1 -I {include}", self.flags(text, name))
+            self.assertIn(f" -DOOT2_WITH_SDL3=1 -DOOT2_AUDIO_SDL3=1 -I {include}", self.flags(text, name))
         for name in ("genflags", "glueflags", "imguiflags"):   # generated code, the glue and Dear ImGui's core never see it
             self.assertNotIn("SDL3", self.flags(text, name))
         libs = shlex.split(self.flags(text, "libs")[len("libs = "):], posix=False)
@@ -603,6 +603,41 @@ class PiecesTest(unittest.TestCase):
         rule = text[text.index("rule link"):].splitlines()[1]
         self.assertLess(rule.index("$lib "), rule.index("$libs"))
 
+    def make_opus_kit(self) -> Path:
+        """A folder laid out as tools/fetch_opus.py lays out a kit (the files are empty: nothing here links them)."""
+        kit = self.dir / "opus kit"
+        (kit / "include" / "opus").mkdir(parents=True)
+        (kit / "include" / "opus" / "opus.h").write_text("", encoding="utf-8")
+        (kit / "lib").mkdir()
+        (kit / "lib" / "libopus.a").write_bytes(b"!<arch>\n")
+        return kit.resolve()
+
+    def test_a_libopus_kit_reaches_the_runtime_flags_the_libraries_and_the_link(self) -> None:
+        tool = dataclasses.replace(fake_tool(self.dir), opus=self.make_opus_kit(), dav1d=self.make_kit(),
+                                   sdl3=self.make_sdl3_kit())
+        text, out = self.plan_text(tool)
+        include = build_game.cmd_arg(build_game.rel(tool.opus / "include", out))
+        lib = build_game.cmd_arg(build_game.rel(tool.opus / "lib" / "libopus.a", out))
+        self.assertIn(f" -DOOT2_OPUS=1 -I {include}", self.flags(text, "rtflags"))   # the decoder's file, not the lifted code
+        for name in ("genflags", "glueflags", "imguiflags"):
+            self.assertNotIn("OPUS", self.flags(text, name))
+        libs = shlex.split(self.flags(text, "libs")[len("libs = "):], posix=False)
+        dav1d = libs.index(build_game.cmd_arg(build_game.rel(tool.dav1d / "lib" / "libdav1d.a", out)))
+        sdl3 = libs.index(build_game.cmd_arg(build_game.rel(tool.sdl3 / "lib" / "libSDL3.a", out)))
+        self.assertLess(dav1d, libs.index(lib))
+        self.assertLess(libs.index(lib), sdl3)   # dav1d's library, libopus's, SDL3's, then the system libraries
+        link = next(line for line in text.splitlines() if line.startswith(f"build {build_game.EXE_NAME}: link "))
+        self.assertIn(f" {build_game.ninja_path(tool.opus / 'lib' / 'libopus.a', out)}", link.split(" | ", 1)[1])   # a new kit relinks
+        only, _ = self.plan_text(dataclasses.replace(fake_tool(self.dir), opus=tool.opus))
+        self.assertEqual(libs.count("-pthread"), 0 if WIN else 1)
+        self.assertNotIn("-pthread", self.flags(only, "libs"))   # libopus needs no threads of its own
+
+    def test_without_a_libopus_kit_nothing_of_it_is_in_the_plan(self) -> None:
+        text, _ = self.plan_text(fake_tool(self.dir))
+        self.assertNotIn("OPUS", text)
+        self.assertNotIn("libopus.a", text)
+        self.assertIn("obj/runtime/audio_opus_libopus.o: cc_rt ", text)   # the decoder's file is in the library either way: empty
+
     def test_without_an_sdl3_kit_nothing_of_it_is_in_the_plan(self) -> None:
         text, _ = self.plan_text(fake_tool(self.dir))
         self.assertNotIn("SDL3", text)
@@ -614,8 +649,8 @@ class PiecesTest(unittest.TestCase):
         tool = dataclasses.replace(fake_tool(self.dir), sdl3=self.make_sdl3_kit())
         text, out = self.plan_text(tool, with_modules=False)   # make_runtime_lib plans with no module
         include = build_game.cmd_arg(build_game.rel(tool.sdl3 / "include", out))
-        self.assertIn(f" -DOOT2_WITH_SDL3=1 -I {include}", self.flags(text, "rtflags"))
-        self.assertIn(f" -DOOT2_WITH_SDL3=1 -I {include}", self.flags(text, "cxxflags"))
+        self.assertIn(f" -DOOT2_WITH_SDL3=1 -DOOT2_AUDIO_SDL3=1 -I {include}", self.flags(text, "rtflags"))
+        self.assertIn(f" -DOOT2_WITH_SDL3=1 -DOOT2_AUDIO_SDL3=1 -I {include}", self.flags(text, "cxxflags"))
         self.assertIn("build obj/runtime/gpu_vk_volk.o: cc_rt ", text)
 
     def test_both_kits_link_dav1d_first_then_sdl3_then_the_system_libraries(self) -> None:

@@ -31,6 +31,7 @@ Open work that nobody has taken. Say in an issue that you are taking an item bef
 - Vulkan 1.3 renderer behind an NVN2 front end, with task and mesh shaders; NVIDIA GPUs are the target of the first release
 - The game's shaders are translated, and their pipelines built, when you prepare the game, not during play
 - Movies decoded with dav1d (AV1)
+- Sound: the console's audio services are served on the PC, the game's Opus streams are decoded with libopus, and the mix plays through SDL3
 - A run that stops keeps its finished steps and starts again where it left off; running it again after an update rebuilds only what the update changed
 - A setup window over `oot2 prepare`: it asks for the dump and the folder, checks the PC, shows the progress of each step and starts the game when it is prepared
 - `oot2 prepare --check` reports what is missing (dump, disk, CPU, toolchain, shader translator, Vulkan) before anything is built
@@ -92,7 +93,7 @@ oot2-native is written for this project, with parts adapted from earlier recompi
 - [nxnative](https://github.com/seedds/nxnative) and [MacNativeGames](https://github.com/ly05010419/MacNativeGames)
 - [Lichii](https://github.com/zortos293/Lichii) and [Eglantine](https://github.com/Djihads80/Eglantine)
 - [Ryujinx](https://github.com/Ryujinx/Ryujinx), whose shader translator is vendored as nxnative carries it
-- [Dear ImGui](https://github.com/ocornut/imgui), [dav1d](https://code.videolan.org/videolan/dav1d), [Volk](https://github.com/zeux/volk), [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers), [glslang](https://github.com/KhronosGroup/glslang) and [hexkyz/zstd](https://github.com/hexkyz/zstd), fetched at pinned versions and checked by hash rather than copied into the repository
+- [Dear ImGui](https://github.com/ocornut/imgui), [dav1d](https://code.videolan.org/videolan/dav1d), [libopus](https://opus-codec.org/), [Volk](https://github.com/zeux/volk), [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers), [glslang](https://github.com/KhronosGroup/glslang) and [hexkyz/zstd](https://github.com/hexkyz/zstd), fetched at pinned versions and checked by hash rather than copied into the repository
 
 Each keeps its own licence and header, and its licence text is in [licenses/](licenses/) or next to its files.
 

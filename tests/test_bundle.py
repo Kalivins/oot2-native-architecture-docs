@@ -341,5 +341,95 @@ class BundleEnv(unittest.TestCase):
         self.assertEqual(bundle_env.ninja(), str(self.dir.resolve() / bundle_env.NINJA))
 
 
+class OpusInTheBundle(unittest.TestCase):
+    """libopus is in the bundle's notices and contents: the kit's library, headers and licence text go where build_game and
+    the bundle's tools find them, a file the notices do not list is refused, and a runtime library without its kits is
+    refused before anything is downloaded."""
+
+    def setUp(self):
+        self.dir = tmp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.kit = fake_opus_kit(self.dir / "kit")
+
+    def staged(self) -> bundle.Stage:
+        st = bundle.Stage(self.dir / "bundle")
+        bundle.stage_opus(st, self.kit)
+        return st
+
+    def test_the_component_is_declared_and_has_its_row_in_the_real_table(self):
+        self.assertIn("opus", bundle.COMPONENTS)
+        self.assertIn("opus", bundle.notice_components(NOTICES_TEXT))
+
+    def test_the_kit_is_staged_where_the_bundle_tools_look(self):
+        rows = self.staged().listing()
+        paths = [r["path"] for r in rows]
+        self.assertEqual(paths, sorted([
+            "runtime/opus/lib/libopus.a", "runtime/opus/include/opus/opus.h", "runtime/opus/include/opus/opus_defines.h",
+            "runtime/opus/include/opus/opus_types.h", "runtime/opus/include/opus/opus_multistream.h",
+            "licenses/opus/opus-COPYING.txt"]))
+        self.assertTrue(all(r["component"] == "opus" for r in rows))
+        bundle.check_notices(rows, NOTICES_TEXT)   # the real table has the row and the licence text is there
+
+    def test_the_staged_kit_is_the_one_build_game_finds_inside_a_bundle(self):
+        import build_game
+
+        st = self.staged()
+        (st.root / bundle_env.MANIFEST).write_text("{}", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"OOT2_BUNDLE_ROOT": str(st.root)}):
+            os.environ.pop("OPUS_DIR", None)
+            self.assertEqual(bundle_env.opus_kit(), st.root.resolve() / "runtime" / "opus")
+            self.assertEqual(build_game.find_opus(None), st.root.resolve() / "runtime" / "opus")
+        self.assertEqual(bundle_env.OPUS_KIT, "runtime/opus")
+
+    def test_a_bundle_without_the_libopus_row_is_refused_and_the_file_is_named(self):
+        rows = self.staged().listing()
+        cut = "\n".join(l for l in NOTICES_TEXT.splitlines()
+                        if not (l.startswith("|") and "`bundle/opus/`" in l.split("|")[1])) + "\n"
+        self.assertNotIn("`bundle/opus/`", cut.split("| File |")[1])
+        with self.assertRaises(bundle.BundleError) as cm:
+            bundle.check_notices(rows, cut)
+        self.assertIn("runtime/opus/lib/libopus.a", str(cm.exception))
+        self.assertIn("bundle/opus/", str(cm.exception))
+
+    def test_a_kit_without_a_licence_text_is_refused(self):
+        shutil.rmtree(self.kit / "licenses")
+        (self.kit / "licenses").mkdir()
+        with self.assertRaises(bundle.BundleError) as cm:
+            bundle.check_notices(self.staged().listing(), NOTICES_TEXT)
+        self.assertIn("opus", str(cm.exception))
+
+    def test_a_kit_missing_a_file_the_link_needs_is_refused_by_name(self):
+        (self.kit / "lib" / "libopus.a").unlink()
+        with self.assertRaises(bundle.BundleError) as cm:
+            self.staged()
+        self.assertIn("lib/libopus.a", str(cm.exception))
+
+    def test_a_runtime_library_without_its_kits_is_refused_before_any_download(self):
+        lib = self.dir / "liboot2rt.a"
+        kits = {"dav1d_dir": self.dir, "opus_dir": self.dir, "sdl3_dir": self.dir, "vulkan_dir": self.dir}
+        bundle.check_kits(None, None, None, None, None)   # no library given: build_runtime_lib makes every kit
+        bundle.check_kits(lib, **kits)
+        for name, flag in (("opus_dir", "--opus-dir"), ("dav1d_dir", "--dav1d-dir")):
+            with self.assertRaises(bundle.BundleError) as cm:
+                bundle.check_kits(lib, **{**kits, name: None})
+            self.assertIn(flag, str(cm.exception))
+        with mock.patch.object(bundle, "fetch", side_effect=AssertionError("a download before the kits were checked")):
+            with self.assertRaises(bundle.BundleError) as cm:
+                bundle.build(ROOT, self.dir / "out", self.dir / "cache", None, lib, self.dir, None, self.dir, self.dir, False)
+        self.assertIn("--opus-dir", str(cm.exception))
+
+
+def fake_opus_kit(dest: Path) -> Path:
+    """A kit laid out as tools/fetch_opus.py lays one out, from synthetic files (no byte of libopus)."""
+    (dest / "include" / "opus").mkdir(parents=True)
+    (dest / "lib").mkdir()
+    (dest / "licenses").mkdir()
+    for h in ("opus.h", "opus_defines.h", "opus_types.h", "opus_multistream.h"):
+        (dest / "include" / "opus" / h).write_text(f"// synthetic {h}\n", encoding="utf-8")
+    (dest / "lib" / "libopus.a").write_bytes(b"!<arch>\n")
+    (dest / "licenses" / "opus-COPYING.txt").write_text("synthetic licence\n", encoding="utf-8")
+    return dest
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ rem Nothing of another toolchain on this PC may decide what the bundle builds.
 set "VULKAN_SDK="
 set "VK_SDK_PATH="
 set "DAV1D_DIR="
+set "OPUS_DIR="
 set "SDL3_DIR="
 set "PYTHONPATH="
 set "PYTHONHOME="
