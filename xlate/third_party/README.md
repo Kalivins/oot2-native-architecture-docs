@@ -164,3 +164,15 @@ Changes of this project:
   any module is that one declaration, 8 bytes). The host's post-pass
   (`xlate/host/SpirvFixup.cs`) declares it where a storage image array is
   indexed with a non-uniform index.
+- `Translation/IrDump.cs` (new), with calls in `Translation/TranslatorContext.cs`,
+  `Translation/Optimizations/Optimizer.cs`,
+  `Translation/Transforms/TransformPasses.cs`, `StructuredIr/StructuredProgram.cs`
+  and the host (`xlate/host/Translation.cs`): a text dump of the IR of one
+  program, written only when the environment variable `OOT2_XLATE_IR_DUMP`
+  names a folder (off by default; nothing is written and no translation
+  changes). One file per stage and function: after the emitters, after the
+  SSA rename, after each optimizer step and each sweep of its cleanup loop,
+  after each transform pass, before the structured form, and the structured
+  tree before and after the AST optimizer, with a `counts.tsv` of the shared
+  memory, barrier, shuffle, HMMA and call operations at each stage, which
+  shows the stage where a kind of operation goes missing.

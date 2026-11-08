@@ -6,6 +6,7 @@ using Ryujinx.Graphics.Shader.Translation;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 
 namespace Oot2.Xlate;
 
@@ -37,6 +38,9 @@ internal sealed class TranslationOutcome
 /// </summary>
 internal static class Translation
 {
+    /// <summary>The environment variable that names the folder of the IR dump.</summary>
+    public const string IrDumpVariable = "OOT2_XLATE_IR_DUMP";
+
     public static TranslationOutcome Run(Job job, byte[] code, TranslatorTiming timing)
     {
         TranslationFlags flags = TranslationFlags.Ampere;
@@ -73,7 +77,24 @@ internal static class Translation
         {
             passes++;
             accessor = new Accessor(job, code, imageTypes, textureTypes);
-            program = TranslateOnce(job, accessor, options, timing);
+
+            // A text dump of the translator's IR, one folder per job key in the folder the
+            // variable names (see IrDump). It is for diagnosis; unset, nothing is written.
+            string dumpFolder = Environment.GetEnvironmentVariable(IrDumpVariable);
+
+            if (!string.IsNullOrEmpty(dumpFolder))
+            {
+                IrDump.Begin(Path.Combine(dumpFolder, job.Key), passes);
+            }
+
+            try
+            {
+                program = TranslateOnce(job, accessor, options, timing);
+            }
+            finally
+            {
+                IrDump.End();
+            }
 
             if (passes == 2)
             {

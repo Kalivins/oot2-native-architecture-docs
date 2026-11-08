@@ -40,6 +40,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Transforms
                     node = T.RunPass(context, node);
                 }
             }
+
+            IrDump.Write(typeof(T).Name, context.Blocks);   // oot2-native: IR dump, off unless the host turns it on (IrDump)
         }
     }
 }

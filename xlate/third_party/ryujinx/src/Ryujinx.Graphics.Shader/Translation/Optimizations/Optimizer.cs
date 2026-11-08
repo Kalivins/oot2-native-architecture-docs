@@ -14,11 +14,17 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 XmadOptimizer.RunPass(context.Blocks[blkIndex]);
             }
 
+            IrDump.Write("xmad", context.Blocks);   // oot2-native: IR dump, off unless the host turns it on (IrDump)
+
             RunOptimizationPasses(context.Blocks, context.ResourceManager);
+
+            IrDump.Write("optimized-1", context.Blocks);
 
             // TODO: Some of those are not optimizations and shouldn't be here.
 
             GlobalToStorage.RunPass(context.Hfm, context.Blocks, context.ResourceManager, context.GpuAccessor, context.TargetLanguage);
+
+            IrDump.Write("global-to-storage", context.Blocks);   // oot2-native: IR dump
 
             bool hostSupportsShaderFloat64 = context.GpuAccessor.QueryHostSupportsShaderFloat64();
 
@@ -49,14 +55,20 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                 }
             }
 
+            IrDump.Write("bindless", context.Blocks);   // oot2-native: IR dump
+
             // nxnative: the reads whose handle merges several c[2] handles, once every other read has registered its texture (BindlessElimination.TryTableHandle)
             for (int blkIndex = 0; blkIndex < context.Blocks.Length; blkIndex++)
             {
                 BindlessElimination.RunPass(context.Blocks[blkIndex], context.ResourceManager, context.GpuAccessor);
             }
 
+            IrDump.Write("bindless-2", context.Blocks);   // oot2-native: IR dump
+
             // Run optimizations one last time to remove any code that is now optimizable after above passes.
             RunOptimizationPasses(context.Blocks, context.ResourceManager);
+
+            IrDump.Write("optimized-2", context.Blocks);   // oot2-native: IR dump
         }
 
         private static void RunOptimizationPasses(BasicBlock[] blocks, ResourceManager resourceManager)
@@ -133,6 +145,8 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         modified = true;
                     }
                 }
+
+                IrDump.Write("cleanup-iteration", blocks);   // oot2-native: IR dump, after each sweep of the cleanup loop
             }
             while (modified);
         }

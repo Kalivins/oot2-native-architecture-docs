@@ -70,7 +70,15 @@ namespace Ryujinx.Graphics.Shader.StructuredIr
 
                 GotoElimination.Eliminate(context.GetGotos());
 
+                if (IrDump.Enabled)   // oot2-native: IR dump, off unless the host turns it on (IrDump)
+                {
+                    IrDump.Write("phi-removed", funcIndex, blocks);
+                    IrDump.WriteAst("ast-pre-opt", function.Name, context.CurrentFunction.MainBlock);
+                }
+
                 AstOptimizer.Optimize(context);
+
+                IrDump.WriteAst("ast-final", function.Name, context.CurrentFunction.MainBlock);
 
                 context.LeaveFunction();
             }

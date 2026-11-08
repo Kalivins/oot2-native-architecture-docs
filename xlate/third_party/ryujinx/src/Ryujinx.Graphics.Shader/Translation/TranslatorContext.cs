@@ -255,6 +255,8 @@ namespace Ryujinx.Graphics.Shader.Translation
             {
                 cfgs[i] = ControlFlowGraph.Create(functions[i].Code);
 
+                IrDump.Write("emit", i, cfgs[i].Blocks);   // oot2-native: IR dump, off unless the host turns it on (IrDump)
+
                 if (i != 0)
                 {
                     frus[i] = RegisterUsage.RunPass(cfgs[i]);
@@ -294,6 +296,9 @@ namespace Ryujinx.Graphics.Shader.Translation
 
                     Ssa.Rename(cfg.Blocks);
 
+                    IrDump.SetFunction(i);   // oot2-native: IR dump
+                    IrDump.Write("ssa", i, cfg.Blocks);
+
                     TransformContext context = new(
                         hfm,
                         cfg.Blocks,
@@ -310,6 +315,14 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
 
                 funcs[i] = new Function(cfg.Blocks, $"fun{i}", false, inArgumentsCount, outArgumentsCount);
+            }
+
+            if (IrDump.Enabled)   // oot2-native: IR dump, the helper functions' bodies too
+            {
+                for (int i = 0; i < funcs.Count; i++)
+                {
+                    IrDump.Write("final", i, funcs[i].Blocks);
+                }
             }
 
             return Generate(
