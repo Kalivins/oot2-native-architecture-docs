@@ -26,10 +26,10 @@ import corpus  # noqa: E402
 # Vertex programs read the attribute answers, pixel programs the output answers,
 # and a program marked "tex" the texture answers; "act": "fail" fails the job.
 FAKE = textwrap.dedent("""
-    import json, os, sys
+    import json, os, sys, base64
     for line in sys.stdin:
         req = json.loads(line)
-        job, out = req["job"], req["out"]
+        job = req["job"]
         key, stage = job["key"], job["stage"]
         if job.get("act") == "fail":
             print(f"fail {key} 7 unsupported_opcode: Ampere op 0x1a2b at 0x340 is not implemented", flush=True)
@@ -39,9 +39,6 @@ FAKE = textwrap.dedent("""
                 "fout": job.get("fout") if stage == "ps" else None,
                 "tex": job.get("tex") if job.get("act") == "tex" else None}
         data = json.dumps(body, sort_keys=True).encode()
-        os.makedirs(out, exist_ok=True)
-        with open(os.path.join(out, key + ".spv"), "wb") as fh:
-            fh.write(data)
         res = {"notes": [], "capabilities_added": [], "passes": 1, "raw_access": {"physical_pointers": False}}
         if stage == "vs":
             res["capabilities_added"] = ["ClipDistance", "CullDistance"]
@@ -51,9 +48,9 @@ FAKE = textwrap.dedent("""
             res["notes"] = ["translator: Invalid reduction type: F32FtzRn.",
                             "texture handle 1A2B (constant buffer 2, slot 3) has no type in the job, using 2D"]
             res["raw_access"]["physical_pointers"] = True
-        with open(os.path.join(out, key + ".res.json"), "w") as fh:
-            json.dump(res, fh)
-        print(f"ok {key} 100 {len(data)}", flush=True)
+        module = base64.b64encode(data)
+        desc = base64.b64encode(json.dumps(res, sort_keys=True).encode())
+        print(f"ok {key} 100 {module.decode()} {desc.decode()}", flush=True)
 """)
 
 JOBS = [

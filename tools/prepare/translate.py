@@ -15,8 +15,7 @@ Output, under the output folder:
                               programs.tsv, pairing.tsv and summary.json, which the ledger and pipeline steps read
 
 Scratch, under temp/translate/: spill.bin (every translated job's module and description, appended as the answers
-come), results.tsv (one line per job answered, with where its entry lies in spill.bin), out/ (where the translator
-writes each job's two files, which are moved into spill.bin and deleted as soon as it answers), the translator
+come), results.tsv (one line per job answered, with where its entry lies in spill.bin), the translator
 children's logs, and the key of the run they belong to.
 
 In order:
@@ -27,14 +26,13 @@ In order:
 2. Translate. Every job, with the default answers and no validation, on a pool of translator children
    (tools/shaders/pool.py). The child count follows the CPU count and the free memory (--translate-jobs sets it), the
    pool's memory guard gets the same share of the free memory, and a progress line comes at least every 10 seconds.
-   The pool thread that receives an answer reads the job's two files and appends them to spill.bin at once.
+   Each answer's two parts ride in the reply line and are appended to spill.bin by the pool thread that got them.
 3. Pack. Every job goes into the base pack, read from spill.bin: its module and description, or a failure record.
    The scratch files are deleted once the pack is in place.
 
-Why one spill file. The translator writes each job as two loose files (its line protocol, xlate/host). On the desktop
-every loose file reopened later paid the antivirus scanner's check, and packing 56,381 such pairs took 680.8 s against
-19.2 s to read the same bytes back from one file (the shader cache pack study). Here each pair is read once, by the thread that got
-the answer, while the other children keep translating, and packing reads one large file.
+Why one spill file. The translator answers with each job's two parts in its reply line instead of loose files, so
+the desktop's real-time scanner never reopens them: each pair is read once, by the thread that got the answer, while
+the other children keep translating, and packing reads one large file.
 
 The failure rule. A job the translator refuses (a "fail" reply: an instruction it lacks, a program it cannot read) is
 packed as a failure record holding "fail: <its reason>", and the step goes on: the runtime stops with that reason, by
@@ -88,7 +86,6 @@ HERE = Path(__file__).resolve().parent
 SHADERS = "shaders"             # the output folder of this step
 SPLIT = "split"                 # shaders/split/
 SCRATCH = "translate"           # temp/translate/
-LOOSE = "out"                   # temp/translate/out/: where the translator writes, emptied as it answers
 SPILL = "spill.bin"             # temp/translate/spill.bin
 STAMP = "stamp.txt"             # the key the folder holding it belongs to
 RESULTS = "results.tsv"
@@ -148,8 +145,6 @@ class Translate(Step):
         for stale in (pack, pack.with_name(pack.name + ".tmp")):
             stale.unlink(missing_ok=True)       # write-once: a step that runs again deletes its own pack first
         scratch = open_scratch(ctx, ctx.keys[self.id])
-        loose = scratch / LOOSE
-        loose.mkdir(exist_ok=True)
 
         folder, summary, split_seconds = ensure_split(ctx, extracted)
         jobs = load_jobs(folder)
@@ -173,13 +168,13 @@ class Translate(Step):
         progress = Progress(rep, len(jobs), len(kept))
         t0 = time.monotonic()
         try:
-            answers, stats = translate(command, jobs, todo, loose, scratch, spill, workers, limit, TIMEOUT, progress)
+            answers, stats = translate(command, jobs, todo, scratch, spill, workers, limit, TIMEOUT, progress)
             retry = sorted(k for k, a in answers.items() if a["status"] in ("crash", "timeout"))
             if retry:
                 rep.say(f"translate: {len(retry):,} job(s) got no answer "
                         f"({status_counts(answers[k]['status'] for k in retry)}); each is tried again alone, within "
                         f"{RETRY_TIMEOUT:.0f} s")
-                again, _ = translate(command, jobs, retry, loose, scratch, spill, 1, limit, RETRY_TIMEOUT, progress)
+                again, _ = translate(command, jobs, retry, scratch, spill, 1, limit, RETRY_TIMEOUT, progress)
                 answers.update(again)
         finally:
             spill.close()
@@ -209,7 +204,6 @@ class Translate(Step):
         pack_seconds = time.monotonic() - t1
         for name in (SPILL, RESULTS):
             (scratch / name).unlink(missing_ok=True)
-        shutil.rmtree(loose, ignore_errors=True)
         split_files = {name: (folder / name).stat().st_size for name in SPLIT_FILES}
         split_bytes = sum(split_files.values())
 
@@ -373,26 +367,22 @@ def open_scratch(ctx: Context, key: str) -> Path:
 
 
 class Spill:
-    """spill.bin: each translated job's module, then its description, appended as the answers come. The loose pair
-    the translator wrote is read once and deleted, so out/ never holds more than the jobs in flight."""
+    """spill.bin: each translated job's module, then its description, appended as the answers come, so memory holds
+    only the jobs in flight."""
 
     def __init__(self, path: Path):
         self.f = open(path, "ab")
         self.end = path.stat().st_size      # an interrupted run's entries stay where results.tsv says they are
         self.lock = threading.Lock()
 
-    def add(self, loose: Path, key: str) -> tuple[int, int, int]:
-        """Move the job's two files into the spill. Returns the entry's offset, module size and description size."""
-        spv, res = loose / f"{key}.spv", loose / f"{key}.res.json"
-        module, desc = spv.read_bytes(), res.read_bytes()
+    def add(self, module: bytes, desc: bytes, key: str) -> tuple[int, int, int]:
+        """Append the job's module and description to the spill. Returns the entry's offset, module size and description size."""
         with self.lock:
             offset = self.end
             self.f.write(module)
             self.f.write(desc)
             self.f.flush()
             self.end += len(module) + len(desc)
-        spv.unlink()
-        res.unlink()
         return offset, len(module), len(desc)
 
     def close(self) -> None:
@@ -470,10 +460,10 @@ class Progress:
                               every=10.0, final=done >= self.total)
 
 
-def translate(command: list[str], jobs: dict[str, dict], keys: list[str], loose: Path, scratch: Path, spill: Spill,
+def translate(command: list[str], jobs: dict[str, dict], keys: list[str], scratch: Path, spill: Spill,
               workers: int, limit: int, timeout: float, progress: Progress) -> tuple[dict[str, dict], pool.PoolStats]:
-    """Translate the jobs of keys on the pool. Each answer is a results.tsv row; a translated job's two files are
-    moved into the spill first, by the thread that got the answer. Returns the rows by key. Ctrl+C stops feeding jobs;
+    """Translate the jobs of keys on the pool. Each answer is a results.tsv row; a translated job's module and description
+    are appended to the spill first, by the thread that got the answer, and the pool keeps none of their bytes. Returns the rows by key. Ctrl+C stops feeding jobs;
     the jobs in flight finish and are recorded, then KeyboardInterrupt goes on to the runner. A second Ctrl+C leaves at
     once, and the answers that come after it are not recorded (those jobs are translated again).
 
@@ -503,7 +493,7 @@ def translate(command: list[str], jobs: dict[str, dict], keys: list[str], loose:
                    "desc_bytes": ""}
             if r.status == "ok":
                 try:
-                    row["spill_offset"], row["spv_bytes"], row["desc_bytes"] = spill.add(loose, r.key)
+                    row["spill_offset"], row["spv_bytes"], row["desc_bytes"] = spill.add(r.module, r.description, r.key)
                 except ValueError:          # the spill closed: a second Ctrl+C
                     return
                 except OSError as e:
@@ -521,7 +511,7 @@ def translate(command: list[str], jobs: dict[str, dict], keys: list[str], loose:
             for k in keys:
                 if stop.is_set():
                     return
-                yield jobs[k], loose
+                yield jobs[k], None
 
         def work() -> None:
             try:

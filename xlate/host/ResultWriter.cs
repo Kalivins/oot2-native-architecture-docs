@@ -249,45 +249,6 @@ internal static class ResultWriter
         return ms.ToArray();
     }
 
-    /// <summary>Write both files of a job, each to a .tmp name first and then renamed; the module goes first.</summary>
-    public static void WriteFiles(string outDir, string key, byte[] spirv, byte[] resJson)
-    {
-        string spv = Path.Combine(outDir, key + ".spv");
-        string res = Path.Combine(outDir, key + ".res.json");
-        string spvTmp = spv + ".tmp";
-        string resTmp = res + ".tmp";
-
-        try
-        {
-            Directory.CreateDirectory(outDir);
-            File.WriteAllBytes(spvTmp, spirv);
-            File.WriteAllBytes(resTmp, resJson);
-            File.Move(spvTmp, spv, true);
-            File.Move(resTmp, res, true);
-        }
-        catch (Exception)
-        {
-            TryDelete(spvTmp);
-            TryDelete(resTmp);
-
-            throw;
-        }
-    }
-
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
-        }
-    }
-
     private static void WriteOutputList(Utf8JsonWriter w, string name, int[][] pairs)
     {
         w.WriteStartArray(name);

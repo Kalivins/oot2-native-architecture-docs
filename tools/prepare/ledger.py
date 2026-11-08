@@ -37,9 +37,9 @@ Each variant is translated again from the program's job with those answers (corp
 translator children the translate step uses, and packed with the translator's module and description. A variant the
 translator refuses, or that gets no answer twice (the second time alone), is packed as a failure record, as the base
 pack does: the runtime then stops with the reason by name, and never serves the default module for a draw whose answers
-it does not match. A variant has the key of its program, so variants of one program are translated in separate rounds
-and folders, and a loose pair is read by the pack writer after the round (a handful of files, so the scanner's check
-that made the translate step spill its answers is not worth the same care here).
+it does not match. A variant has the key of its program, so variants of one program are translated in separate rounds,
+and each answer's module and description are held in memory until the pack writer takes them (a handful of variants,
+so the spill the translate step needs for the whole game is not worth the same care here).
 
 The ledger is checked as it is read, because it is a file on the player's disk: a header other than {"oot2_ledger":1},
 a line that is not a row, an answer outside the translator's vocabulary or a digest that does not match the answers
@@ -82,7 +82,6 @@ HERE = Path(__file__).resolve().parent
 LEDGER_FILE = "ledger.jsonl"    # runtime/include/oot2/ledger.h LEDGER_FILE, in the output folder (the game folder)
 HEADER = {"oot2_ledger": 1}
 SCRATCH = "ledger"              # temp/ledger/
-LOOSE = "out"                   # temp/ledger/out/r<n>/: where round n's translator children write
 KINDS = ("vs", "ps", "cs", "ts", "ms")
 FIELDS = cache_pack.ANSWER_FIELDS
 TEX_TYPES = frozenset(("1d", "1darray", "2d", "2darray", "2dms", "2dmsarray", "3d", "cube", "cubearray", "buffer"))
@@ -401,14 +400,13 @@ def run_batch(command: list[str], items: list[tuple[dict, Path]], logs: Path, wo
 
 def translate_variants(command: list[str], variants: list[Variant], scratch: Path, workers: int, limit: int,
                        timeout: float) -> dict[tuple[str, bytes], pool.Result]:
-    """Every variant, in rounds: round n takes the n-th variant of each program, into its own folder, because a
-    variant's files are named by its program's key. The pool's result for each (key, digest)."""
+    """Every variant, in rounds: round n takes the n-th variant of each program. Variants of one program go in
+    separate rounds because a program's key names its files, and the pool answers with the two parts so no loose
+    folder is needed. The pool's result for each (key, digest)."""
     out: dict[tuple[str, bytes], pool.Result] = {}
     for rank in sorted({v.rank for v in variants}):
         batch = [v for v in variants if v.rank == rank]
-        folder = scratch / LOOSE / f"r{rank}"
-        folder.mkdir(parents=True, exist_ok=True)
-        results = run_batch(command, [(v.job, folder) for v in batch], scratch / "logs", workers, limit, timeout)
+        results = run_batch(command, [(v.job, None) for v in batch], scratch / "logs", workers, limit, timeout)
         for v in batch:
             out[(v.key, v.digest)] = results.get(v.key) or pool.Result(v.key, "crash", message="no result")
     return out
@@ -417,14 +415,14 @@ def translate_variants(command: list[str], variants: list[Variant], scratch: Pat
 VOLATILE = ("answers", "timing")    # what a description holds that the answers and the clock decide
 
 
-def same_as_base(base: cache_pack.Pack, key: str, spv: Path, res: Path) -> bool:
+def same_as_base(base: cache_pack.Pack, key: str, module: bytes, desc: bytes) -> bool:
     """Whether a translated variant is the base entry again: the same module bytes and the same description apart from
     its answers and its timing (a description that records an answer the module did not use, such as a vertex
     attribute's, differs, and the variant stays)."""
-    module, desc = base.read(base.find(key))
-    if spv.read_bytes() != module:
+    base_module, base_desc = base.read(base.find(key))
+    if module != base_module:
         return False
-    a, b = json.loads(desc), json.loads(res.read_bytes())
+    a, b = json.loads(base_desc), json.loads(desc)
     for name in VOLATILE:
         a.pop(name, None)
         b.pop(name, None)
@@ -434,21 +432,19 @@ def same_as_base(base: cache_pack.Pack, key: str, spv: Path, res: Path) -> bool:
 def entries_of(variants: list[Variant], outcome: dict[tuple[str, bytes], pool.Result], scratch: Path,
                base: cache_pack.Pack) -> tuple[list, int]:
     """The variants pack's entries and how many variants were left out: a translated variant's module and description
-    (read by the pack writer from the round's folder), a failure record for one that did not translate, nothing for
-    one that is the base entry again."""
+    (carried in the translator's reply), a failure record for one that did not translate, nothing for one that is the
+    base entry again."""
     entries = []
     identical = 0
     for v in variants:
         r = outcome[(v.key, v.digest)]
-        folder = scratch / LOOSE / f"r{v.rank}"
-        spv, res = folder / f"{v.key}.spv", folder / f"{v.key}.res.json"
-        if r.status == "ok" and not (spv.is_file() and res.is_file()):
+        if r.status == "ok" and not (r.module and r.description):
             r = pool.Result(v.key, "fail", message="the translator answered, but its output is not there")
         if r.status == "ok":
-            if same_as_base(base, v.key, spv, res):
+            if same_as_base(base, v.key, r.module, r.description):
                 identical += 1
             else:
-                entries.append(cache_pack.Entry(v.key, spv, res, answers=v.digest))
+                entries.append(cache_pack.Entry(v.key, r.module, r.description, answers=v.digest))
         else:
             entries.append(cache_pack.Entry(v.key, None, translate.failure_text({"status": r.status,
                                                                                  "message": r.message}),

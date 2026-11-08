@@ -10,11 +10,13 @@ Run: python -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools" / "shaders"))
@@ -24,7 +26,7 @@ import validate  # noqa: E402
 
 # A stand-in for `oot2-xlate --serve`: it answers each job by its "act" field.
 FAKE = textwrap.dedent("""
-    import json, os, sys
+    import json, os, sys, base64
     for line in sys.stdin:
         req = json.loads(line)
         job = req["job"]
@@ -36,17 +38,35 @@ FAKE = textwrap.dedent("""
         if act == "fail":
             print(f"fail {job['key']} 12 unsupported opcode", flush=True)
         elif act == "wrongkey":
-            print(f"ok other 5 10", flush=True)
+            module = base64.b64encode(b"other-module")
+            desc = base64.b64encode(b'{"schema":2}')
+            print(f"ok other 5 {module.decode()} {desc.decode()}", flush=True)
         elif act == "nokey":
             print("fail - 0 bad_job: key does not match the pattern", flush=True)
         elif act == "slow":
             import time
             time.sleep(0.05)
-            print(f"ok {job['key']} 250 1024", flush=True)
+            module = base64.b64encode(b"m" * 1024)
+            desc = base64.b64encode(b'{"schema":2}')
+            print(f"ok {job['key']} 250 {module.decode()} {desc.decode()}", flush=True)
         elif act == "garbage":
             print("hello", flush=True)
-        else:
+        elif act == "noparts":          # a protocol 1 reply: the size, no module and no description
             print(f"ok {job['key']} 250 1024", flush=True)
+        elif act == "oneparts":
+            print(f"ok {job['key']} 250 {base64.b64encode(b'm' * 64).decode()}", flush=True)
+        elif act == "emptydesc":
+            print(f"ok {job['key']} 250 {base64.b64encode(b'm' * 64).decode()} ", flush=True)
+        elif act == "badbase64":
+            print(f"ok {job['key']} 250 !!!! ????", flush=True)
+        elif act == "cut":              # the reply ends in the middle, with no line break, and the child is gone
+            sys.stdout.write(f"ok {job['key']} 250 " + base64.b64encode(b"m" * 1024).decode()[:100])
+            sys.stdout.flush()
+            os._exit(0)
+        else:
+            module = base64.b64encode(b"m" * 1024)
+            desc = base64.b64encode(b'{"schema":2}')
+            print(f"ok {job['key']} 250 {module.decode()} {desc.decode()}", flush=True)
 """)
 
 
@@ -67,6 +87,18 @@ class ParseReplyTest(unittest.TestCase):
         for line in ("", "hello", "ok abc", "maybe abc 1 2", "ok abc notanumber 2"):
             with self.subTest(line=line), self.assertRaises(ValueError):
                 pool.parse_reply(line)
+
+
+# A stand-in that speaks protocol 1: it writes its own files and answers with the size.
+OLD = textwrap.dedent("""
+    import json, sys
+    if sys.argv[1:] == ["--version"]:
+        print("oot2-xlate " + "0" * 64 + " proto=1 spirv=1.3 target=vulkan1.3")
+        sys.exit(0)
+    for line in sys.stdin:
+        job = json.loads(line)["job"]
+        print(f"ok {job['key']} 250 1024", flush=True)
+""")
 
 
 class RunPoolTest(unittest.TestCase):
@@ -115,6 +147,96 @@ class RunPoolTest(unittest.TestCase):
         self.assertTrue(all(r.status == "ok" for r in results))
         self.assertGreater(stats.recycled, 0)
         self.assertEqual(stats.restarts, 0)
+
+    def test_the_returned_results_hold_no_module_bytes(self):
+        # A full prepare translates millions of bytes of modules: the list the pool returns keeps the metadata
+        # only, and the caller's sink is the one place the bytes go.
+        sink: dict[str, tuple[bytes, bytes]] = {}
+        jobs = [({"key": f"k{i}", "act": "ok"}, None) for i in range(8)]
+        results, _ = pool.run_pool(self.fake.command, jobs, 2, self.dir / "logs", timeout=20.0,
+                                   on_result=lambda r: sink.__setitem__(r.key, (r.module, r.description)))
+        self.assertEqual(sorted(r.key for r in results), sorted(f"k{i}" for i in range(8)))
+        for r in results:
+            self.assertEqual((r.status, r.spv_bytes), ("ok", 1024))
+            self.assertEqual((r.module, r.description), (b"", b""), r.key)
+        self.assertEqual(sorted(sink), sorted(f"k{i}" for i in range(8)))
+        for key, (module, desc) in sink.items():
+            self.assertEqual(module, b"m" * 1024, key)
+            self.assertEqual(desc, b'{"schema":2}', key)
+        self.assertFalse((self.dir / "out").exists())      # no folder was given, so nothing is written
+
+    def test_an_ok_reply_without_its_two_parts_fails_the_job_by_name(self):
+        acts = ["noparts", "oneparts", "emptydesc", "badbase64", "cut", "ok"]
+        got, stats = self.run_jobs(acts, workers=1)
+        for i, why in enumerate(("does not carry a module and a description", "does not carry a module and a description",
+                                 "does not carry a module and a description", "is not base64", "in the middle of its reply")):
+            r = got[f"k{i}"]
+            self.assertIn(r.status, ("fail", "crash"), r)
+            self.assertIn(why, r.message, r)
+            self.assertEqual((r.module, r.description, r.spv_bytes), (b"", b"", 0), r)
+            self.assertFalse((self.dir / "out" / f"k{i}.spv").exists(), r)
+            self.assertFalse((self.dir / "out" / f"k{i}.res.json").exists(), r)
+        for i in (0, 1, 2):
+            self.assertIn(f"k{i}", got[f"k{i}"].message)           # named by the job's key
+        self.assertEqual(got["k4"].status, "crash")                # the child died mid-line and was replaced
+        self.assertEqual(got["k5"].status, "ok")                   # the pool went on
+        self.assertEqual(stats.restarts, 1)
+
+    def test_files_are_written_to_tmp_names_and_renamed_module_first(self):
+        out = self.dir / "out"
+        seen = []
+        real = os.replace
+
+        def spy(src, dst, *a, **kw):
+            seen.append((Path(dst).name, Path(src).name, sorted(p.name for p in out.iterdir())))
+            real(src, dst, *a, **kw)
+
+        with mock.patch.object(pool.os, "replace", spy):
+            got, _ = self.run_jobs(["ok"], workers=1)
+        self.assertEqual(got["k0"].status, "ok")
+        self.assertEqual([s[:2] for s in seen], [("k0.spv", "k0.spv.tmp"), ("k0.res.json", "k0.res.json.tmp")])
+        # at the first rename both parts are still under their .tmp names; no final name exists yet
+        self.assertEqual(seen[0][2], ["k0.res.json.tmp", "k0.spv.tmp"])
+        self.assertEqual(seen[1][2], ["k0.res.json.tmp", "k0.spv"])
+        self.assertEqual(sorted(p.name for p in out.iterdir()), ["k0.res.json", "k0.spv"])
+        self.assertEqual((out / "k0.spv").read_bytes(), b"m" * 1024)
+        self.assertEqual((out / "k0.res.json").read_bytes(), b'{"schema":2}')
+
+    def test_a_failed_write_leaves_no_tmp_file_and_fails_the_job(self):
+        out = self.dir / "out"
+        real = os.replace
+
+        def failing(src, dst, *a, **kw):
+            if str(dst).endswith(".res.json"):
+                raise PermissionError("denied")
+            real(src, dst, *a, **kw)
+
+        with mock.patch.object(pool.os, "replace", failing):
+            got, _ = self.run_jobs(["ok"], workers=1)
+        self.assertEqual(got["k0"].status, "fail")
+        self.assertIn("cannot be written", got["k0"].message)
+        self.assertEqual(sorted(p.name for p in out.iterdir()), ["k0.spv"])   # the module landed whole, no .tmp stays
+
+    def test_an_out_folder_is_refused_by_name_for_a_protocol_1_translator(self):
+        old = self.dir / "old_xlate.py"
+        old.write_text(OLD, encoding="utf-8")
+        command = [sys.executable, "-I", str(old)]
+        with self.assertRaisesRegex(ValueError, "speaks protocol 1.*out folder needs protocol 2"):
+            pool.run_pool(command, [({"key": "k0"}, self.dir / "out")], 1, self.dir / "logs", timeout=20.0)
+        self.assertFalse((self.dir / "out").exists())
+
+    def test_the_protocol_is_asked_once_for_each_command(self):
+        asked = []
+        real = pool.subprocess.run
+
+        def counting(cmd, *a, **kw):
+            asked.append(list(cmd))
+            return real(cmd, *a, **kw)
+
+        with mock.patch.object(pool.subprocess, "run", counting):
+            for _ in range(3):
+                self.run_jobs(["ok"], workers=1)
+        self.assertEqual([c[-1] for c in asked], ["--version"])    # a stand-in without --version is let through
 
     def test_a_silent_child_times_out(self):
         got, stats = self.run_jobs(["hang", "ok"], workers=1, timeout=2.0)

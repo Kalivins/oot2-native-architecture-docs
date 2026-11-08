@@ -4,9 +4,17 @@
 
 Each child is `oot2-xlate --serve`. The line protocol (xlate/host/Program.cs):
 
-  request, one stdin line:  {"job": {...}, "out": "<folder>"}
-  reply, one stdout line:   ok <key> <microseconds> <spirv bytes>
+  request, one stdin line:  {"job": {...}}
+  reply, one stdout line:   ok <key> <microseconds> <module> <description>
+                                  both base64, whole bytes
                             fail <key> <microseconds> <message>
+
+    The translator writes no file: the two parts ride in the reply line. The
+    pool hands them to the caller's on_result, and writes <key>.spv and
+    <key>.res.json into a job's out folder only when the caller gives one
+    (tools that read the files back). The list run_pool returns holds the
+    small metadata of every job and never the module bytes, which would add
+    up to the whole shader pack (about 6 GB for the game) in memory.
   diagnostics go to stderr, which the pool appends to one log file per child.
 
 The microseconds are measured inside the child around the translation alone,
@@ -24,6 +32,8 @@ budget the spike sets (about 4 GB).
 
 from __future__ import annotations
 
+import dataclasses
+import itertools
 import json
 import os
 import queue
@@ -31,11 +41,13 @@ import subprocess
 import sys
 import threading
 import time
+from base64 import b64decode
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Sequence
 
 GIB = 1 << 30
+PROTOCOL = 2                    # the line protocol spoken here (xlate/host/Host.cs)
 
 
 @dataclass
@@ -44,7 +56,9 @@ class Result:
     status: str            # ok, fail, crash, timeout
     micros: int = 0        # translation time inside the child
     wall_ms: float = 0.0   # request to reply, as the parent saw it
-    spv_bytes: int = 0
+    spv_bytes: int = 0     # the module's bytes
+    module: bytes = b""    # the SPIR-V module of an ok reply: given to on_result, never kept in the returned list
+    description: bytes = b""   # the description of an ok reply: likewise
     message: str = ""
 
 
@@ -59,8 +73,68 @@ class PoolStats:
     notes: list[str] = field(default_factory=list)
 
 
+def base64_decode(text: str, key: str) -> bytes:
+    """One base64 part of an ok reply; a malformed one fails the job by name."""
+    try:
+        return b64decode(text, validate=True)
+    except Exception as exc:
+        raise ValueError(f"the reply for {key} is not base64: {exc}") from exc
+
+
+def decode_ok(key: str, rest: str) -> tuple[bytes, bytes]:
+    """The module and the description of an ok reply's rest. An ok reply that does not carry both, each non-empty,
+    fails the job by name: it never becomes a success with empty bytes."""
+    parts = rest.split(" ")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"the ok reply for {key} does not carry a module and a description ({len(parts) if rest else 0} "
+                         "part(s)): a translator of another protocol, or a reply cut short")
+    return base64_decode(parts[0], key), base64_decode(parts[1], key)
+
+
+def write_pair(out: Path, key: str, module: bytes, description: bytes) -> None:
+    """<key>.spv and <key>.res.json in out, each written to a .tmp name and renamed, the module first, so a reader
+    never meets a half-written file."""
+    out.mkdir(parents=True, exist_ok=True)
+    spv, res = out / f"{key}.spv", out / f"{key}.res.json"
+    spv_tmp, res_tmp = spv.with_name(spv.name + ".tmp"), res.with_name(res.name + ".tmp")
+    try:
+        spv_tmp.write_bytes(module)
+        res_tmp.write_bytes(description)
+        os.replace(spv_tmp, spv)
+        os.replace(res_tmp, res)
+    except OSError:
+        for tmp in (spv_tmp, res_tmp):
+            tmp.unlink(missing_ok=True)
+        raise
+
+
+_protocols: dict[tuple[str, ...], int | None] = {}
+
+
+def child_protocol(cmd: Sequence[str]) -> int | None:
+    """The line protocol the translator gives with --version (proto=N), asked once for each command; None when it
+    does not say (a stand-in that has no --version)."""
+    key = tuple(cmd)
+    if key not in _protocols:
+        found = None
+        try:
+            r = subprocess.run([*cmd, "--version"], capture_output=True, text=True, errors="replace", timeout=60,
+                               stdin=subprocess.DEVNULL)
+            for word in r.stdout.split():
+                if word.startswith("proto=") and word[6:].isdigit():
+                    found = int(word[6:])
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        _protocols[key] = found
+    return _protocols[key]
+
+
 def parse_reply(line: str) -> tuple[str, str, int, str]:
-    """Split a reply line into (status, key, micros, rest)."""
+    """Split a reply line into (status, key, micros, rest).
+
+    For an ok reply, rest holds "<module> <description>", both base64;
+    no space appears inside either, so the first space splits them.
+    """
     parts = line.rstrip("\r\n").split(" ", 3)
     if len(parts) < 3 or parts[0] not in ("ok", "fail"):
         raise ValueError(f"malformed reply: {line[:200]!r}")
@@ -165,8 +239,16 @@ def run_pool(command: Sequence[str], jobs: Iterable[tuple[dict, Path]], workers:
     executable alone for a NativeAOT build, or an interpreter and a script.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [*map(str, command), "--serve"]
+    base_cmd = [*map(str, command)]
+    cmd = [*base_cmd, "--serve"]
     feed: Iterator[tuple[dict, Path]] = iter(jobs)
+    first = next(feed, None)
+    if first is not None:
+        proto = child_protocol(base_cmd) if first[1] is not None else None
+        if proto not in (None, PROTOCOL):
+            raise ValueError(f"the translator {base_cmd[-1]} speaks protocol {proto}, which writes its own files; an "
+                             f"out folder needs protocol {PROTOCOL}, whose replies carry the module and the description")
+        feed = itertools.chain([first], feed)
     feed_lock = threading.Lock()
     results: list[Result] = []
     res_lock = threading.Lock()
@@ -188,10 +270,12 @@ def run_pool(command: Sequence[str], jobs: Iterable[tuple[dict, Path]], workers:
             done.wait(0.5)
 
     def record(r: Result) -> None:
-        with res_lock:
-            results.append(r)
+        # The caller's sink gets the bytes; the returned list keeps only the metadata.
         if on_result:
             on_result(r)
+        kept = dataclasses.replace(r, module=b"", description=b"") if (r.module or r.description) else r
+        with res_lock:
+            results.append(kept)
 
     def worker(slot: int) -> None:
         child = _Child(cmd, log_dir / f"child{slot:02d}.log")
@@ -222,11 +306,13 @@ def run_pool(command: Sequence[str], jobs: Iterable[tuple[dict, Path]], workers:
             job, out = item
             key = str(job.get("key", "?"))
             t0 = time.perf_counter()
-            line = child.ask(json.dumps({"job": job, "out": str(out)}, separators=(",", ":")), timeout)
+            line = child.ask(json.dumps({"job": job}, separators=(",", ":")), timeout)
             wall = (time.perf_counter() - t0) * 1000.0
-            if line is None or line == "":
-                record(Result(key, "crash" if line is None else "timeout", wall_ms=wall,
-                              message=f"child {slot} {'exited' if line is None else 'did not answer'}"))
+            cut = bool(line) and not line.endswith("\n")    # the child ended in the middle of its reply
+            if line is None or line == "" or cut:
+                record(Result(key, "timeout" if line == "" else "crash", wall_ms=wall,
+                              message=f"child {slot} {'did not answer' if line == '' else 'exited'}"
+                                      f"{' in the middle of its reply' if cut else ''}"))
                 child.close(kill=True)
                 child = _Child(cmd, log_dir / f"child{slot:02d}.log")
                 children[slot] = child
@@ -247,7 +333,20 @@ def run_pool(command: Sequence[str], jobs: Iterable[tuple[dict, Path]], workers:
                 record(Result(key, "fail", micros, wall, message=f"reply for {rkey}"))
                 continue
             if status == "ok":
-                record(Result(key, "ok", micros, wall, spv_bytes=int(rest or 0)))
+                try:
+                    module, description = decode_ok(key, rest)
+                except ValueError as exc:
+                    record(Result(key, "fail", micros, wall, message=str(exc)))
+                    continue
+                if out is not None:
+                    try:
+                        write_pair(out, key, module, description)
+                    except OSError as exc:
+                        record(Result(key, "fail", micros, wall,
+                                      message=f"the translator answered, but its output cannot be written to {out}: {exc}"))
+                        continue
+                record(Result(key, "ok", micros, wall, spv_bytes=len(module),
+                              module=module, description=description))
             else:
                 record(Result(key, "fail", micros, wall, message=rest))
         child.close()

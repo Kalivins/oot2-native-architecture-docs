@@ -70,10 +70,10 @@ STUB = textwrap.dedent('''\
     SAMEALL asks and answers its default whatever the job says; BLINDMOD builds a module that ignores the answers but
     a description that follows them. REFUSE in the code fails the job. NOCUBE fails a job whose tex answers hold
     "cube". CRASHVAR ends this process when the job sets any answer."""
-    import hashlib, json, os, re, struct, sys
+    import base64, hashlib, json, os, re, struct, sys
     IDENTITY = os.environ.get("STUB_IDENTITY") or hashlib.sha256(open(__file__, "rb").read()).hexdigest()
     if sys.argv[1:] == ["--version"]:
-        print(f"oot2-xlate {IDENTITY} proto=1 spirv=1.3 target=vulkan1.3")
+        print(f"oot2-xlate {IDENTITY} proto=2 spirv=1.3 target=vulkan1.3")
         sys.exit(0)
 
     def pick(table, slot, default):
@@ -84,7 +84,7 @@ STUB = textwrap.dedent('''\
 
     for line in sys.stdin:
         request = json.loads(line)
-        job, out = request["job"], request["out"]
+        job = request["job"]
         key = job["key"]
         with open(job["code"], "rb") as f:
             f.seek(job.get("code_offset", 0))
@@ -136,13 +136,10 @@ STUB = textwrap.dedent('''\
                "interface": {"inputs": [], "outputs": [{"location": n, "component": 0, "components": 4,
                                                           "type": "float32", "used": True}
                                                          for n in reads["fout"]]}}
-        with open(os.path.join(out, key + ".spv"), "wb") as fh:
-            fh.write(module)
-        with open(os.path.join(out, key + ".res.json"), "w") as fh:
-            json.dump(res, fh)
-        print(f"ok {key} 100 {len(module)}", flush=True)
+        m64 = base64.b64encode(module).decode()
+        d64 = base64.b64encode(json.dumps(res, sort_keys=True).encode()).decode()
+        print(f"ok {key} 100 {m64} {d64}", flush=True)
 ''')
-
 
 # --- programs, ledgers ----------------------------------------------------------------------------------------------
 
@@ -709,9 +706,8 @@ class RealTranslatorTest(LedgerBase):
         got = ledger.run_batch(check.translator_command(Path(xlatet.EXE)), [(job, folder)], self.root / "logs", 1,
                                1 << 32, 300.0)
         self.assertEqual(got[self.key].status, "ok", got[self.key])
-        self.assertTrue(ledger.same_as_base(pack, self.key, folder / f"{self.key}.spv",
-                                            folder / f"{self.key}.res.json"))
-        self.assertEqual((folder / f"{self.key}.spv").read_bytes(), self.base_module(self.key))
+        self.assertTrue(ledger.same_as_base(pack, self.key, got[self.key].module, got[self.key].description))
+        self.assertEqual(got[self.key].module, self.base_module(self.key))
 
 
 if __name__ == "__main__":

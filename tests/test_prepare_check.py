@@ -347,7 +347,7 @@ class PrepareCheckCommandTest(CheckTestBase):
             self.assertEqual(code, 0, text)
             self.assertIn("Vulkan headers 1.", text)
             self.assertIn("x86-64-v3", text)
-            self.assertIn(f"with compression.zstd, translator {translator.resolve()} (protocol 1, identity ", text)
+            self.assertIn(f"with compression.zstd, translator {translator.resolve()} (protocol 2, identity ", text)
             self.assertIn("translate: would run (not done yet)", text)
             state = statefile.load(self.dest)
             self.assertEqual(state["inputs"]["dump"]["size"], 3 << 20)
