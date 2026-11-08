@@ -24,6 +24,7 @@
 #include "oot2/runtime.h"
 #include "oot2/shader_desc.h"
 #include "oot2/vk_format.h"
+#include "oot2/vk_gpu_time.h"
 #include "oot2/vk_nvn.h"
 #include "oot2/vk_rec.h"
 #include "oot2/vk_replay.h"
@@ -162,6 +163,9 @@ static struct {
     uint32_t nwrote;
     int wslot;                                // the frame's entry of W
     int after_xfer;                           // a transfer ran since the last full barrier
+    uint32_t pass_draws;                      // the open pass's draws and the stages of its first: the gpu timing's labels
+    const char *pass_vs, *pass_fs;
+    int noting;                               // a dispatch is gathering the buffers its gpu timing mark names
 } F;
 
 // What the frames in flight wrote (vkr_writes), a ring of FRAMES_KEPT by replayed frame (timeline values are shared with
@@ -308,6 +312,14 @@ void vkr_wrote(uint64_t addr, uint64_t size, int image, uint32_t draw) {
     g_stats.storage_writes++;
 }
 
+// What the gpu timing (oot2/vk_gpu_time.h) says about a buffer a dispatch binds: the letter of its backing.
+static char backing_letter(int kind) {
+    return kind == BACKING_EXTENT ? 'E' : kind == BACKING_IMPORT ? 'I' : kind == BACKING_MIRROR ? 'M' : '?';
+}
+static void note(char kind, uint64_t addr, uint64_t bytes, int write) {
+    if (vkgt_enabled && F.noting) vkgt_note(kind, addr, bytes, write);
+}
+
 static Bound snapshot(uint64_t addr, uint64_t size) {
     Rng r = {addr, addr + size};
     for (uint32_t i = 0; i < F.nsnaps; i++)
@@ -327,8 +339,11 @@ static Bound uniform(VknBuf b) {
     uint64_t size = b.size < UNIFORM_MAX ? b.size : UNIFORM_MAX;
     BackingRef ref;
     F.ops->resolve(b.addr, size, F.value, &ref);
-    if (ref.kind == BACKING_IMPORT && !vkr_no_snapshot && (vkr_no_drop || !vkr_written(b.addr, size)))
+    if (ref.kind == BACKING_IMPORT && !vkr_no_snapshot && (vkr_no_drop || !vkr_written(b.addr, size))) {
+        note('U', b.addr, size, 0);
         return snapshot(b.addr, size);
+    }
+    note(backing_letter(ref.kind), b.addr, size, 0);
     g_stats.live_uniforms++;
     return (Bound){(VkBuffer)(uintptr_t)ref.buffer, ref.offset};
 }
@@ -350,6 +365,11 @@ static void pass_end(void) {
     vkr_report_pass_end();   // a samples-passed query begun in the pass ends in it
     vkrec_EndRendering();
     F.in_pass = 0;
+    if (vkgt_enabled) {
+        char label[56];
+        snprintf(label, sizeof label, "%s+%s", F.pass_vs ? F.pass_vs : "none", F.pass_fs ? F.pass_fs : "none");
+        vkgt_mark(VKGT_PASS, label, F.pass_draws, F.pass_w, F.pass_h);
+    }
 }
 
 // A transfer is one command outside any pass, after a full barrier; what runs next without a barrier of its own (a
@@ -422,6 +442,7 @@ static void pass_begin(void) {
     full_barrier();
     vkrec_BeginRendering(&ri);
     F.in_pass = 1, F.pass_any = 1;
+    F.pass_draws = 0, F.pass_vs = F.pass_fs = NULL;
     F.dyn_valid = 0;   // the viewport's flip and the scissor clip depend on the pass's height
     g_stats.passes++;
 }
@@ -641,6 +662,7 @@ static void raw_words(Set1 *s, const nvn_stage *stage) {
     if (!F.ops->raw) stop("stage %s reaches memory through raw addresses, and these ops give no page table", stage->key);
     F.ops->raw(F.value, s->push);
     g_stats.raw_binds++;
+    note('R', 0, 0, 0);
 }
 
 static void put_buffer(Set1 *s, uint32_t binding, VkDescriptorType type, Bound b, VkDeviceSize range) {
@@ -710,6 +732,7 @@ static void stage_resources(Set1 *s, int st, const nvn_stage *stage, const prog_
         } else {
             stop("stage %s reads constant bank c[%u]", stage->key, cb->slot);
         }
+        if (cb->slot == 0 || cb->slot == 2 || cb->slot == 24) note('B', 0, range, 0);   // a bank: the frame's scratch memory
         put_buffer(s, cb->binding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, at, range);
     }
     for (uint32_t i = 0; i < b->nsb; i++) {
@@ -731,6 +754,7 @@ static void stage_resources(Set1 *s, int st, const nvn_stage *stage, const prog_
         F.ops->resolve(base, range, F.value, &ref);
         put_buffer(s, sb->binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (Bound){(VkBuffer)(uintptr_t)ref.buffer, ref.offset},
                    range);
+        note(backing_letter(ref.kind), base, range, sb->write);
         if (sb->write) vkr_wrote(base, range, 0, F.draws + 1);   // the draw being prepared
     }
     // Storage images: the handle in c[2]'s image rows names a texture pool ID (nvnDeviceGetImageHandle), whose texture
@@ -746,6 +770,7 @@ static void stage_resources(Set1 *s, int st, const nvn_stage *stage, const prog_
         VkImageView view = F.ops->storage_image(id, m->view, F.value, &storage, &bytes);
         if (!view) stop("stage %s stores to image ID %u, where nothing is registered", stage->key, id);
         put_image(s, m->binding, view);
+        note('G', storage, bytes, m->write);
         g_stats.storage_images++;
         if (m->write && bytes) vkr_wrote(storage, bytes, 1, F.draws + 1);   // the draw or dispatch being prepared
     }
@@ -977,6 +1002,7 @@ static int draw_prepare(int prim, uint32_t base_instance, VkBool32 *restart_out)
     vkrec_PushConstants(F.ops->graphics_layout, vkp_push_range(VKP_GRAPHICS).stageFlags, 0, VKP_PUSH_BYTES, s.push);
     vkr_report_draw();
     F.draws++, g_stats.draws++;
+    if (!F.pass_draws++) F.pass_vs = vs->key, F.pass_fs = fs->key;
     return 1;
 }
 
@@ -1043,6 +1069,7 @@ static void dispatch(const uint32_t groups[3], uint64_t ind) {
     if (!cs) stop("a dispatch with no compute stage bound");
     const ShaderBinds *b = binds_of(cs, SHD_CS);
     pass_end();
+    F.noting = vkgt_enabled;   // the pass's mark is made; the buffers from here on are this dispatch's
     if (F.after_xfer) full_barrier();
     VkpStage cst = {cs->key, NULL, cs};
     bind_pipeline(1, F.ops->compute(&cst));
@@ -1067,6 +1094,8 @@ static void dispatch(const uint32_t groups[3], uint64_t ind) {
     F.draws++, g_stats.dispatches++;
     if (!ind) {
         vkrec_Dispatch(groups[0], groups[1], groups[2]);
+        if (vkgt_enabled) vkgt_mark(VKGT_DISPATCH, cs->key, groups[0], groups[1], groups[2]);
+        F.noting = 0;
         return;
     }
     VkBuffer buf = (VkBuffer)(uintptr_t)ref.buffer;
@@ -1076,6 +1105,8 @@ static void dispatch(const uint32_t groups[3], uint64_t ind) {
     full_barrier();
     vkrec_DispatchIndirect(buf, ref.offset);
     F.c0[ST_CS].valid = 0;   // the bank holds the GPU's counts now, not the CPU's bytes
+    if (vkgt_enabled) vkgt_mark(VKGT_DISPATCH, cs->key, 0, 0, 0);   // the counts are the GPU's: unknown here
+    F.noting = 0;
 }
 
 static void op_dispatch_ind(const p_dispatch_ind *d) {
@@ -1256,7 +1287,10 @@ static void record(const op_hdr *r) {
         break;
     }
     case OP_DISPATCH_IND: op_dispatch_ind(a); break;
-    case OP_BARRIER: pass_end(), full_barrier(); break;
+    case OP_BARRIER:
+        pass_end(), full_barrier();
+        if (vkgt_enabled) vkgt_mark(VKGT_BARRIER, "barrier", 0, 0, 0);
+        break;
     case OP_SET_TEX_POOL: {
         const p_set_pool *p = a;
         if (F.set0 && S.has_tex_pool && p->pool.addr != S.tex_pool.addr)
@@ -1313,7 +1347,12 @@ static void record(const op_hdr *r) {
         if (((const p_hint *)a)->what == NVN_HINT_COMPUTE_OVERLAP) pass_end(), full_barrier();
         break;
     default:
-        if (!vkr_xfer_op(r) && !vkr_report_op(r)) stop_op(r->op);
+        if (vkr_xfer_op(r)) {
+            if (vkgt_enabled && r->op != OP_COPY_STRIDE && r->op != OP_COPY_IMAGE_STRIDE)
+                vkgt_mark(VKGT_XFER, nvn_op_name(r->op), 0, 0, 0);
+        } else if (!vkr_report_op(r)) {
+            stop_op(r->op);
+        }
     }
     ledger_track_op(&S.track, r);
 }
@@ -1348,6 +1387,7 @@ uint64_t vkr_submit(const uint64_t *handles, int n) {
     uint64_t value = vkrec_begin(GPU_VK_REPLAY);
     memset(&F, 0, sizeof F);
     F.ops = ops, F.value = value;
+    if (vkgt_enabled) vkgt_frame_begin(value);
     static uint64_t frames;
     int k = (int)(frames++ % FRAMES_KEPT);
     W[k].value = value, W[k].n = 0;
@@ -1359,5 +1399,6 @@ uint64_t vkr_submit(const uint64_t *handles, int n) {
     if (ops->frame_end) ops->frame_end(value);
     vkr_report_frame_end();   // after the frame's end: its events and reports follow the backing map's write-backs
     g_stats.frames++;
+    if (vkgt_enabled) vkgt_frame_end();   // the last timestamps, and the effect that reads them
     return vkrec_end(NULL, 0);
 }

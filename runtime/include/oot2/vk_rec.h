@@ -80,7 +80,9 @@ struct nvn_stage;
       (cb, a->b, a->o, a->n, a->v), VkBuffer b; VkDeviceSize o, n; uint32_t v;)                                        \
     F(BeginQuery, (VkQueryPool p, uint32_t q, VkQueryControlFlags f), (p, q, f), (cb, a->p, a->q, a->f),               \
       VkQueryPool p; uint32_t q; VkQueryControlFlags f;)                                                               \
-    F(EndQuery, (VkQueryPool p, uint32_t q), (p, q), (cb, a->p, a->q), VkQueryPool p; uint32_t q;)
+    F(EndQuery, (VkQueryPool p, uint32_t q), (p, q), (cb, a->p, a->q), VkQueryPool p; uint32_t q;)                     \
+    F(WriteTimestamp2, (VkPipelineStageFlags2 s, VkQueryPool p, uint32_t q), (s, p, q), (cb, a->s, a->p, a->q),        \
+      VkPipelineStageFlags2 s; VkQueryPool p; uint32_t q;)
 
 #define VKREC_DRAWS(D)                                                                                                 \
     D(Draw, 'd', (uint32_t vc, uint32_t ic, uint32_t fv, uint32_t fi), (vc, ic, fv, fi),                               \

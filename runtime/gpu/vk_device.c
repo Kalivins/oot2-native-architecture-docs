@@ -25,6 +25,7 @@
 #include "oot2/gpu_vk.h"
 #include "oot2/runtime.h"
 #include "oot2/vk_bindless.h"
+#include "oot2/vk_gpu_time.h"
 #include "oot2/vk_miss.h"
 #include "oot2/vk_present.h"
 #include "oot2/vk_raw.h"
@@ -443,6 +444,7 @@ void gpu_vk_open(void) {
     backing_open(&gpu_vk_backing_ops);
     gpu_vk_mirror_policy();
     vkb_open();
+    vkgt_open();   // the GPU timing of the replayed frames, when OOT2_VK_GPU_TIMING names a file (oot2/vk_gpu_time.h)
     vkw_open();   // the window's surface, the menu's pipeline and the present thread, when a window was asked for
     g_open = 1;
     plat_mutex_unlock(&g_open_lock);
@@ -457,6 +459,7 @@ void gpu_vk_close(void) {
         vkw_close();     // the present thread, the swapchain, the menu and the surface, before the device goes
         gpu_sync_finish();
         vkr_device_close();
+        vkgt_close();   // every frame is done: the timing's pools and file
         vkm_close();   // the builds still running, the releases that were waiting, the summary of the misses
         gpu_vk_raw_close();
         vkb_close();

@@ -26,12 +26,17 @@ serves the draw and the dispatches (no game data).
 Every case runs under synchronization validation, which must report nothing. Without a usable device they skip, unless
 OOT2_REQUIRE_GPU is set.
 
+The GPU timing (runtime/gpu/vk_gpu_time.c, oot2/vk_gpu_time.h) is checked on the same cases with OOT2_VK_GPU_TIMING naming a
+file: one frame row per replayed frame whose three spans add up to its total, one mark per transfer or dispatch with the
+operation or stage key, the group counts and the buffers' backings, and, with the marks off, the frame rows alone.
+
 Run: python -m unittest discover -s tests -p test_runtime_vk_xfer.py -v
 """
 
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -174,6 +179,75 @@ class TransferTest(vp.DeviceTestCase):
     def test_counter_run_the_stores_of_a_mirror_are_lost_when_not_declared(self) -> None:
         err = self.failing("storage", "gated", "--pack", str(self.pack), "--mutant", "nodeclare")
         self.assertIn("check failed", err)
+
+    def timing_of(self, case: str, marks: str, *args: str) -> tuple[str, list[list[str]], list[list[str]], list[list[str]]]:
+        """One case with the GPU timing on: the file's header line, its frame rows, its mark rows and its counter rows."""
+        with tempfile.TemporaryDirectory(prefix="oot2-vkgt-", ignore_cleanup_errors=True) as folder:
+            path = Path(folder) / "timing.tsv"
+            env = case_env({"OOT2_VK_VALIDATION": "sync", "OOT2_VK_GPU_TIMING": str(path),
+                            "OOT2_VK_GPU_TIMING_MARKS": marks})
+            done = subprocess.run([str(exe()), case, *args], capture_output=True, text=True, timeout=300, env=env)
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr[-3000:])
+            self.assertIn("validation errors 0 warnings 0", done.stdout, done.stderr[-3000:])
+            self.assertIn("gpu timing on:", done.stderr)
+            lines = path.read_text(encoding="utf-8").splitlines()
+        rows = [line.split("\t") for line in lines[1:]]
+        return lines[0], [r for r in rows if r[0] == "F"], [r for r in rows if r[0] == "M"], [r for r in rows if r[0] == "B"]
+
+    def check_frame_row(self, f: list[str]) -> tuple[int, int]:
+        """The frame row's own sums: the three spans make the total; the marks and the dropped count; returns (marks, main)."""
+        value, start, total, pro, main, epi, marks, dropped, gap, effects = (int(x) for x in f[1:11])
+        self.assertEqual(total, pro + main + epi, f)
+        self.assertGreater(total, 0, f)
+        self.assertEqual(dropped, 0, f)
+        self.assertGreaterEqual(min(start, pro, main, epi, gap, effects), 0, f)
+        return marks, main
+
+    def test_gpu_timing_has_a_frame_row_and_one_mark_for_each_transfer(self) -> None:
+        header, frames, marks, counters = self.timing_of("buffers", "on")
+        self.assertTrue(header.startswith("#oot2-vk-gpu-timing\t1\tperiod_ns\t"), header)
+        self.assertEqual(len(frames), 1, frames)
+        n, main = self.check_frame_row(frames[0])
+        # an update, two copies, two fills and a copy: six transfer commands, each one mark in the order it was written
+        self.assertEqual(n, 6)
+        self.assertEqual([m[4] for m in marks], ["UPDATE_UB", "COPY_B2B", "COPY_B2B", "CLEAR_BUF", "CLEAR_BUF", "COPY_B2B"])
+        self.assertEqual({m[3] for m in marks}, {"xfer"})
+        self.assertEqual([int(m[2]) for m in marks], list(range(6)))
+        self.assertEqual(int(frames[0][9]), 0)   # the first frame has no frame before it
+        # the backing map's counters ride on the first frame: the CPU-visible pool is mirrored, and its copies went through the map
+        self.assertEqual(len(counters), 1)
+        self.assertEqual(len(counters[0]), 17, counters)
+        self.assertGreaterEqual(int(counters[0][4]), 1, counters)   # a mirror
+        self.assertGreater(int(counters[0][15]), 0, counters)       # resolves
+        # the marks split the main command buffer between its first and last timestamps: they cannot add up to more
+        self.assertLessEqual(sum(int(m[8]) for m in marks), main)
+
+    def test_gpu_timing_with_the_marks_off_writes_the_frame_rows_alone(self) -> None:
+        header, frames, marks, _ = self.timing_of("buffers", "off")
+        self.assertTrue(header.endswith("\tmarks\toff"), header)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(self.check_frame_row(frames[0])[0], 0)
+        self.assertEqual(marks, [])
+
+    def test_gpu_timing_names_each_dispatch_its_stage_group_counts_and_buffers(self) -> None:
+        for mode in ("mirror", "imports"):
+            with self.subTest(destinations=mode):
+                _, frames, marks, _ = self.timing_of("storage", "on", "--pack", str(self.pack),
+                                                  *(("imports",) if mode == "imports" else ()))
+                self.assertEqual(len(frames), 1)
+                self.check_frame_row(frames[0])
+                dispatches = [m for m in marks if m[3] == "dispatch"]
+                self.assertEqual(len(dispatches), 3, marks)
+                self.assertEqual({m[4] for m in dispatches}, {"5100000000000003.00000000"})
+                self.assertEqual([tuple(m[5:8]) for m in dispatches], [("4", "1", "1"), ("4", "1", "1"), ("0", "0", "0")])
+                # the storage buffer the module writes: a mirror or an import, 1 KiB, written, at its guest address
+                letter = "M" if mode == "mirror" else "I"
+                for m in dispatches:
+                    self.assertRegex(m[9], rf"(^|,){letter}1w@[0-9a-f]+($|,)", m)
+                # a uniform in host memory is copied at submit: with imports the first dispatch binds the copy, with a mirror
+                # the uniform is the mirror's own
+                self.assertRegex(dispatches[0][9], r"(^|,)U1@[0-9a-f]+($|,)" if mode == "imports" else r"(^|,)M1@[0-9a-f]+($|,)")
+                self.assertEqual(sum(1 for m in marks if m[3] == "xfer"), 2)   # the two updates of the uniform
 
 
 if __name__ == "__main__":
