@@ -17,7 +17,8 @@ mapped page resolving, a range a finalized pool left and another pool took reach
 grows past a mirror the table maps inside one submission of two raw-access stages (the table follows the map to the end
 of the recording, the stage recorded after the bind reaches the pages it committed, and the bound and the raw views of
 them are the same bytes), and a previously bound mirror that grows in place with consistent bound/raw writes and
-write-back. Each runs under the synchronization validation layer, which must report no error. The heap case measures
+write-back, including when a GPU-only extent already occupies adjacent block space. Each runs under the synchronization
+validation layer, which must report no error. The heap case measures
 what the invariant costs (resident bytes, VRAM, the invariant's pass and the table's build) over a heap of
 OOT2_RAW_HEAP_MIB MiB, 256 by default.
 
@@ -51,7 +52,8 @@ TID_X = 33
 THREADS = 64
 TABLE = (1 << 39) + 0x4000_0000   # the pointer table: vk_raw_test.c, TABLE
 ENTRY = 32
-CASES = ("kinds", "miss", "commit", "reuse", "edges", "grow", "grow_taken")
+CASES = ("kinds", "miss", "commit", "reuse", "edges", "grow", "grow_taken",
+         "grow_guarded_head", "grow_guarded_tail")
 
 
 def mov_imm(rd: int, imm: int) -> bytes:

@@ -35,9 +35,10 @@ from test_runtime_gpu import EXIT_FATAL, LEVELS, ROOT, build_program, case_env, 
 
 TEST_SOURCE = ROOT / "tests" / "runtime" / "coherence_test.c"
 
-PASSING = ("generations", "upload", "admission", "writeback", "replace", "raw_grow", "raw_grow_head",
+PASSING = ("generations", "upload", "admission", "guarded_admission", "writeback", "replace", "raw_grow", "raw_grow_head",
            "raw_grow_whole", "raw_grow_beside", "raw_grow_taken", "raw_grow_neighbour", "raw_grow_taken_wait",
-           "raw_grow_taken_head", "raw_grow_trimmed", "raw_grow_wait", "raw_sync_wait", "raw_promote",
+           "raw_grow_taken_head", "raw_grow_trimmed", "raw_grow_guarded_head", "raw_grow_guarded_tail",
+           "raw_grow_wait", "raw_sync_wait", "raw_promote",
            "raw_promote_small", "raw_promote_wait", "raw_promote_cap")
 
 # case: text the one FATAL line must hold
@@ -47,6 +48,7 @@ FAILING = {
                        "over",
     "raw_grow_bound_import": "earlier in raw-access submission",
     "raw_grow_fragmented": "earlier in raw-access submission",
+    "raw_grow_guarded_blocked": "earlier in raw-access submission",
     "raw_grow_untracked": "earlier in raw-access submission",
 }
 

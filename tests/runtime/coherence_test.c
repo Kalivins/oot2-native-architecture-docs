@@ -21,6 +21,7 @@
 //                texture stand-in sees the pages the mirror's query stamped
 //   admission    the rule at its edge; a mirror past it, or over a range the watch does not cover, is an import, and the
 //                figures moving back admit the next one
+//   guarded_admission   the reserved growth space counts against the mirror's VRAM budget
 //   writeback    a declared GPU write reaches guest memory only once the device reached its submission; a copy into the
 //                mirror meanwhile leaves its bytes out; guest_read counts a read before the fence, cpu_synced finds
 //                nothing left behind
@@ -36,12 +37,14 @@
 //   raw_grow_wait   the mirror gives its pages up only once the older raw-access submission in flight is done
 //   raw_grow_taken, raw_grow_neighbour, raw_grow_taken_wait, raw_grow_taken_head, raw_grow_trimmed   an earlier bind
 //                keeps the same device bytes when a later bind extends its mirror, including imports and older writes
+//   raw_grow_guarded_tail, raw_grow_guarded_head   the same when a GPU-only extent blocks the adjacent block space
 //   raw_sync_wait   a mirror the CPU wrote is brought current for a raw-access submission after the older one in flight
 //   raw_promote, raw_promote_small, raw_promote_wait, raw_promote_cap   an import a raw-access submission binds a range larger than a
 //                uniform's of becomes a mirror at the next raw-access begin: brought current, in the page table, left alone when
 //                the submission bound it before its raw stage or the admission refuses, never for a small bind, after the older
 //                raw-access submission in flight, and not past the mirrors' cap (the raw write-back's size)
-//   unwritten, replace_written, raw_grow_bound_import, raw_grow_fragmented, raw_grow_untracked   stop by name
+//   unwritten, replace_written, raw_grow_bound_import, raw_grow_fragmented, raw_grow_guarded_blocked,
+//   raw_grow_untracked   stop by name
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -390,7 +393,7 @@ static void case_admission(void) {
     BackingStats s = stats();
     CHECK(s.mirrors == 1 && s.imports == 1 && s.mirrors_refused_budget == 1);
     // The figures move back: the next mirror is admitted.
-    D.used = 8 * GiB - 8 * GiB / BACKING_MIRROR_RESERVE - 1 * MiB;
+    D.used = 8 * GiB - 8 * GiB / BACKING_MIRROR_RESERVE - 1 * MiB - 2 * BACKING_MIRROR_GUARD;
     CHECK(resolve(g_heap + 5 * MiB, 0x100, 0).kind == BACKING_MIRROR);
     // A range the write watch does not cover: an import.
     D.used = 0, g_untracked = 1;
@@ -399,6 +402,22 @@ static void case_admission(void) {
     CHECK(s.mirrors == 2 && s.imports == 2 && s.mirrors_refused_untracked == 1 && s.mirrors_made == 2);
     backing_pool_fini(&a), backing_pool_fini(&b), backing_pool_fini(&d), backing_pool_fini(&e);
     done("admission");
+}
+
+static void case_guarded_admission(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t a = g_heap + 1 * MiB, b = g_heap + 3 * MiB;
+    pool_t pa = pool(a, 64 * KiB), pb = pool(b, 64 * KiB);
+    cpu_fill(a, 64 * KiB, 0xAAAAAAAAu);
+    cpu_fill(b, 64 * KiB, 0xBBBBBBBBu);
+    D.used = D.budget - D.budget / BACKING_MIRROR_RESERVE - (64 * KiB + 2 * BACKING_MIRROR_GUARD - 1);
+    CHECK(resolve(a, 4, 0).kind == BACKING_IMPORT);
+    D.used = D.budget - D.budget / BACKING_MIRROR_RESERVE - 64 * KiB - 2 * BACKING_MIRROR_GUARD;
+    CHECK(resolve(b, 4, 0).kind == BACKING_MIRROR);
+    CHECK(stats().mirrors_refused_budget == 1);
+    backing_pool_fini(&pa), backing_pool_fini(&pb);
+    done("guarded_admission");
 }
 
 static uint8_t *g_mirror;   // the GPU work of a case writes into it
@@ -1181,6 +1200,69 @@ static void case_raw_grow_trimmed(void) {
     done("raw_grow_trimmed");
 }
 
+static BackingRef g_guard_old, g_guard_big, g_guard_extent;
+static uint64_t g_guard_raw, g_guard_added, g_guard_old_delta;
+
+static void gpu_grow_guarded(void) {
+    uint32_t *old = (uint32_t *)bytes(&g_guard_old);
+    uint32_t *big = (uint32_t *)(bytes(&g_guard_big) + g_guard_old_delta);
+    uint32_t *raw = (uint32_t *)(uintptr_t)g_guard_raw;
+    uint32_t *added = (uint32_t *)(uintptr_t)g_guard_added;
+    uint32_t *extent = (uint32_t *)bytes(&g_guard_extent);
+    CHECK(*old == 0xAAAAAAAAu && *big == 0xAAAAAAAAu && *raw == 0xAAAAAAAAu);
+    CHECK(*added == 0xBBBBBBBBu);
+    *extent = 0xEEEEEEEEu;
+    *old = 0xCCCCCCCCu;
+    CHECK(*big == 0xCCCCCCCCu && *raw == 0xCCCCCCCCu);
+    *raw = 0xDDDDDDDDu;
+}
+
+static void raw_grow_guarded(int head) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 8 * MiB, q = g_heap + 32 * MiB;
+    pool_t pp = pool(p - 1 * MiB, 16 * MiB);
+    pool_t extent = {.magic = MAGIC('P', 'O', 'O', 'L'), .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS,
+                     .mem = (uint8_t *)(uintptr_t)q, .size = 64 * KiB, .game_mem = (uint8_t *)(uintptr_t)q};
+    CHECK(backing_pool_init(&extent));
+    cpu_fill(p, 64 * KiB, 0xAAAAAAAAu);
+    uint64_t v0 = sub_begin();
+    if (head) CHECK(resolve(q, 4, v0).kind == BACKING_EXTENT);
+    CHECK(resolve(p + 0x2000, 4, v0).kind == BACKING_MIRROR);
+    if (!head) CHECK(resolve(q, 4, v0).kind == BACKING_EXTENT);
+    sub_end(v0);
+    gpu_run(v0, NULL);
+
+    uint64_t added = head ? p - 0x8000 : p + 0x18000;
+    cpu_fill(added, 4, 0xBBBBBBBBu);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    g_guard_extent = resolve(q, 4, v);
+    g_guard_old = resolve(p + 0x2000, 4, v);
+    backing_gpu_wrote(p + 0x2000, 4, v);
+    uint64_t start = head ? p - 0x5000 : p + 0x1000;
+    g_guard_big = resolve(start, head ? 0x8000 : 0x11000, v);
+    g_guard_old_delta = p + 0x2000 - start;
+    CHECK(g_guard_old.kind == BACKING_MIRROR && g_guard_big.kind == BACKING_MIRROR);
+    CHECK(g_guard_big.address + g_guard_old_delta == g_guard_old.address);
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    g_guard_raw = raw_address(runs, n, p + 0x2000);
+    g_guard_added = raw_address(runs, n, added);
+    CHECK(g_guard_raw == g_guard_old.address && g_guard_added && version == backing_version());
+    free(runs);
+    sub_end(v);
+    gpu_run(v, gpu_grow_guarded);
+    CHECK(*(uint32_t *)(uintptr_t)(p + 0x2000) == 0xDDDDDDDDu);
+    CHECK(*(uint32_t *)bytes(&g_guard_extent) == 0xEEEEEEEEu);
+    backing_pool_fini(&pp), backing_pool_fini(&extent);
+    done(head ? "raw_grow_guarded_head" : "raw_grow_guarded_tail");
+}
+
+static void case_raw_grow_guarded_head(void) { raw_grow_guarded(1); }
+static void case_raw_grow_guarded_tail(void) { raw_grow_guarded(0); }
+
 // ---------- cases that stop by name
 static void case_raw_grow_bound_import(void) {
     setup(64 * MiB, 0);
@@ -1218,6 +1300,28 @@ static void case_raw_grow_fragmented(void) {
     backing_raw_begin(v);
     resolve(p + 0x31000, 4, v);
     resolve(p + 0x30320, 1 * MiB, v);
+    printf("returned\n");
+}
+
+static void case_raw_grow_guarded_blocked(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 8 * MiB, q = g_heap + 32 * MiB;
+    pool(p, 16 * MiB);
+    pool_t extent = {.magic = MAGIC('P', 'O', 'O', 'L'), .flags = NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS,
+                     .mem = (uint8_t *)(uintptr_t)q, .size = 64 * KiB, .game_mem = (uint8_t *)(uintptr_t)q};
+    CHECK(backing_pool_init(&extent));
+    cpu_fill(p, 64 * KiB, 0xAAAAAAAAu);
+    uint64_t v0 = sub_begin();
+    CHECK(resolve(p, 4, v0).kind == BACKING_MIRROR);
+    CHECK(resolve(q, 4, v0).kind == BACKING_EXTENT);
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    resolve(q, 4, v);
+    resolve(p + 0x2000, 4, v);
+    resolve(p + 0x1000, 0x21000, v);   // grows beyond the reserved part into the used extent
     printf("returned\n");
 }
 
@@ -1270,6 +1374,7 @@ int main(int argc, char **argv) {
     }
     static const struct { const char *name; void (*fn)(void); } cases[] = {
         {"generations", case_generations}, {"upload", case_upload},   {"admission", case_admission},
+        {"guarded_admission", case_guarded_admission},
         {"writeback", case_writeback},     {"replace", case_replace}, {"watch", case_watch},
         {"unwritten", case_unwritten},     {"replace_written", case_replace_written},
         {"raw_grow", case_raw_grow},       {"raw_grow_whole", case_raw_grow_whole},
@@ -1280,8 +1385,10 @@ int main(int argc, char **argv) {
         {"raw_promote_wait", case_raw_promote_wait}, {"raw_promote_cap", case_raw_promote_cap},
         {"raw_grow_taken", case_raw_grow_taken}, {"raw_grow_neighbour", case_raw_grow_neighbour},
         {"raw_grow_taken_wait", case_raw_grow_taken_wait}, {"raw_grow_taken_head", case_raw_grow_taken_head},
-        {"raw_grow_trimmed", case_raw_grow_trimmed},
+        {"raw_grow_trimmed", case_raw_grow_trimmed}, {"raw_grow_guarded_head", case_raw_grow_guarded_head},
+        {"raw_grow_guarded_tail", case_raw_grow_guarded_tail},
         {"raw_grow_bound_import", case_raw_grow_bound_import}, {"raw_grow_fragmented", case_raw_grow_fragmented},
+        {"raw_grow_guarded_blocked", case_raw_grow_guarded_blocked},
         {"raw_grow_untracked", case_raw_grow_untracked},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)
