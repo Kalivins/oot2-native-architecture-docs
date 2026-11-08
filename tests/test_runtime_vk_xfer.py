@@ -22,6 +22,11 @@ serves the draw and the dispatches (no game data).
   whole with no view left at the device's end (validation counts them); a store into a corner of a texture the CPU wrote
   leaves the rest as the CPU wrote it, read back by a later submission (the CPU's bytes are uploaded before the stores, in
   the submission that binds the texture, and not again over them).
+- virtual_texture: a texture in a virtual pool mapped over CPU-visible memory (the title movie's planes are such textures) has
+  an image of memory of its own, not placed, and its creation makes no mirror or import over the pages behind it; texels go in
+  by a buffer copy and come out; the CPU then writes the pages behind the texture and a copy takes them as a buffer, which
+  brings their mirror current, and the texels still read back as they were (with the image placed in a mirror's span, as it
+  was, the refresh wrote the CPU's bytes over the texels: the counter-run).
 
 Every case runs under synchronization validation, which must report nothing. Without a usable device they skip, unless
 OOT2_REQUIRE_GPU is set.
@@ -175,6 +180,14 @@ class TransferTest(vp.DeviceTestCase):
                 self.assertIn("after 100 more submissions: placed 0, arena 0 texels wrong", out)
                 self.assertIn("partial store into a texture the CPU wrote: 0 of 16384 texels wrong", out)
                 print("\n" + out)
+
+    def test_a_texture_over_cpu_visible_memory_keeps_its_texels_when_the_cpu_writes_the_pages_behind_it(self) -> None:
+        for mode in ("mirror", "imports"):
+            with self.subTest(destinations=mode):
+                out = self.clean("virtual_texture", *(("imports",) if mode == "imports" else ()))
+                self.assertIn("its image is not placed; pages behind it backed 0, mirrors 0, imports 0", out)
+                self.assertIn("texels in by a buffer copy and out by another: as they went in", out)
+                self.assertIn(f"{mode}: the CPU's writes behind the texture left its texels", out)
 
     def test_counter_run_the_stores_of_a_mirror_are_lost_when_not_declared(self) -> None:
         err = self.failing("storage", "gated", "--pack", str(self.pack), "--mutant", "nodeclare")

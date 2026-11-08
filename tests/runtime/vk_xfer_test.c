@@ -25,6 +25,10 @@
 //                  storage views while the completion thread destroys them, and the images still read back whole; and a
 //                  store into a corner of a texture the CPU wrote leaves the rest as the CPU wrote it, read back by a
 //                  later submission
+//   virtual_texture a texture in a virtual pool mapped over CPU-visible memory (the title movie's planes): its texels go in
+//                  by a buffer copy and come out; its image is not placed, and no backing is made over the pages behind
+//                  it; the CPU then writes those pages and a copy takes them as a buffer, which brings their mirror
+//                  current, and the texels read back as they were (a placed image would share its bytes with the mirror)
 //
 // --mutant nodrop (the drop rule off) and nodeclare (writes declared to no one) are the counter-runs: the case must fail.
 #include <stdio.h>
@@ -630,6 +634,58 @@ static void case_storage_image(int imports, const char *pack) {
     finish_and_report("storage_image");
 }
 
+// ---------- a texture over memory the CPU can see
+// A game maps a virtual pool in the GPU window over CPU-visible memory (the title movie's planes are such textures). The
+// backing map keeps that memory as a mirror or an import, never as an extent, so the texture's image gets memory of its own
+// and the image's creation makes no backing over the pages. Bound into the mirror's span instead, the image would share its
+// bytes with the copy of the CPU's pages, and the refresh a CPU write calls for would write them over the texels.
+static void case_virtual_texture(int imports) {
+    setup(imports, 0);
+    pool_t pc = make_pool(g_heap + 16 * MiB, 4 * MiB, NVN_MEMORY_POOL_FLAGS_PHYSICAL);   // CPU-visible memory to map over
+    pool_t v = make_pool(WIN + 32 * MiB, 2 * MiB, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL);
+    nvn_mapping_t m = {.physical_pool = (const NVNmemoryPool *)(const void *)&pc, .physical_offset = 2 * MiB,
+                       .virtual_offset = 0, .size = 1 * MiB};
+    CHECK(gfx_vulkan_backend.pool_map_virtual(&v, 1, &m));
+    // the texture's storage, and the CPU-visible pages behind it
+    const uint64_t T = WIN + 32 * MiB, behind = g_heap + 16 * MiB + 2 * MiB;
+    const tex_t tex = tex_at(T, NVN_FORMAT_RGBA8, 16, 16);
+    VkbImage *img = vkb_image_get(&tex);
+    CHECK(img && !vkb_image_placed(img));
+    BackingPage bp;
+    backing_page(behind, &bp);
+    BackingStats bs;
+    backing_stats(&bs);
+    printf("the texture over CPU-visible pages: its image is not placed; pages behind it backed %d, mirrors %llu, imports %llu\n",
+           bp.kind != BACKING_NONE, (ull)bs.mirrors, (ull)bs.imports);
+    CHECK(bp.kind == BACKING_NONE && bs.mirrors == 0 && bs.imports == 0);
+    uint8_t src[16 * 16 * 4];
+    for (unsigned i = 0; i < sizeof src; i++) src[i] = (uint8_t)(i * 7 + 3);
+    memcpy((void *)(uintptr_t)P, src, sizeof src);
+    Rec *r = rec_begin();
+    PUT(r, OP_COPY_B2T, (p_copy_b2t){.addr = P, .tex = trec(T, NVN_FORMAT_RGBA8, 16, 16), .r = region(0, 0, 16, 16)});
+    PUT(r, OP_COPY_T2B, (p_copy_b2t){.addr = P + 0x1000, .tex = trec(T, NVN_FORMAT_RGBA8, 16, 16), .r = region(0, 0, 16, 16)});
+    wait_done(submit(r));
+    CHECK(bytes_are(P + 0x1000, src, sizeof src));
+    printf("texels in by a buffer copy and out by another: as they went in\n");
+    // the CPU writes the pages behind the texture, and a copy takes them as a buffer (their mirror, when there is one, is
+    // brought current from them before the submission's own work); the texels, read after it, are as they were
+    for (uint64_t i = 0; i < 64 * KiB / 4; i++) ((volatile uint32_t *)(uintptr_t)behind)[i] = 0xC0FFEE11u;
+    r = rec_begin();
+    PUT(r, OP_COPY_B2B, (p_copy_b2b){.src = behind, .dst = P + 0x20000, .size = 0x1000});
+    PUT(r, OP_COPY_T2B, (p_copy_b2t){.addr = P + 0x30000, .tex = trec(T, NVN_FORMAT_RGBA8, 16, 16), .r = region(0, 0, 16, 16)});
+    wait_done(submit(r));
+    CHECK(words_are(P + 0x20000, 0x1000, 0xC0FFEE11u));
+    int overwritten = !bytes_are(P + 0x30000, src, sizeof src);
+    printf("%s: the CPU's writes behind the texture %s its texels\n", imports ? "imports" : "mirror",
+           overwritten ? "overwrote" : "left");
+    CHECK(!overwritten);
+    backing_page(behind, &bp);
+    CHECK(bp.kind == (imports ? BACKING_IMPORT : BACKING_MIRROR));   // the buffer binds backed the pages, apart from the image
+    gfx_vulkan_backend.pool_fini(&v);
+    gfx_vulkan_backend.pool_fini(&pc);
+    finish_and_report("virtual_texture");
+}
+
 // ---------- head: the group counts in the driver bank c[0], which the module reads
 static void case_head(int imports, int gated, const char *pack) {
     setup(imports, gated);
@@ -696,6 +752,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "head") && pack) case_head(imports, gated, pack);
     else if (!strcmp(cs, "storage") && pack) case_storage(imports, gated, pack);
     else if (!strcmp(cs, "storage_image") && pack) case_storage_image(imports, pack);
+    else if (!strcmp(cs, "virtual_texture")) case_virtual_texture(imports);
     else {
         fprintf(stderr, "unknown case %s\n", cs);
         return 2;

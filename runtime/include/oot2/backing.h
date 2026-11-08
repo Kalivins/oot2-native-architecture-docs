@@ -258,6 +258,12 @@ typedef struct BackingPage {
 } BackingPage;
 void backing_page(uint64_t addr, BackingPage *out);
 
+// 0 when [addr, addr + size) stands in memory the CPU can see: a pool the CPU sees, or a virtual pool mapped over one. The
+// map keeps that memory as a mirror (a VRAM copy of the CPU's pages) or an import, never as an extent, so an image must
+// not be bound into it (oot2/vk_image.h). 1 for a pool of extents, a virtual pool mapped over one, and for what the map
+// cannot say (a range in no pool, a virtual pool not mapped there): the resolve that follows names those.
+int backing_extent_pool(uint64_t addr, uint64_t size);
+
 typedef struct BackingStats {
     uint64_t pools, extents, extent_bytes, imports, import_bytes;     // live now
     uint64_t blocks, block_bytes, spare_blocks;                       // VRAM blocks live now, empty ones ready

@@ -278,6 +278,20 @@ static void case_decisions(void) {
     uint64_t probes[] = {g_heap + 1 * MiB, g_heap + 9 * MiB, WIN + 0x1000, WIN + 1 * MiB, WIN + 16 * MiB, WIN + 32 * MiB};
     for (int i = 0; i < 6; i++) CHECK(page_kind(probes[i]) == BACKING_NONE);
 
+    // Where an image may stand (backing_extent_pool): in a pool of extents, or a virtual pool over one; never in memory the
+    // CPU sees (a CPU-visible pool, or a virtual pool over one, whose pages the map keeps as a mirror or an import). It is
+    // a query: it makes no backing. What the map cannot say (a range in no pool, pages no mapping request mapped) is 1, the
+    // resolve that follows names those.
+    CHECK(backing_extent_pool(WIN + 0x1000, 0x100) == 1);                  // a CPU_NO_ACCESS pool
+    CHECK(backing_extent_pool(WIN + 16 * MiB + 0x2000, 0x100) == 1);       // a virtual pool over a physical one in the window
+    CHECK(backing_extent_pool(g_heap + 1 * MiB + 0x100, 0x200) == 0);      // a CPU-visible pool
+    CHECK(backing_extent_pool(WIN + 32 * MiB + 0x3000, 0x40) == 0);        // a virtual pool over a CPU-visible physical pool
+    CHECK(backing_extent_pool(WIN + 32 * MiB, 1 * MiB) == 0);              // the whole mapped run of it
+    CHECK(backing_extent_pool(WIN + 32 * MiB + 1 * MiB, 0x100) == 1);      // past the run: nothing maps it
+    CHECK(backing_extent_pool(WIN + 64 * MiB, 0x100) == 1);                // in no pool
+    CHECK(backing_extent_pool(WIN + 0x1000, 0) == 1 && backing_extent_pool(g_heap + 1 * MiB, 0) == 0);   // a size of 0 is 1
+    for (int i = 0; i < 6; i++) CHECK(page_kind(probes[i]) == BACKING_NONE);   // and nothing was backed
+
     // CPU-visible: an import over the run of committed pages around the bind, inside the pool, though the run of
     // commits goes on into the texture pool beside it
     BackingRef r = resolve(g_heap + 1 * MiB + 0x100, 0x200, 0);

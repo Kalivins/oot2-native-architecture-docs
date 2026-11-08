@@ -1499,6 +1499,16 @@ void backing_page(uint64_t addr, BackingPage *out) {
     plat_unlock_shared(&g_lock);
 }
 
+int backing_extent_pool(uint64_t addr, uint64_t size) {
+    if (!size) size = 1;
+    plat_lock_shared(&g_lock);
+    const Rec *r = rec_find(addr, size);
+    if (r && r->cls == CLS_VIRTUAL && r->run && virtual_mapped(r, addr, size)) r = r->run;
+    int extent = !(r && r->cls == CLS_CPU);
+    plat_unlock_shared(&g_lock);
+    return extent;
+}
+
 void backing_stats(BackingStats *out) {
     plat_lock_shared(&g_lock);
     *out = g_st;

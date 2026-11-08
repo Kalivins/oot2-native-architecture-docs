@@ -13,10 +13,13 @@
 // range alias each other (VK_IMAGE_CREATE_ALIAS_BIT; what one reads of the other's writes is the specification's
 // undefined content unless the parameters match). Every image lives in VK_IMAGE_LAYOUT_GENERAL. An image whose placement
 // is impossible (the storage is not at the alignment the driver asks, or the driver wants more bytes than the game's
-// storage holds, which would overwrite a neighbour) gets memory of its own and is counted as unaliased. Storage the CPU
-// can see (textures the CPU writes) gets no image at registration: its image is made in the texture arena when the replay
-// binds the texture (vkb_view_demand), and the entry shows the table's placeholder until then. A format with no image (the formats of oot2/vk_format.h that need an upload
-// expansion or a transcode, or that the device lacks) is counted and logged once per format.
+// storage holds, which would overwrite a neighbour, or the pool is a virtual one mapped over memory the CPU can see, which
+// the backing map keeps as a mirror or an import and never as an extent: an image bound into a mirror's span would share
+// its bytes with the copy of the CPU's pages, backing_extent_pool) gets memory of its own and is counted as unaliased.
+// Storage the CPU can see (textures the CPU writes) gets no image at registration: its image is made in the texture
+// arena when the replay binds the texture (vkb_view_demand), and the entry shows the table's placeholder until then. A
+// format with no image (the formats of oot2/vk_format.h that need an upload expansion or a transcode, or that the device
+// lacks) is counted and logged once per format.
 //
 // Lifetime. A view holds its image; an image is destroyed when no view holds it and the newest submission that used it
 // is done, after its pool was finalized (vkb_image_pool_gone) or its texture was released with no view on it. Submissions

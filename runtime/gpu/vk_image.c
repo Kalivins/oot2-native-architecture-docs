@@ -228,17 +228,23 @@ static VkbImage *image_make(const tex_t *t, const VkfRow *row, VkFormat vk, cons
     // An image of the arena is bound into an extent of it, which the texture arena takes from its blocks (and stops by name
     // when it has none to give). Any other is placed at the pool offset: bound into the extent (the extent is made here
     // when no bind made it), where the game's storage lies, when the offset has the alignment the driver asks, the memory
-    // type fits and the image takes no more than the game's storage (it would overwrite the neighbour otherwise).
+    // type fits and the image takes no more than the game's storage (it would overwrite the neighbour otherwise). An
+    // image stands in an extent only. A texture in a virtual pool mapped over memory the CPU can see has no extent: the
+    // backing map keeps that memory as a mirror (a VRAM copy of the CPU's pages) or an import, and an image bound into a
+    // mirror's span shares its bytes with the copy: the refresh writes the CPU's pages over the texels, the texels over
+    // the copy, and the span, once the mirror is replaced by a larger one, goes to the next mirror that takes it. So the
+    // image gets memory of its own, and no mirror is made for it.
     BackingRef ref = {0};
     TexExtent ext = {0};
-    int placed = 0;
+    int placed = 0, extent_pool = 1;
     if (arena) {
         texarena_alloc(mr.size, mr.alignment, mr.memoryTypeBits, &ext);
         GPU_VK_OK(vkBindImageMemory(gpu_vk.device, image, (VkDeviceMemory)(uintptr_t)ext.block, ext.offset),
                   "vkBindImageMemory (an image of the texture arena)");
-    } else {
+    } else if ((extent_pool = backing_extent_pool(key->storage, L.size ? L.size : 1))) {
         backing_resolve(key->storage, L.size ? L.size : 1, 0, &ref);
-        placed = ref.memory && ref.offset % mr.alignment == 0 && mr.size <= L.size && (mr.memoryTypeBits >> ref.type & 1);
+        placed = ref.kind == BACKING_EXTENT && ref.memory && ref.offset % mr.alignment == 0 && mr.size <= L.size &&
+                 (mr.memoryTypeBits >> ref.type & 1);
     }
     VkDeviceMemory dedicated = VK_NULL_HANDLE;
     if (arena) {
@@ -254,10 +260,15 @@ static VkbImage *image_make(const tex_t *t, const VkfRow *row, VkFormat vk, cons
         GPU_VK_OK(vkAllocateMemory(gpu_vk.device, &alloc, NULL, &dedicated), "vkAllocateMemory (an unaliased image)");
         GPU_VK_OK(vkBindImageMemory(gpu_vk.device, image, dedicated, 0), "vkBindImageMemory (an unaliased image)");
         g_st.unaliased++;
-        rt_log("gfx: vulkan: the image of the texture at %#llx cannot stand in its pool's extent (offset %#llx, driver "
-               "alignment %llu, driver size %llu against the game's %llu, memory types %#x against the extent's %u): it has "
-               "memory of its own and loses the game's aliasing", (ull)key->storage, (ull)ref.offset, (ull)mr.alignment,
-               (ull)mr.size, (ull)L.size, mr.memoryTypeBits, ref.type);
+        if (!extent_pool)
+            rt_log("gfx: vulkan: the image of the texture at %#llx stands over memory the CPU can see (a virtual pool mapped "
+                   "over a CPU-visible one), which has no extent: it has memory of its own and loses the game's aliasing",
+                   (ull)key->storage);
+        else
+            rt_log("gfx: vulkan: the image of the texture at %#llx cannot stand in its pool's extent (offset %#llx, driver "
+                   "alignment %llu, driver size %llu against the game's %llu, memory types %#x against the extent's %u): it "
+                   "has memory of its own and loses the game's aliasing", (ull)key->storage, (ull)ref.offset,
+                   (ull)mr.alignment, (ull)mr.size, (ull)L.size, mr.memoryTypeBits, ref.type);
     }
     VkbImage *i = calloc(1, sizeof *i);
     if (!i) rt_fatal("gfx: vulkan: out of memory for an image");
