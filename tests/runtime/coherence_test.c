@@ -35,6 +35,10 @@
 //   raw_grow_whole, raw_grow_beside   a bind over a whole mirror takes it; one beside a mirror leaves it whole
 //   raw_grow_wait   the mirror gives its pages up only once the older raw-access submission in flight is done
 //   raw_sync_wait   a mirror the CPU wrote is brought current for a raw-access submission after the older one in flight
+//   raw_promote, raw_promote_small, raw_promote_wait, raw_promote_cap   an import a raw-access submission binds a range larger than a
+//                uniform's of becomes a mirror at the next raw-access begin: brought current, in the page table, left alone when
+//                the submission bound it before its raw stage or the admission refuses, never for a small bind, after the older
+//                raw-access submission in flight, and not past the mirrors' cap (the raw write-back's size)
 //   unwritten, replace_written, raw_grow_taken   stop by name
 #include <stdio.h>
 #include <stdlib.h>
@@ -769,6 +773,204 @@ static void case_raw_sync_wait(void) {
     done("raw_sync_wait");
 }
 
+// ---------- an import a raw-access submission binds a large range of becomes a mirror (backing.h, The raw path)
+// The page table's invariant imports every committed page, and a bind in a raw-access submission can only import. A bind of a
+// range larger than a uniform's marks the import hot; the next raw-access submission's begin gives it the mirror the rule
+// would have made, brought current from guest memory, and the page table and the binds of that submission reach the mirror.
+// An import that submission wrote on the GPU before its raw-access stage waits for the one after; one it only read does not.
+static void case_raw_promote(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 16 * MiB);
+    const uint64_t A = p, B = p + 4 * MiB, C = p + 8 * MiB, E = p + 12 * MiB;   // four committed runs
+    cpu_fill(A, 512 * KiB, 0xAAAAAAAAu);
+    cpu_fill(B, 128 * KiB, 0xCCCCCCCCu);
+    cpu_fill(C, 128 * KiB, 0xDDDDDDDDu);
+    cpu_fill(E, 128 * KiB, 0xEEEEEEEEu);
+    uint64_t v1 = sub_begin();
+    backing_raw_begin(v1);
+    BackingRef big = resolve(A + 0x1000, 256 * KiB, v1);   // large binds mark A, C and E hot; B only gets a small one
+    resolve(C, 128 * KiB, v1);
+    resolve(E, 128 * KiB, v1);
+    BackingRef small = resolve(B + 0x1000, 0x100, v1);
+    CHECK(big.kind == BACKING_IMPORT && small.kind == BACKING_IMPORT);
+    BackingStats s = stats();
+    CHECK(s.raw_promoted == 0 && s.mirrors == 0 && s.imports == 4);
+    sub_end(v1);
+    gpu_run(v1, NULL);
+
+    cpu_fill(A + 0x1000, 0x1000, 0xBBBBBBBBu);   // the CPU writes into a hot import's range before the next submission
+    // v2 reads C and writes E before its raw-access stage: C may become a mirror (what v2 recorded read the import's bytes,
+    // which the mirror's first copy repeats), E may not (replacing a backing the submission wrote is a named fatal)
+    uint64_t v2 = sub_begin();
+    resolve(C, 128 * KiB, v2);
+    resolve(E, 128 * KiB, v2);
+    backing_gpu_wrote(E, 0x100, v2);
+    backing_raw_begin(v2);
+    s = stats();
+    CHECK(s.raw_promoted == 2 && s.raw_promote_bytes == 640 * KiB && s.mirrors == 2 && s.mirror_bytes == 640 * KiB);
+    CHECK(s.imports == 2);   // B, which only a small bind reached, and E, which v2 wrote
+    BackingPage pg;
+    backing_page(A + 0x1000, &pg);
+    CHECK(pg.kind == BACKING_MIRROR);
+    backing_page(C + 0x1000, &pg);
+    CHECK(pg.kind == BACKING_MIRROR);
+    backing_page(B + 0x1000, &pg);
+    CHECK(pg.kind == BACKING_IMPORT);
+    backing_page(E + 0x1000, &pg);
+    CHECK(pg.kind == BACKING_IMPORT);
+    BackingRef now = resolve(A + 0x1000, 256 * KiB, v2);
+    CHECK(now.kind == BACKING_MIRROR);
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    CHECK(version == backing_version());
+    const BackingRun *r = run_at(runs, n, A + 0x1000);
+    CHECK(r && r->kind == BACKING_MIRROR && raw_address(runs, n, A + 0x1000) == now.address);   // the table and the bind agree
+    free(runs);
+    sub_end(v2);
+    gpu_run(v2, NULL);
+    CHECK(words_are(bytes(&now), 0x1000, 0xBBBBBBBBu));            // brought current: what the CPU wrote since
+    CHECK(words_are(bytes(&now) + 0x1000, 0x1000, 0xAAAAAAAAu));   // and the rest of what it had written before
+
+    // the next submission promotes E, which the admission now refuses: it stays an import and the refusal is counted
+    D.used = D.budget - 1 * MiB;
+    uint64_t v3 = sub_begin();
+    backing_raw_begin(v3);
+    s = stats();
+    CHECK(s.raw_promoted == 2 && s.mirrors == 2 && s.mirrors_refused_budget >= 1);
+    backing_page(E + 0x1000, &pg);
+    CHECK(pg.kind == BACKING_IMPORT);
+    sub_end(v3);
+    gpu_run(v3, NULL);
+    // with room again a bind marks it hot once more and the submission after promotes it
+    D.used = 0;
+    uint64_t v4 = sub_begin();
+    backing_raw_begin(v4);
+    resolve(E, 128 * KiB, v4);
+    sub_end(v4);
+    gpu_run(v4, NULL);
+    uint64_t v5 = sub_begin();
+    backing_raw_begin(v5);
+    s = stats();
+    CHECK(s.raw_promoted == 3 && s.mirrors == 3);
+    backing_page(E + 0x1000, &pg);
+    CHECK(pg.kind == BACKING_MIRROR);
+    sub_end(v5);
+    gpu_run(v5, NULL);
+    printf("raw_promote: %llu imports became mirrors (%llu KiB); the one v2 wrote, and the one the admission refused, waited\n",
+           (ull)s.raw_promoted, (ull)(s.raw_promote_bytes >> 10));
+    backing_pool_fini(&pp);
+    done("raw_promote");
+}
+
+// A bind of a uniform's size or less never marks an import: no promotion however often it is bound.
+static void case_raw_promote_small(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 16 * MiB);
+    cpu_fill(p, 512 * KiB, 0xAAAAAAAAu);
+    for (int i = 0; i < 3; i++) {
+        uint64_t v = sub_begin();
+        backing_raw_begin(v);
+        BackingRef a = resolve(p + 0x1000, BACKING_PROMOTE_MIN, v);   // exactly a uniform's largest range
+        CHECK(a.kind == BACKING_IMPORT);
+        sub_end(v);
+        gpu_run(v, NULL);
+    }
+    BackingStats s = stats();
+    CHECK(s.raw_promoted == 0 && s.mirrors == 0 && s.imports == 1);
+    backing_pool_fini(&pp);
+    done("raw_promote_small");
+}
+
+// The promotion waits for the older raw-access submission in flight: what its raw stores wrote through the import is in
+// guest memory when it is done, and the mirror's first copy is taken from there.
+static uint64_t g_through;
+static void write_through_import(void) { memset((void *)(uintptr_t)g_through, 0x5A, 0x100); }
+static void run_older_with_write(void *arg) {
+    (void)arg;
+    plat_sleep_ns(200 * 1000 * 1000);
+    gpu_run(g_older, write_through_import);
+}
+
+static void case_raw_promote_wait(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 16 * MiB);
+    cpu_fill(p, 512 * KiB, 0xAAAAAAAAu);
+    uint64_t v1 = sub_begin();
+    backing_raw_begin(v1);
+    BackingRef big = resolve(p + 0x1000, 256 * KiB, v1);
+    CHECK(big.kind == BACKING_IMPORT);
+    sub_end(v1);   // handed over, and the device has not reached it
+    g_older = v1;
+    g_through = p + 0x1000;
+    uint64_t v2 = sub_begin();
+    CHECK(plat_thread_start(run_older_with_write, NULL, 256 * KiB));
+    uint64_t t0 = plat_now_ns();
+    backing_raw_begin(v2);
+    double waited = (double)(plat_now_ns() - t0) / 1e6;
+    CHECK(waited >= 150.0 && gpu_sync_done() >= v1 && stats().replace_waits >= 1 && stats().raw_promoted == 1);
+    BackingRef now = resolve(p + 0x1000, 256 * KiB, v2);
+    CHECK(now.kind == BACKING_MIRROR);
+    sub_end(v2);
+    gpu_run(v2, NULL);
+    CHECK(words_are(bytes(&now), 0x100, 0x5A5A5A5Au));              // the write v1 made through the import is in the copy
+    CHECK(words_are(bytes(&now) + 0x100, 0x100, 0xAAAAAAAAu));
+    printf("raw_promote_wait: the promotion waited %.1f ms for the raw-access submission in flight\n", waited);
+    backing_pool_fini(&pp);
+    done("raw_promote_wait");
+}
+
+// A promotion that would take the mirrors past BACKING_PROMOTE_MIRROR_MAX leaves its import as it was: the raw path's
+// write-back holds that many bytes of pages, and a submission's stores cannot reach more than the mirrors it maps.
+static void case_raw_promote_cap(void) {
+    setup(512 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    const uint64_t win = BACKING_IMPORT_WINDOW, len = 60 * MiB;
+    uint64_t base = (g_heap + win - 1) & ~(win - 1);   // each run starts a window of its own: one import each
+    const uint64_t run[3] = {base, base + 2 * win, base + 4 * win};
+    CHECK(3 * len > BACKING_PROMOTE_MIRROR_MAX && 2 * len <= BACKING_PROMOTE_MIRROR_MAX);
+    pool_t pp = pool(base, 5 * win);
+    for (int i = 0; i < 3; i++) cpu_fill(run[i], len, 0xA0A0A0A0u + (uint32_t)i);
+    uint64_t v1 = sub_begin();
+    backing_raw_begin(v1);
+    for (int i = 0; i < 3; i++) CHECK(resolve(run[i] + 0x1000, 256 * KiB, v1).kind == BACKING_IMPORT);   // each marked hot
+    sub_end(v1);
+    gpu_run(v1, NULL);
+    uint64_t v2 = sub_begin();
+    backing_raw_begin(v2);
+    BackingStats s = stats();
+    int mirrors = 0, imports = 0;
+    for (int i = 0; i < 3; i++) {
+        BackingPage pg;
+        backing_page(run[i] + 0x1000, &pg);
+        mirrors += pg.kind == BACKING_MIRROR, imports += pg.kind == BACKING_IMPORT;
+    }
+    CHECK(mirrors == 2 && imports == 1);   // two fit under the cap together; the third would pass it
+    CHECK(s.raw_promoted == 2 && s.raw_promote_bytes == 2 * len && s.mirrors == 2 && s.mirror_bytes == 2 * len);
+    CHECK(s.mirrors_refused_budget == 0);   // the cap refused it, not the device's budget
+    sub_end(v2);
+    gpu_run(v2, NULL);
+    for (int i = 0; i < 2; i++) {   // the refused one is bound again, marked hot again, and refused again at every begin
+        uint64_t v = sub_begin();
+        backing_raw_begin(v);
+        for (int k = 0; k < 3; k++) resolve(run[k] + 0x1000, 256 * KiB, v);
+        sub_end(v);
+        gpu_run(v, NULL);
+    }
+    s = stats();
+    CHECK(s.raw_promoted == 2 && s.mirrors == 2 && s.mirror_bytes == 2 * len);
+    printf("raw_promote_cap: %llu MiB of mirrors, the third %llu MiB run stayed an import\n", (ull)(s.mirror_bytes >> 20),
+           (ull)(len >> 20));
+    backing_pool_fini(&pp);
+    done("raw_promote_cap");
+}
+
 // ---------- cases that stop by name
 // An earlier bind of the submission reached the pages a later one takes from the mirror: the table cannot give both the
 // same copy of them.
@@ -826,6 +1028,8 @@ int main(int argc, char **argv) {
         {"raw_grow_head", case_raw_grow_head},
         {"raw_grow_beside", case_raw_grow_beside}, {"raw_grow_wait", case_raw_grow_wait},
         {"raw_sync_wait", case_raw_sync_wait},
+        {"raw_promote", case_raw_promote},   {"raw_promote_small", case_raw_promote_small},
+        {"raw_promote_wait", case_raw_promote_wait}, {"raw_promote_cap", case_raw_promote_cap},
         {"raw_grow_taken", case_raw_grow_taken},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)

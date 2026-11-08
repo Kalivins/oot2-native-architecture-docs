@@ -42,7 +42,9 @@
 #include "oot2/raw_table.h"
 
 #define RAW_COPIES_MAX 4             // copies of the table; a fifth with every copy in a submission not issued is fatal
-#define RAW_WRITEBACK_PAGES 1024     // mirrored pages one submission's raw stores may reach (4 MiB of write-back)
+#define RAW_WRITEBACK_PAGES 32768    // mirrored pages one submission's raw stores may reach (128 MiB of write-back)
+// A promotion (backing.h) keeps the mirrors within the write-back, so the stores of a submission cannot reach more pages than it holds.
+_Static_assert(BACKING_PROMOTE_MIRROR_MAX / BACKING_HOST_PAGE <= RAW_WRITEBACK_PAGES, "the write-back must hold every promoted mirror");
 
 // ---- the builder (no device: runtime/gpu/raw_table.c)
 typedef struct RawLayout {

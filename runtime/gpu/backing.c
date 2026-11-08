@@ -84,6 +84,9 @@ typedef struct Backing {
     // (one at a time) and read by it under the exclusive lock: the raw path's binds take pages from a mirror only where
     // no earlier bind of their submission reached it (beside).
     uint64_t res_value, res_lo, res_hi;
+    // An import's: a bind larger than a uniform's resolved into it (atomic). The next raw-access submission's begin gives
+    // such an import the mirror the rule would have made for the bind (promote_hot).
+    int hot;
 } Backing;
 
 // A pool the CPU sees cut to the windows [k1, k2] one bind touched, and the imports binds made inside it.
@@ -999,6 +1002,11 @@ static int lookup(uint64_t addr, uint64_t size, uint64_t value, BackingRef *out)
     if (b->kind == BACKING_MIRROR) {
         if (value) note_resolved(b, addr, size, value);
         mirror_use(b, value);
+    } else if (b->kind == BACKING_IMPORT && value && size > BACKING_PROMOTE_MIN) {
+        // A bind of a range larger than a uniform's reached an import: the page table's invariant imported every committed
+        // page, and a bind in a raw-access submission can only import. The GPU reads an import across the bus, so the next
+        // raw-access submission's begin gives it the mirror the rule would have made (promote_hot).
+        __atomic_store_n(&b->hot, 1, __ATOMIC_RELAXED);
     }
     fill(out, b, addr);
     return 1;
@@ -1320,6 +1328,58 @@ static void fill_pool(Rec *r) {
     }
 }
 
+// The imports a bind larger than a uniform's reached (lookup flagged them) become mirrors, as the rule gives a bind in any
+// other submission on a discrete device: the invariant above imported every committed page, and an import is read across the
+// bus (the raw-address study: 22.9 times slower than VRAM), which a compute program that works on its buffers feels in every
+// access. It is done here, at the begin of a raw-access submission, before its raw-access stages and the binds that follow
+// them, so that those binds and the page table reach the one copy. A bind of the submission before its first raw-access stage
+// that only read the import leaves no hazard: the commands it recorded read the import's bytes, the CPU's view, which the
+// mirror's first copy repeats, and the import lives until they are done. One the submission wrote on the GPU stays an import
+// until the next submission, as replacing a backing the submission wrote is a named fatal (replace_wait). The older
+// submissions that reached the import are waited for there too, so what they wrote through it is in guest memory when the
+// mirror takes its copy, and backing_sync_mirrors brings the mirror current right after. A mirror the admission refuses
+// leaves the import as it was and ends the pass (one refusal a begin, whatever the number of hot imports). g_lock exclusive.
+static void promote_hot(uint64_t value) {
+    if (!has_mirrors() || !g_mirror_hook) return;
+    for (int i = 0; i < g_index.n; i++) {
+        Rec *r = (Rec *)g_index.e[i].key;
+        if (r->cls != CLS_CPU) continue;
+        for (int j = 0; j < r->ncells; j++) {
+            Cell *c = &r->cells[j];
+            for (int k = 0; k < c->nimp; k++) {
+                Backing *b = c->imp[k];
+                if (b->kind != BACKING_IMPORT || !__atomic_load_n(&b->hot, __ATOMIC_RELAXED)) continue;
+                if (__atomic_load_n(&b->written, __ATOMIC_ACQUIRE) == value) continue;   // this submission wrote it: next time
+                uint64_t lo = b->gpu_lo, hi = b->gpu_hi;
+                BackingAsk ask = {lo, hi - lo, r->flags};
+                if (backing_rule(&ask) != BACKING_MIRROR) {
+                    __atomic_store_n(&b->hot, 0, __ATOMIC_RELAXED);   // the rule says import: it stays one
+                    continue;
+                }
+                if (g_st.mirror_bytes + up(hi - lo, BACKING_EXTENT_ALIGN) > BACKING_PROMOTE_MIRROR_MAX) {
+                    // the raw path's write-back holds the pages the stores of one submission reach only while every mirror fits it
+                    __atomic_store_n(&b->hot, 0, __ATOMIC_RELAXED);
+                    if (!r->mirror_logged) {
+                        r->mirror_logged = 1;
+                        rt_log("gfx: vulkan: backing map: the mirror of [%#llx, %#llx) (%llu KiB) in pool [%#llx, %#llx) is not made: "
+                               "the mirrors would pass %llu MiB, which the raw write-back holds; imported", (ull)lo, (ull)hi,
+                               (ull)((hi - lo) >> 10), (ull)r->lo, (ull)r->hi, (ull)(BACKING_PROMOTE_MIRROR_MAX >> 20));
+                    }
+                    continue;
+                }
+                Backing *m = mirror_admit(r, lo, hi);
+                if (!m) {   // no room (or no write watch): it stays an import, and the rest wait for the next begin
+                    __atomic_store_n(&b->hot, 0, __ATOMIC_RELAXED);
+                    return;
+                }
+                replace_wait(c, lo, hi, value, 1);
+                cell_put(c, lo, hi, m);   // the import is deferred and the mirror takes its place in the cell
+                g_st.raw_promoted++, g_st.raw_promote_bytes += hi - lo;
+            }
+        }
+    }
+}
+
 void backing_raw_begin(uint64_t value) {
     if (!g_open || !value)
         rt_fatal("gfx: vulkan: backing map: a raw-access submission (value %llu) %s", (ull)value,
@@ -1339,6 +1399,7 @@ void backing_raw_begin(uint64_t value) {
             else if (r->cls == CLS_CPU) fill_pool(r);
         }
     }
+    promote_hot(value);
     plat_unlock(&g_lock);
     bound();
     backing_sync_mirrors(value);

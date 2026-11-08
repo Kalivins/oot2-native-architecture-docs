@@ -99,6 +99,18 @@
 // to the mirrors that remain. A mirror the submission already resolved where the bind takes pages, or wrote there on the
 // GPU, is a named fatal.
 //
+// An import is never what the rule would give a bind on a discrete device, and the invariant above makes one of every
+// committed page: the GPU reads an import across the bus, so a compute program that works on its buffers stalls on every
+// access (the raw-address study measured 22.9 times VRAM for a lookup; a title run moved 3 GB a second each way over the
+// bus at a few percent of the GPU's own memory traffic). A bind of a range larger than a uniform's (BACKING_PROMOTE_MIN)
+// that lands in an import marks it hot, and the next raw-access submission's backing_raw_begin gives each hot import the
+// mirror the rule would have made, over the same pages, before the submission binds anything of its own: the older
+// submissions that reached the import are waited for, the mirror is brought current from guest memory, and its GPU writes
+// are written back like any mirror's (the page table's store bits for raw stores, the declared ranges for binds). An
+// import the submission wrote stays one until the next, and one the admission refuses stays an import. So does one whose
+// mirror would take the mirrors past BACKING_PROMOTE_MIRROR_MAX: the raw path's write-back holds RAW_WRITEBACK_PAGES
+// pages, and while every mirror fits it the raw stores of a submission cannot reach more pages than it holds.
+//
 // Locking: one reader-writer lock. A resolve that finds its backing holds it shared; one that makes a backing holds it
 // exclusively, and imports are made under it. The mirrors' coherence state (their generations, the GPU writes not yet
 // written back) has a mutex of its own, taken after that lock and never by a thread that waits for a value; the
@@ -117,6 +129,8 @@
 #define BACKING_EXTENT_ALIGN 0x10000ull       // extents are 64 KiB aligned in their block, as window pages are
 #define BACKING_HOST_PAGE 0x1000ull           // the page of commit and of host import
 #define BACKING_MIRROR_RESERVE 8              // section 8: a mirror leaves an eighth of the VRAM budget free
+#define BACKING_PROMOTE_MIN (64ull << 10)     // a bind larger than a uniform's (maxUniformBufferRange) marks its import hot
+#define BACKING_PROMOTE_MIRROR_MAX (128ull << 20)   // a promotion leaves the mirrors at or under this many bytes (vk_raw.h's write-back)
 enum { BACKING_NONE, BACKING_EXTENT, BACKING_IMPORT, BACKING_MIRROR };
 
 // What a bind asks for: its range and its pool's flags (NVNmemoryPoolFlags).
@@ -259,5 +273,6 @@ typedef struct BackingStats {
     uint64_t raw_begins, raw_passes;                                   // raw-access submissions; passes of the invariant
     uint64_t raw_fill_imports, raw_fill_bytes, raw_fill_extents;       // what those passes made
     uint64_t raw_waits;                                                // mirror copies that waited for raw stores
+    uint64_t raw_promoted, raw_promote_bytes;                          // imports given a mirror at a raw-access begin
 } BackingStats;
 void backing_stats(BackingStats *out);
