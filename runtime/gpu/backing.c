@@ -261,6 +261,38 @@ static uint64_t block_take(Block *b, uint64_t size) {
     return UINT64_MAX;
 }
 
+static int block_free_at(const Block *b, uint64_t lo, uint64_t hi) {
+    if (lo == hi) return 1;
+    for (int i = 0; i < b->nfree; i++)
+        if (b->free[i].lo <= lo && b->free[i].hi >= hi) return 1;
+    return 0;
+}
+
+static void block_take_at(Block *b, uint64_t lo, uint64_t hi) {
+    if (lo == hi) return;
+    for (int i = 0; i < b->nfree; i++) {
+        Span s = b->free[i];
+        if (s.lo > lo || s.hi < hi) continue;
+        if (s.lo == lo && s.hi == hi) {
+            memmove(b->free + i, b->free + i + 1, (size_t)(b->nfree - i - 1) * sizeof *b->free);
+            b->nfree--;
+        } else if (s.lo == lo) {
+            b->free[i].lo = hi;
+        } else if (s.hi == hi) {
+            b->free[i].hi = lo;
+        } else {
+            b->free = grow(b->free, &b->cap, b->nfree + 1, sizeof *b->free, "a block's free list");
+            memmove(b->free + i + 2, b->free + i + 1, (size_t)(b->nfree - i - 1) * sizeof *b->free);
+            b->free[i].hi = lo;
+            b->free[i + 1] = (Span){hi, s.hi};
+            b->nfree++;
+        }
+        b->used += hi - lo;
+        return;
+    }
+    rt_fatal("gfx: vulkan: backing map: block part [%#llx, %#llx) was not free", (ull)lo, (ull)hi);
+}
+
 static void block_give(Block *b, uint64_t lo, uint64_t size) {
     uint64_t hi = lo + size;
     int at = 0;
@@ -883,6 +915,107 @@ static void replace_wait(const Cell *c, uint64_t rs, uint64_t re, uint64_t value
 }
 
 // ---------- a bind in a raw-access submission
+static int overlaps(uint64_t lo, uint64_t hi, uint64_t a, uint64_t b) {
+    return lo < b && a < hi;
+}
+
+// Keep a mirror an earlier bind reached at the same device address when a larger bind needs it. The additional pages
+// must fit beside its block part, and any imports they replace must not have been bound by this submission.
+static int grow_taken(Rec *r, Cell *c, Backing *m, uint64_t plo, uint64_t phi, uint64_t value) {
+    uint64_t old_lo = m->gpu_lo, old_hi = m->gpu_hi;
+    uint64_t lo = plo < old_lo ? plo : old_lo, hi = phi > old_hi ? phi : old_hi;
+    int moved;
+    do {
+        moved = 0;
+        for (int i = 0; i < c->nimp; i++) {
+            const Backing *b = c->imp[i];
+            if (b == m || !overlaps(lo, hi, b->gpu_lo, b->gpu_hi)) continue;
+            if (b->kind != BACKING_IMPORT || used_by(b) >= value) return 0;
+            if (b->gpu_lo < lo) lo = b->gpu_lo, moved = 1;
+            if (b->gpu_hi > hi) hi = b->gpu_hi, moved = 1;
+        }
+    } while (moved);
+    // Another cell or pool could otherwise resolve the added pages to a different copy.
+    for (int i = 0; i < g_index.n; i++) {
+        const Rec *other = (const Rec *)g_index.e[i].key;
+        if (other->cls != CLS_CPU) continue;
+        for (int j = 0; j < other->ncells; j++) {
+            const Cell *cell = &other->cells[j];
+            if (other == r && cell == c) continue;
+            for (int k = 0; k < cell->nimp; k++) {
+                const Backing *b = cell->imp[k];
+                if (overlaps(lo, hi, b->gpu_lo, b->gpu_hi)) return 0;
+            }
+        }
+    }
+    uint64_t added = old_lo - lo + hi - old_hi;
+    if (g_st.mirror_bytes > BACKING_PROMOTE_MIRROR_MAX ||
+        added > BACKING_PROMOTE_MIRROR_MAX - g_st.mirror_bytes || old_lo - lo > m->offset)
+        return 0;
+    uint64_t offset = m->offset - (old_lo - lo);
+    if (hi - lo > m->mem.size - offset) return 0;
+    uint64_t part_lo = down(offset, BACKING_EXTENT_ALIGN), part_hi = up(offset + hi - lo, BACKING_EXTENT_ALIGN);
+    uint64_t old_part_lo = m->part_at, old_part_hi = m->part_at + m->part;
+    if (part_lo > old_part_lo) part_lo = old_part_lo;
+    if (part_hi < old_part_hi) part_hi = old_part_hi;
+    if (part_hi > m->mem.size || !block_free_at(m->block, part_lo, old_part_lo) ||
+        !block_free_at(m->block, old_part_hi, part_hi))
+        return 0;
+    if (pagegen_scan(lo, hi) == UINT64_MAX) return 0;
+
+    uint64_t wait = raw_before(value);
+    for (int i = 0; i < c->nimp; i++) {
+        const Backing *b = c->imp[i];
+        if (b == m || !overlaps(lo, hi, b->gpu_lo, b->gpu_hi)) continue;
+        uint64_t u = reach_before(b, value);
+        if (u > wait) wait = u;
+    }
+    plat_mutex_lock(&g_coh);
+    for (int i = 0; i < g_npend; i++) {
+        const Pending *p = &g_pend[i];
+        if (p->m == m || !overlaps(lo, hi, p->lo, p->hi)) continue;
+        if (p->value >= value) {
+            plat_mutex_unlock(&g_coh);
+            return 0;
+        }
+        if (p->value > wait) wait = p->value;
+    }
+    plat_mutex_unlock(&g_coh);
+    if (wait > gpu_sync_done()) {
+        g_st.replace_waits++;
+        wait_value(wait);
+    }
+
+    block_take_at(m->block, part_lo, old_part_lo);
+    block_take_at(m->block, old_part_hi, part_hi);
+    m->part_at = part_lo, m->part = part_hi - part_lo;
+    m->gpu_lo = lo, m->gpu_hi = hi, m->offset = offset;
+    int k = 0, replaced = 0;
+    for (int i = 0; i < c->nimp; i++) {
+        Backing *b = c->imp[i];
+        if (b != m && overlaps(lo, hi, b->gpu_lo, b->gpu_hi)) {
+            defer(b);
+            replaced++;
+        } else {
+            c->imp[k++] = b;
+        }
+    }
+    c->nimp = k;
+    g_st.imports_grown += (uint64_t)replaced;
+    g_st.mirror_bytes += added;
+    changed();
+
+    plat_mutex_lock(&g_coh);
+    Ups u = {.m = m};
+    if (lo < old_lo) up_range(&u, lo, old_lo, 0);
+    if (old_hi < hi) up_range(&u, old_hi, hi, 0);
+    if (u.n) g_ops.upload(value, u.c, u.n);
+    g_cst.uploads += (uint64_t)u.n, g_cst.upload_bytes += u.bytes;
+    free(u.c);
+    plat_mutex_unlock(&g_coh);
+    return 1;
+}
+
 // The page table of a raw-access submission is read after the submission is recorded, and is rewritten as the map moves
 // until then (vk_raw.c), so every raw access of the submission reaches the map as the submission leaves it. A mirror is a
 // copy of its pages, though: a bind that gave its pages to a larger backing would leave two copies of the same bytes, one
@@ -964,6 +1097,8 @@ static Backing *backing_in(Rec *r, uint64_t addr, uint64_t size) {
     Backing *b = c ? cell_import(c, addr) : NULL;
     return b && addr + size <= b->gpu_hi ? b : NULL;
 }
+
+static void fill_pool(Rec *r);
 
 // The backing that holds [*addr, *addr + size) when the map holds one, *addr moved into the physical pool for a virtual
 // one; the pool in *rec and the virtual pool gone through in *virt (else NULL). g_lock, shared at least.
@@ -1057,6 +1192,18 @@ static void make(uint64_t addr, uint64_t size, uint64_t value) {
     // the new backing aliases the guest's memory, as an import does: a mirror made here would be filled in the prologue,
     // before the submission's own writes through the imports it replaces. A later submission's bind can still make it.
     if (value && raw_last() == value) {
+        for (int i = 0; i < c->nimp; i++) {
+            Backing *m = c->imp[i];
+            if (m->kind != BACKING_MIRROR || m->res_value != value ||
+                !overlaps(plo, phi, m->gpu_lo, m->gpu_hi) ||
+                !overlaps(plo, phi, m->res_lo, m->res_hi))
+                continue;
+            if (grow_taken(r, c, m, plo, phi, value)) {
+                fill_pool(r);   // a newly committed host chunk can extend beyond the pages of the bind
+                return;
+            }
+            break;
+        }
         if (kind == BACKING_MIRROR) kind = BACKING_IMPORT;
         beside(c, plo, phi, &rs, &re, value);
     }

@@ -96,8 +96,9 @@
 // was recorded before and one for what follows): it makes an import, never a mirror, and takes the pages it needs from the
 // mirrors it overlaps, which keep the part outside the bind (or go, when the bind covers all of them), waiting first for
 // the older raw-access submissions that may have stored into them; the import covers the committed run around the bind up
-// to the mirrors that remain. A mirror the submission already resolved where the bind takes pages, or wrote there on the
-// GPU, is a named fatal.
+// to the mirrors that remain. A mirror already resolved where the bind takes pages can instead grow in place when its
+// enlarged range stays write-watched, fits in the block and the mirror budget, and has no conflicting backings or
+// bindings; otherwise it is a named fatal.
 //
 // An import is never what the rule would give a bind on a discrete device, and the invariant above makes one of every
 // committed page: the GPU reads an import across the bus, so a compute program that works on its buffers stalls on every

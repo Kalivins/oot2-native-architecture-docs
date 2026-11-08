@@ -34,12 +34,14 @@
 //   raw_grow_head   a bind below a mirror that ends inside it takes its first pages: the rest keeps its own bytes
 //   raw_grow_whole, raw_grow_beside   a bind over a whole mirror takes it; one beside a mirror leaves it whole
 //   raw_grow_wait   the mirror gives its pages up only once the older raw-access submission in flight is done
+//   raw_grow_taken, raw_grow_neighbour, raw_grow_taken_wait, raw_grow_taken_head, raw_grow_trimmed   an earlier bind
+//                keeps the same device bytes when a later bind extends its mirror, including imports and older writes
 //   raw_sync_wait   a mirror the CPU wrote is brought current for a raw-access submission after the older one in flight
 //   raw_promote, raw_promote_small, raw_promote_wait, raw_promote_cap   an import a raw-access submission binds a range larger than a
 //                uniform's of becomes a mirror at the next raw-access begin: brought current, in the page table, left alone when
 //                the submission bound it before its raw stage or the admission refuses, never for a small bind, after the older
 //                raw-access submission in flight, and not past the mirrors' cap (the raw write-back's size)
-//   unwritten, replace_written, raw_grow_taken   stop by name
+//   unwritten, replace_written, raw_grow_bound_import, raw_grow_fragmented, raw_grow_untracked   stop by name
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -720,10 +722,11 @@ static void case_raw_grow_beside(void) {
 // A mirror gives pages up only once the older raw-access submissions are done: their stores into it reach guest memory,
 // which the import reads, when they are.
 static uint64_t g_older;
+static void (*g_older_work)(void);
 static void run_older_later(void *arg) {
     (void)arg;
     plat_sleep_ns(200 * 1000 * 1000);
-    gpu_run(g_older, NULL);
+    gpu_run(g_older, g_older_work);
 }
 
 static void case_raw_grow_wait(void) {
@@ -971,15 +974,260 @@ static void case_raw_promote_cap(void) {
     done("raw_promote_cap");
 }
 
-// ---------- cases that stop by name
-// An earlier bind of the submission reached the pages a later one takes from the mirror: the table cannot give both the
-// same copy of them.
+static BackingRef g_taken_old, g_taken_big;
+static uint64_t g_taken_raw, g_taken_fresh;
+
+static void gpu_grow_taken(void) {
+    uint32_t *old = (uint32_t *)bytes(&g_taken_old);
+    uint32_t *big = (uint32_t *)(bytes(&g_taken_big) + 0x31000 - 0x30320);
+    uint32_t *raw = (uint32_t *)(uintptr_t)g_taken_raw;
+    CHECK(*old == 0xAAAAAAAAu && *big == 0xAAAAAAAAu && *raw == 0xAAAAAAAAu);
+    CHECK(*(uint32_t *)(bytes(&g_taken_big) + g_taken_fresh - 0x30320) == 0xBBBBBBBBu);
+    *old = 0xCCCCCCCCu;
+    CHECK(*big == 0xCCCCCCCCu && *raw == 0xCCCCCCCCu);
+    *raw = 0xDDDDDDDDu;
+    CHECK(*old == 0xDDDDDDDDu && *big == 0xDDDDDDDDu);
+}
+
+static void finish_grow_taken(uint64_t p, pool_t *pp, uint64_t v, const char *name) {
+    backing_gpu_wrote(p + 0x31000, 4, v);   // a write declared before the mirror grows
+    g_taken_big = resolve(p + 0x30320, 1 * MiB, v);
+    CHECK(g_taken_old.kind == BACKING_MIRROR && g_taken_big.kind == BACKING_MIRROR);
+    CHECK(g_taken_big.address + 0x31000 - 0x30320 == g_taken_old.address);
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    g_taken_raw = raw_address(runs, n, p + 0x31000);
+    CHECK(g_taken_raw == g_taken_old.address && version == backing_version());
+    for (uint64_t a = p; a < p + 0x140000; a += PG) {
+        int committed;
+        uint64_t len = rt_mem_commit_run(a, PG, &committed);
+        CHECK(len != UINT64_MAX && len);
+        if (committed) CHECK(raw_address(runs, n, a));   // the whole committed chunk, not only the bound pages
+    }
+    free(runs);
+    sub_end(v);
+    gpu_run(v, gpu_grow_taken);
+    CHECK(*(uint32_t *)(uintptr_t)(p + 0x31000) == 0xDDDDDDDDu);
+    cpu_fill(p + 0x31000, 4, 0xEEEEEEEEu);
+    cpu_fill(p + g_taken_fresh, 4, 0xFFFFFFFFu);
+    uint64_t next = sub_begin();
+    BackingRef old = resolve(p + 0x31000, 4, next);
+    BackingRef fresh = resolve(p + g_taken_fresh, 4, next);
+    backing_raw_begin(next);
+    sub_end(next);
+    gpu_run(next, NULL);
+    CHECK(old.kind == BACKING_MIRROR && fresh.kind == BACKING_MIRROR);
+    CHECK(*(uint32_t *)bytes(&old) == 0xEEEEEEEEu && *(uint32_t *)bytes(&fresh) == 0xFFFFFFFFu);
+    backing_pool_fini(pp);
+    done(name);
+}
+
+// An earlier bind reached pages a later, larger bind also needs. The earlier bind, the larger bind and raw accesses
+// must all keep the same device bytes, including stores made before the submission completes.
 static void case_raw_grow_taken(void) {
     uint64_t p;
     pool_t pp;
     BackingRef small;
     uint64_t v = raw_scene(&p, &pp, &small);
-    resolve(p + 0x31000, 0x100, v);
+    g_taken_old = resolve(p + 0x31000, 0x100, v);
+    g_taken_fresh = 0x50000;
+    cpu_fill(p + g_taken_fresh, 4, 0xBBBBBBBBu);
+    finish_grow_taken(p, &pp, v, "raw_grow_taken");
+}
+
+static void case_raw_grow_neighbour(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 16 * MiB);
+    cpu_fill(p, 256 * KiB, 0xAAAAAAAAu);
+    g_taken_fresh = 0x80000;
+    cpu_fill(p + g_taken_fresh, 4, 0xBBBBBBBBu);
+    uint64_t v0 = sub_begin();
+    resolve(p, 0x100, v0);
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);   // the committed neighbour becomes an import, but this submission has not bound it
+    BackingPage pg;
+    backing_page(p + g_taken_fresh, &pg);
+    CHECK(pg.kind == BACKING_IMPORT);
+    g_taken_old = resolve(p + 0x31000, 0x100, v);
+    finish_grow_taken(p, &pp, v, "raw_grow_neighbour");
+}
+
+static uint64_t g_older_import;
+static void gpu_write_older_import(void) {
+    *(uint32_t *)(uintptr_t)g_older_import = 0xBBBBBBBBu;
+}
+
+static void case_raw_grow_taken_wait(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 16 * MiB);
+    cpu_fill(p, 256 * KiB, 0xAAAAAAAAu);
+    g_taken_fresh = 0x80000;
+    cpu_fill(p + g_taken_fresh, 4, 0x11111111u);
+    uint64_t v0 = sub_begin();
+    resolve(p, 0x100, v0);
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    uint64_t r = sub_begin();
+    backing_raw_begin(r);
+    CHECK(resolve(p + g_taken_fresh, 4, r).kind == BACKING_IMPORT);
+    sub_end(r);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    g_taken_old = resolve(p + 0x31000, 0x100, v);
+    g_older = r, g_older_import = p + g_taken_fresh, g_older_work = gpu_write_older_import;
+    CHECK(plat_thread_start(run_older_later, NULL, 256 * KiB));
+    uint64_t t0 = plat_now_ns();
+    finish_grow_taken(p, &pp, v, "raw_grow_taken_wait");
+    CHECK((double)(plat_now_ns() - t0) / 1e6 >= 150.0);
+}
+
+static BackingRef g_taken_head;
+static void gpu_grow_taken_head(void) {
+    *(uint32_t *)bytes(&g_taken_head) = 0xCCCCCCCCu;
+}
+
+static void case_raw_grow_taken_head(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 8 * MiB, q = g_heap + 4 * MiB;
+    pool_t pp = pool(p - 1 * MiB, 16 * MiB), spare = pool(q, 1 * MiB);
+    cpu_fill(q, 1 * MiB, 0x11111111u);
+    cpu_fill(p, 256 * KiB, 0xAAAAAAAAu);
+    uint64_t v0 = sub_begin();
+    CHECK(resolve(q, 4, v0).kind == BACKING_MIRROR);
+    CHECK(resolve(p, 4, v0).kind == BACKING_MIRROR);
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    backing_pool_fini(&spare);
+    backing_sync();   // the free block space precedes the remaining mirror
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    BackingRef old = resolve(p + 0x31000, 4, v);
+    g_taken_head = old;
+    backing_gpu_wrote(p + 0x31000, 4, v);
+    BackingRef big = resolve(p - 0x8000, 0x3A000, v);
+    CHECK(old.kind == BACKING_MIRROR && big.kind == BACKING_MIRROR);
+    CHECK(big.address + 0x39000 == old.address);
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    CHECK(raw_address(runs, n, p + 0x31000) == old.address);
+    for (uint64_t a = p - 0x10000; a < p; a += PG) {
+        int committed;
+        CHECK(rt_mem_commit_run(a, PG, &committed) != UINT64_MAX);
+        if (committed) CHECK(raw_address(runs, n, a));
+    }
+    free(runs);
+    sub_end(v);
+    gpu_run(v, gpu_grow_taken_head);
+    CHECK(*(uint32_t *)bytes(&old) == 0xCCCCCCCCu);
+    CHECK(*(uint32_t *)(uintptr_t)(p + 0x31000) == 0xCCCCCCCCu);
+    CHECK(*(uint32_t *)bytes(&big) == 0);
+    backing_pool_fini(&pp);
+    done("raw_grow_taken_head");
+}
+
+static BackingRef g_trimmed_old, g_trimmed_big;
+static uint64_t g_trimmed_raw;
+static void gpu_grow_trimmed(void) {
+    uint32_t *old = (uint32_t *)bytes(&g_trimmed_old);
+    uint32_t *big = (uint32_t *)(bytes(&g_trimmed_big) + 0x1000);
+    uint32_t *raw = (uint32_t *)(uintptr_t)g_trimmed_raw;
+    CHECK(*old == 0xAAAAAAAAu && *big == 0xAAAAAAAAu && *raw == 0xAAAAAAAAu);
+    CHECK(*(uint32_t *)(bytes(&g_trimmed_big) + 0x10000) == 0xBBBBBBBBu);
+    *old = 0xCCCCCCCCu;
+    CHECK(*big == 0xCCCCCCCCu && *raw == 0xCCCCCCCCu);
+    *raw = 0xDDDDDDDDu;
+}
+
+static void case_raw_grow_trimmed(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool_t pp = pool(p, 16 * MiB);
+    cpu_fill(p, 64 * KiB, 0xAAAAAAAAu);
+    uint64_t v0 = sub_begin();
+    resolve(p, 4, v0);
+    backing_raw_begin(v0);
+    CHECK(resolve(p + 0xE100, 0x3000, v0).kind == BACKING_IMPORT);
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    CHECK(stats().mirror_bytes == 0xE000);   // a mirror trimmed by the preceding submission
+    cpu_fill(p + 0x18000, 4, 0xBBBBBBBBu);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    g_trimmed_old = resolve(p + 0x9000, 0x80, v);
+    backing_gpu_wrote(p + 0x9000, 4, v);
+    g_trimmed_big = resolve(p + 0x8000, 0x20000, v);
+    CHECK(g_trimmed_old.kind == BACKING_MIRROR && g_trimmed_big.kind == BACKING_MIRROR);
+    CHECK(g_trimmed_big.address + 0x1000 == g_trimmed_old.address);
+    BackingRun *runs;
+    uint64_t version;
+    int n = backing_raw_runs(&runs, &version);
+    g_trimmed_raw = raw_address(runs, n, p + 0x9000);
+    CHECK(g_trimmed_raw == g_trimmed_old.address);
+    free(runs);
+    sub_end(v);
+    gpu_run(v, gpu_grow_trimmed);
+    CHECK(*(uint32_t *)(uintptr_t)(p + 0x9000) == 0xDDDDDDDDu);
+    backing_pool_fini(&pp);
+    done("raw_grow_trimmed");
+}
+
+// ---------- cases that stop by name
+static void case_raw_grow_bound_import(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB;
+    pool(p, 16 * MiB);
+    cpu_fill(p, 256 * KiB, 0xAAAAAAAAu);
+    cpu_fill(p + 0x80000, 4, 0xBBBBBBBBu);
+    uint64_t v0 = sub_begin();
+    resolve(p, 4, v0);
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    resolve(p + 0x31000, 4, v);
+    CHECK(resolve(p + 0x80000, 4, v).kind == BACKING_IMPORT);
+    resolve(p + 0x30320, 1 * MiB, v);
+    printf("returned\n");
+}
+
+static void case_raw_grow_fragmented(void) {
+    setup(64 * MiB, 0);
+    backing_set_mirror_hook(want_all);
+    uint64_t p = g_heap + 4 * MiB, q = g_heap + 24 * MiB;
+    pool(p, 16 * MiB);
+    pool(q, 1 * MiB);
+    cpu_fill(p, 256 * KiB, 0xAAAAAAAAu);
+    cpu_fill(q, 64 * KiB, 0xBBBBBBBBu);
+    uint64_t v0 = sub_begin();
+    CHECK(resolve(p, 4, v0).kind == BACKING_MIRROR);
+    CHECK(resolve(q, 4, v0).kind == BACKING_MIRROR);
+    sub_end(v0);
+    gpu_run(v0, NULL);
+    uint64_t v = sub_begin();
+    backing_raw_begin(v);
+    resolve(p + 0x31000, 4, v);
+    resolve(p + 0x30320, 1 * MiB, v);
+    printf("returned\n");
+}
+
+static void case_raw_grow_untracked(void) {
+    uint64_t p;
+    pool_t pp;
+    BackingRef small;
+    uint64_t v = raw_scene(&p, &pp, &small);
+    resolve(p + 0x31000, 4, v);
+    g_untracked = 1;
     resolve(p + 0x30320, 1 * MiB, v);
     printf("returned\n");
 }
@@ -1030,7 +1278,11 @@ int main(int argc, char **argv) {
         {"raw_sync_wait", case_raw_sync_wait},
         {"raw_promote", case_raw_promote},   {"raw_promote_small", case_raw_promote_small},
         {"raw_promote_wait", case_raw_promote_wait}, {"raw_promote_cap", case_raw_promote_cap},
-        {"raw_grow_taken", case_raw_grow_taken},
+        {"raw_grow_taken", case_raw_grow_taken}, {"raw_grow_neighbour", case_raw_grow_neighbour},
+        {"raw_grow_taken_wait", case_raw_grow_taken_wait}, {"raw_grow_taken_head", case_raw_grow_taken_head},
+        {"raw_grow_trimmed", case_raw_grow_trimmed},
+        {"raw_grow_bound_import", case_raw_grow_bound_import}, {"raw_grow_fragmented", case_raw_grow_fragmented},
+        {"raw_grow_untracked", case_raw_grow_untracked},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)
         if (!strcmp(argv[1], cases[i].name)) {
