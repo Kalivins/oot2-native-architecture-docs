@@ -565,6 +565,7 @@ REPORTS = [
 
 class ReportsTest(ReplayBase):
     def test_an_old_unfinished_report_survives_more_than_1024_later_reports(self) -> None:
+        """A long submission keeps old pending reports and chooses the newest report per address."""
         out = self.passing("many_pending_reports")
         self.assertIn("first draws 1", out.splitlines())
         self.assertIn("second draws 1", out.splitlines())
@@ -575,6 +576,7 @@ class ReportsTest(ReplayBase):
         self.assertIn("second draws 1", mutant.splitlines())
 
     def test_an_unfinished_report_survives_later_submissions(self) -> None:
+        """A report in an unfinished frame remains visible to later replayed frames."""
         out = self.passing("pending_across_frames")
         self.assertIn("draws 1", out.splitlines())
         mutant = self.passing("pending_across_frames", "--mutant", "nopending")
