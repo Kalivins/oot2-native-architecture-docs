@@ -128,6 +128,23 @@ static int case_remap(void) {
     return 0;
 }
 
+static int case_keyboard_sticks(void) {
+    HidHostInput out = {0};
+    hid_keyboard_sticks(0, &out);
+    CHECK(out.lx == 0 && out.ly == 0 && out.rx == 0 && out.ry == 0);
+    hid_keyboard_sticks((UINT64_C(1) << HID_KEY_A) | (UINT64_C(1) << HID_KEY_W) |
+                        (UINT64_C(1) << HID_KEY_L) | (UINT64_C(1) << HID_KEY_K), &out);
+    CHECK(out.lx == -32767 && out.ly == 32767 && out.rx == 32767 && out.ry == -32767);
+    hid_keyboard_sticks((UINT64_C(1) << HID_KEY_D) | (UINT64_C(1) << HID_KEY_S) |
+                        (UINT64_C(1) << HID_KEY_J) | (UINT64_C(1) << HID_KEY_I), &out);
+    CHECK(out.lx == 32767 && out.ly == -32767 && out.rx == -32767 && out.ry == 32767);
+    hid_keyboard_sticks((UINT64_C(1) << HID_KEY_A) | (UINT64_C(1) << HID_KEY_D) |
+                        (UINT64_C(1) << HID_KEY_I) | (UINT64_C(1) << HID_KEY_K), &out);
+    CHECK(out.lx == 0 && out.ry == 0);
+    printf("ok keyboard_sticks\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc != 2) {
@@ -137,7 +154,7 @@ int main(int argc, char **argv) {
 
     static const struct { const char *name; int (*fn)(void); } cases[] = {
         {"deadzone", case_deadzone}, {"publish", case_publish}, {"bits", case_bits}, {"rumble", case_rumble},
-        {"swallow", case_swallow}, {"remap", case_remap},
+        {"swallow", case_swallow}, {"remap", case_remap}, {"keyboard_sticks", case_keyboard_sticks},
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)
         if (!strcmp(argv[1], cases[i].name)) return cases[i].fn();

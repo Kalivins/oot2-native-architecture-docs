@@ -47,6 +47,19 @@ int32_t hid_host_input_axis_y(int16_t v, int32_t dead) {
     return hid_host_input_deadzone(y, dead);
 }
 
+static int32_t key_axis(uint64_t keys, int negative, int positive) {
+    int lo = (int)((keys >> negative) & 1u);
+    int hi = (int)((keys >> positive) & 1u);
+    return (hi - lo) * 32767;
+}
+
+void hid_keyboard_sticks(uint64_t key_down, HidHostInput *out) {
+    out->lx = key_axis(key_down, HID_KEY_A, HID_KEY_D);
+    out->ly = key_axis(key_down, HID_KEY_S, HID_KEY_W);
+    out->rx = key_axis(key_down, HID_KEY_J, HID_KEY_L);
+    out->ry = key_axis(key_down, HID_KEY_K, HID_KEY_I);
+}
+
 // The remap's console-button order and the nn::hid bit of each (HID_BTN_A, HID_BTN_B, ..., HID_BTN_STICKR).
 const uint64_t hid_remap_button_bit[HID_REMAP_BUTTONS] = {
     HID_BTN_A, HID_BTN_B, HID_BTN_X, HID_BTN_Y,

@@ -154,21 +154,21 @@ typedef enum RtSettingSource {
       "the keyboard key that presses the controller's A while no gamepad is connected (none: never pressed)")           \
     X(input_key_b, INPUT, ENUM, LIVE, 27, 0, 0, HID_KEY_SOURCE_NAMES,                                                  \
       "the keyboard key that presses the controller's B while no gamepad is connected (none: never pressed)")           \
-    X(input_key_x, INPUT, ENUM, LIVE, 38, 0, 0, HID_KEY_SOURCE_NAMES,                                                  \
+    X(input_key_x, INPUT, ENUM, LIVE, 6, 0, 0, HID_KEY_SOURCE_NAMES,                                                   \
       "the keyboard key that presses the controller's X while no gamepad is connected (none: never pressed)")           \
-    X(input_key_y, INPUT, ENUM, LIVE, 38, 0, 0, HID_KEY_SOURCE_NAMES,                                                  \
+    X(input_key_y, INPUT, ENUM, LIVE, 25, 0, 0, HID_KEY_SOURCE_NAMES,                                                  \
       "the keyboard key that presses the controller's Y while no gamepad is connected (none: never pressed)")           \
     X(input_key_l, INPUT, ENUM, LIVE, 34, 0, 0, HID_KEY_SOURCE_NAMES,                                                  \
       "the keyboard key that presses the controller's L while no gamepad is connected (none: never pressed)")           \
     X(input_key_r, INPUT, ENUM, LIVE, 36, 0, 0, HID_KEY_SOURCE_NAMES,                                                  \
       "the keyboard key that presses the controller's R while no gamepad is connected (none: never pressed)")           \
-    X(input_key_zl, INPUT, ENUM, LIVE, 38, 0, 0, HID_KEY_SOURCE_NAMES,                                                 \
+    X(input_key_zl, INPUT, ENUM, LIVE, 20, 0, 0, HID_KEY_SOURCE_NAMES,                                                 \
       "the keyboard key that presses the controller's ZL while no gamepad is connected (none: never pressed)")           \
-    X(input_key_zr, INPUT, ENUM, LIVE, 38, 0, 0, HID_KEY_SOURCE_NAMES,                                                 \
+    X(input_key_zr, INPUT, ENUM, LIVE, 8, 0, 0, HID_KEY_SOURCE_NAMES,                                                  \
       "the keyboard key that presses the controller's ZR while no gamepad is connected (none: never pressed)")           \
-    X(input_key_plus, INPUT, ENUM, LIVE, 38, 0, 0, HID_KEY_SOURCE_NAMES,                                               \
+    X(input_key_plus, INPUT, ENUM, LIVE, 31, 0, 0, HID_KEY_SOURCE_NAMES,                                               \
       "the keyboard key that presses the controller's Plus while no gamepad is connected (none: never pressed)")         \
-    X(input_key_minus, INPUT, ENUM, LIVE, 38, 0, 0, HID_KEY_SOURCE_NAMES,                                              \
+    X(input_key_minus, INPUT, ENUM, LIVE, 32, 0, 0, HID_KEY_SOURCE_NAMES,                                              \
       "the keyboard key that presses the controller's Minus while no gamepad is connected (none: never pressed)")       \
     X(input_key_left, INPUT, ENUM, LIVE, 2, 0, 0, HID_KEY_SOURCE_NAMES,                                                \
       "the keyboard key that presses the controller's D-pad Left while no gamepad is connected (none: never pressed)") \

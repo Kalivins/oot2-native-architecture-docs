@@ -73,6 +73,10 @@ enum HidKeySource {
     HID_KEY_SOURCES, HID_KEY_NONE = HID_KEY_SOURCES,
 };
 
+// Physical WASD and IJKL control the left and right sticks while no gamepad is connected. Opposite directions cancel;
+// these fixed stick keys are independent of button remapping and can also activate remapped buttons.
+void hid_keyboard_sticks(uint64_t key_down, HidHostInput *out);
+
 // One remap: for console button i, pad[i] is its gamepad source and key[i] its keyboard source, each a HidPadSource /
 // HidKeySource value; a value at or past the NONE sentinel (or any other the store does not give) means no source. The
 // window thread reads these out of the store's input_pad_* and input_key_* keys (live: every sample), whose defaults are

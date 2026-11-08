@@ -244,8 +244,8 @@ static void handle(const SDL_Event *e, SDL_Gamepad **pads, float *px, float *py,
 }
 
 // ---------- the host input layer's producer
-// The first gamepad opened is player 1's controller. Without one, the keyboard stands in for its buttons, and the sticks
-// read centered. Which gamepad button or keyboard key presses each of the controller's buttons is the remap the settings
+// The first gamepad opened is player 1's controller. Without one, the keyboard stands in for its buttons and sticks.
+// Which gamepad button or keyboard key presses each of the controller's buttons is the remap the settings
 // store holds (oot2.ini's [input] keys, input_pad_* and input_key_*; oot2/hid_input.h), read fresh every sample, so a
 // change is live at once. The menu's own keys (F1, Escape, the pad's Guide, Back with Start) stay fixed above all of it.
 static SDL_Gamepad *first_pad(SDL_Gamepad **pads) {
@@ -368,7 +368,11 @@ static void publish_input(SDL_Gamepad **pads) {
         int n = 0;
         const bool *keys = SDL_GetKeyboardState(&n);
         (void)n;
-        in.buttons = keys ? hid_remap_buttons(&map, 0, key_sources(keys)) : 0;
+        if (keys) {
+            uint64_t down = key_sources(keys);
+            in.buttons = hid_remap_buttons(&map, 0, down);
+            hid_keyboard_sticks(down, &in);
+        }
     }
     hid_host_input_publish(&in);
 }

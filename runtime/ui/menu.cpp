@@ -73,7 +73,8 @@ const RowDef DEFS[] = {
     {RT_GROUP_AUDIO, "Audio output", nullptr, "Volume and the output device.",
      "Greyed: the audio output is not built yet.", nullptr, false},
     {RT_GROUP_INPUT, "Stick dead zone", "input_dead_zone", nullptr, nullptr, nullptr, false},
-    {RT_GROUP_INPUT, "Controls", nullptr, "Which keys and buttons do what.",
+    {RT_GROUP_INPUT, "Controls", nullptr,
+     "Keyboard sticks use fixed physical WASD and IJKL when no gamepad is connected. Opposite directions cancel.",
      "Greyed: the mapping is the rows below, input_pad_* (a gamepad's buttons) and input_key_* (the keyboard's keys); "
      "set them here or in oot2.ini's [input]; the menu's own keys (F1, Escape, the pad's Guide) stay fixed.",
      nullptr, false},

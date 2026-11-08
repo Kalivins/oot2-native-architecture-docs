@@ -46,7 +46,7 @@ class HidInputTest(unittest.TestCase):
         return subprocess.run([str(self.exe), case], capture_output=True, text=True)
 
     def test_cases(self) -> None:
-        for case in ("deadzone", "publish", "bits", "rumble", "swallow", "remap"):
+        for case in ("deadzone", "publish", "bits", "rumble", "swallow", "remap", "keyboard_sticks"):
             with self.subTest(case=case):
                 done = self.run_case(case)
                 self.assertEqual(done.returncode, 0, done.stderr)
