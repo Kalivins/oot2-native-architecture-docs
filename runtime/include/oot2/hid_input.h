@@ -42,6 +42,9 @@ void hid_host_input_suppress(int on);
 // A center dead zone: |v| <= dead reads as 0, otherwise v is kept. dead is in the same 0..32767 scale as v.
 int32_t hid_host_input_deadzone(int32_t v, int32_t dead);
 
+// Convert SDL's negative-up vertical axis to HID's positive-up axis, saturating at the positive endpoint.
+int32_t hid_host_input_axis_y(int16_t v, int32_t dead);
+
 // ---- the remap (oot2.ini's [input] keys, set through the settings store)
 // The console buttons the remap names, in the order the store's input_pad_* and input_key_* keys number them (a, b, x,
 // y, l, r, zl, zr, plus, minus, left, up, right, down, stickl, stickr); index i's nn::hid bit is hid_remap_button_bit[i].
@@ -97,5 +100,7 @@ typedef struct HidRumble {
     uint16_t low, high;
     uint32_t duration_ms;
 } HidRumble;
+// SDL has one motor per frequency rather than one per guest side; retain the strongest amplitude of either side.
+HidRumble hid_rumble_mix(float left_low, float left_high, float right_low, float right_high);
 void hid_rumble_publish(const HidRumble *r);
 int hid_rumble_take(HidRumble *out);   // 1 with *out when a request is pending, else 0

@@ -24,6 +24,10 @@ static int case_deadzone(void) {
     CHECK(hid_host_input_deadzone(-1001, 1000) == -1001);
     CHECK(hid_host_input_deadzone(32767, 0) == 32767);
     CHECK(hid_host_input_deadzone(-32768, 0) == -32768);
+    CHECK(hid_host_input_axis_y(-32768, 0) == 32767);
+    CHECK(hid_host_input_axis_y(32767, 0) == -32767);
+    CHECK(hid_host_input_axis_y(-1000, 1000) == 0);
+    CHECK(hid_host_input_axis_y(1001, 1000) == -1001);
     printf("ok deadzone\n");
     return 0;
 }
@@ -48,6 +52,14 @@ static int case_publish(void) {
 
 static int case_rumble(void) {
     HidRumble r = {0};
+    r = hid_rumble_mix(0, 1, 0, 0);
+    CHECK(r.low == 0 && r.high == 65535 && r.duration_ms == 100);
+    r = hid_rumble_mix(0, 0, 1, 0);
+    CHECK(r.low == 65535 && r.high == 0);
+    r = hid_rumble_mix(0.25f, 0.75f, 0.5f, 0.125f);
+    CHECK(r.low == 32767 && r.high == 49151);
+    r = hid_rumble_mix(-1.0f, 2.0f, 0, 0);
+    CHECK(r.low == 0 && r.high == 65535);
     CHECK(hid_rumble_take(&r) == 0);   // nothing pending at first
     HidRumble a = {0x1111, 0x2222, 80};
     hid_rumble_publish(&a);

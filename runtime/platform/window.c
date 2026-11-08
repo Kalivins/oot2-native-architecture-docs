@@ -361,9 +361,9 @@ static void publish_input(SDL_Gamepad **pads) {
     if (g) {
         in.buttons = hid_remap_buttons(&map, pad_sources(g), 0);   // with a pad open, the keyboard does not stand in
         in.lx = stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), dz);
-        in.ly = stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY), dz);
+        in.ly = hid_host_input_axis_y(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY), dz);
         in.rx = stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX), dz);
-        in.ry = stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY), dz);
+        in.ry = hid_host_input_axis_y(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY), dz);
     } else {
         int n = 0;
         const bool *keys = SDL_GetKeyboardState(&n);

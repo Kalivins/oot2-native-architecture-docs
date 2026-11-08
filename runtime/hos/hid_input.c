@@ -40,6 +40,12 @@ int32_t hid_host_input_deadzone(int32_t v, int32_t dead) {
     return (v > dead || v < -dead) ? v : 0;
 }
 
+int32_t hid_host_input_axis_y(int16_t v, int32_t dead) {
+    int32_t y = -(int32_t)v;
+    if (y > 32767) y = 32767;
+    return hid_host_input_deadzone(y, dead);
+}
+
 // The remap's console-button order and the nn::hid bit of each (HID_BTN_A, HID_BTN_B, ..., HID_BTN_STICKR).
 const uint64_t hid_remap_button_bit[HID_REMAP_BUTTONS] = {
     HID_BTN_A, HID_BTN_B, HID_BTN_X, HID_BTN_Y,
@@ -56,6 +62,18 @@ uint64_t hid_remap_buttons(const HidRemap *map, uint32_t pad_down, uint64_t key_
         if (map->key[i] < HID_KEY_NONE && (key_down >> map->key[i]) & 1u) b |= hid_remap_button_bit[i];
     }
     return b;
+}
+
+static uint16_t rumble_strength(float amp) {
+    if (!(amp > 0.0f)) return 0;
+    if (amp >= 1.0f) return 0xFFFFu;
+    return (uint16_t)(amp * 65535.0f);
+}
+
+HidRumble hid_rumble_mix(float left_low, float left_high, float right_low, float right_high) {
+    uint16_t ll = rumble_strength(left_low), lh = rumble_strength(left_high);
+    uint16_t rl = rumble_strength(right_low), rh = rumble_strength(right_high);
+    return (HidRumble){ll > rl ? ll : rl, lh > rh ? lh : rh, 100};
 }
 
 void hid_rumble_publish(const HidRumble *r) {
