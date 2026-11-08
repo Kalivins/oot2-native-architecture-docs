@@ -449,6 +449,12 @@ class GraphicsTest(ReplayBase):
         self.assertEqual(len(pushes), 5, pushes)
         self.assertTrue(all("first_task=unavailable" in p for p in pushes), pushes)
 
+    def test_vertex_restart_state_is_emitted_after_mesh_draws(self) -> None:
+        f = frame(self.passing("mesh_restart"), 1)
+        restart = [p for p in f if p.startswith("SetPrimitiveRestartEnable")]
+        self.assertEqual(restart, ["SetPrimitiveRestartEnable 0", "SetPrimitiveRestartEnable 1",
+                                   "SetPrimitiveRestartEnable 0"])
+
     def test_a_gpu_write_drops_the_uniform_copy_and_later_reads_are_live(self) -> None:
         # read first: draw 1 reads the copy (taken at submit), its pixel stage writes the range, draw 2 reads it live
         out = self.passing("conflict_read_first")

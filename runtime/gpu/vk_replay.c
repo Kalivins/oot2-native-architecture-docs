@@ -127,7 +127,7 @@ typedef struct {
     VkCullModeFlags cull;
     VkFrontFace front;
     VkPolygonMode mode;
-    VkBool32 bias_en, discard, clamp, clip11, dt, dw, bt, st, restart, logic;
+    VkBool32 bias_en, discard, clamp, clip11, dt, dw, bt, st, restart, restart_valid, logic;
     float bias[3], line_width, bounds[2], blend_color[4];
     VkCompareOp df;
     VkStencilOp sop[2][3];
@@ -616,7 +616,7 @@ static void dyn_emit(VkPrimitiveTopology topo, VkBool32 restart, int mesh) {
         }
     }
     if (!mesh && DIFF(topo)) vkrec_SetPrimitiveTopology(n.topo);
-    if (!mesh && DIFF(restart)) vkrec_SetPrimitiveRestartEnable(n.restart);
+    if (!mesh && (!o->restart_valid || DIFF(restart))) vkrec_SetPrimitiveRestartEnable(n.restart);
     if (DIFF(blend_color)) vkrec_SetBlendConstants(n.blend_color);
     if (DIFF(logic)) vkrec_SetLogicOpEnableEXT(VK_FALSE);
     if (n.ntargets && (DIFF(ntargets) || DIFF(blend_en) || DIFF(eq) || DIFF(wm))) {
@@ -624,7 +624,8 @@ static void dyn_emit(VkPrimitiveTopology topo, VkBool32 restart, int mesh) {
         vkrec_SetColorBlendEquationEXT(0, n.ntargets, n.eq);
         vkrec_SetColorWriteMaskEXT(0, n.ntargets, n.wm);
     }
-    if (mesh) n.topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM, n.restart = VK_FALSE;
+    if (mesh) n.topo = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM, n.restart_valid = VK_FALSE;
+    else n.restart_valid = VK_TRUE;
     *o = n;
     F.dyn_valid = 1;
 }

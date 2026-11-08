@@ -1196,6 +1196,29 @@ static void case_mesh(void) {
     printf("ok mesh\n");
 }
 
+static void case_mesh_restart(void) {
+    open_fakes();
+    Rec *r = rec_begin(0);
+    graphics_state(r);
+    p_bind_program mesh = program_mesh_only();
+    mesh.stages |= 1u << NVN_STAGE_VS;
+    PUT(r, OP_BIND_PROGRAM, mesh);
+    PUT(r, OP_DRAW_MESH, (p_draw_mesh){.first = 0, .count = 1});
+    PUT(r, OP_BIND_PROGRAM, program(0));
+    draw3(r, NVN_DRAW_PRIMITIVE_TRIANGLES);
+    PUT(r, OP_PRIM_RESTART, (p_prim_restart){.enable = 1, .index = 0xFFFF});
+    draw3(r, NVN_DRAW_PRIMITIVE_TRIANGLES);
+    PUT(r, OP_BIND_PROGRAM, mesh);
+    PUT(r, OP_DRAW_MESH, (p_draw_mesh){.first = 1, .count = 1});
+    PUT(r, OP_BIND_PROGRAM, program(0));
+    PUT(r, OP_PRIM_RESTART, (p_prim_restart){.enable = 0, .index = 0xFFFF});
+    draw3(r, NVN_DRAW_PRIMITIVE_TRIANGLES);
+    uint64_t h = rec_end(r);
+    vkr_submit(&h, 1);
+    close_fakes();
+    printf("ok mesh_restart\n");
+}
+
 static void case_oplist(void) {
     for (uint32_t op = 0; op < OP_COUNT_; op++) {
         const char *t = vkr_op_ticket(op);
@@ -1344,6 +1367,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "dual_two_targets")) case_dual_two_targets();
     else if (!strcmp(cs, "draw_indirect")) case_draw_indirect();
     else if (!strcmp(cs, "mesh")) case_mesh();
+    else if (!strcmp(cs, "mesh_restart")) case_mesh_restart();
     else if (!strcmp(cs, "stop") && argc >= 3) case_stop((uint32_t)strtoul(argv[2], NULL, 10));
     else if (!strcmp(cs, "broken")) case_broken();
     else if (!strcmp(cs, "reports")) case_reports();
