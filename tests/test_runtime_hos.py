@@ -47,10 +47,8 @@ EXIT_FATAL, EXIT_UNIMPLEMENTED, EXIT_GUEST_STOP, EXIT_CENSUS = 70, 71, 72, 73
 
 MOVIE = ("_ZN2nn5codec34InitializeAv1DecoderByRemoteMemoryEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24"
          "VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE")
-OPEN = ("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm")
-ACQUIRE = "_ZN2nn5audio36AcquireAudioOutputDeviceNotificationEPNS_2os11SystemEventE"
 
-PASSING = ("sm", "notes", "audio")
+PASSING = ("sm", "notes", "opus")
 
 # case: (exit code, text the FATAL line must contain, a row census.tsv must hold)
 FAILING = {
@@ -60,29 +58,12 @@ FAILING = {
              "svc\t0x1f ConnectToNamedPort\timplemented\t1\t"),
     "command": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented service command: sm: tipc command 7 (0 bytes of arguments",
                 "command\tsm: tipc 7\tnamed-fatal\t1\t"),
-    "domain": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented service command: sm: control 0 "
-                                   "ConvertCurrentObjectToDomain: CMIF domains come with",
-               "command\tsm: control 0\tnamed-fatal\t1\t"),
     "boot": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented boot: the SDK function _ZN2nn4init5StartEmmPFvvES2_S2_ is not "
                                  "defined by any module", "boot\t<rtld>\timplemented\t1\t"),
     # the AV1 decoder service's first step is a named fatal in a build with no decoder (no dav1d kit)
     "movie": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented movie: nn::codec::InitializeAv1Decoder: the host has no AV1 "
                                   "decoder (fake)",
               f"import\t{MOVIE}\timplemented\t1\t0x7000000250 (main+0x250)\t"),
-    # the audio stand-ins that bind the game's SystemEvent reach the SDK's own attach function, which this synthetic
-    # module does not define; a null handle or event stops the guest; a second renderer is a gap
-    "audio_open_binds": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented boot: the SDK function "
-                                             "_ZN2nn2os33AttachReadableHandleToSystemEventEPNS0_15SystemEventTypeEjbNS0_14"
-                                             "EventClearModeE is not defined by any module",
-                         f"import\t{OPEN}\tstub\t1\t0x7000000250 (main+0x250)\t"),
-    "audio_open_null": (EXIT_GUEST_STOP, "FATAL: guest stop: nn::audio::OpenAudioRenderer: null handle or event",
-                        f"import\t{OPEN}\tstub\t1\t0x7000000250 (main+0x250)\t"),
-    "audio_notification_binds": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented boot: the SDK function "
-                                                     "_ZN2nn2os33AttachReadableHandleToSystemEventEPNS0_15SystemEventTypeE"
-                                                     "jbNS0_14EventClearModeE is not defined by any module",
-                                 f"import\t{ACQUIRE}\tstub\t1\t0x7000000250 (main+0x250)\t"),
-    "audio_second": (EXIT_UNIMPLEMENTED, "FATAL: unimplemented audio: nn::audio::OpenAudioRenderer: a second renderer; "
-                                         "the stand-in keeps one", "svc\t0x01 SetHeapSize\timplemented\t1\t"),
 }
 
 
@@ -104,16 +85,16 @@ class HosTest(unittest.TestCase):
         out = Path(cls.tmp.name)
         layout.write(layout.place({"main": MODULE_SIZE}), out)
         sources = [str(TEST_SOURCE), str(END_SOURCE)]
-        for part in ("core", "nvn", "hos"):
+        for part in ("core", "nvn", "hos", "audio"):
             sources += sorted(str(p) for p in (RUNTIME / part).glob("*.c"))
         # Windows: without high-entropy ASLR the host's own stacks stay below 4 GiB, out of the fixed module region
         # (runtime/core/memory.c, rt_mem_init); the program is linked the same way.
         extra = ["-Wl,--disable-high-entropy-va"] if os.name == "nt" else ["-pthread"]
+        libs = [] if os.name == "nt" else ["-lm"]   # lrintf in the sink and the tests is not always inlined
         for level in LEVELS:
             exe = out / f"hos_test{level}{'.exe' if os.name == 'nt' else ''}"
             cmd = [cc, "-std=gnu11", level, "-march=x86-64-v3", "-Wall", "-Wextra", "-Werror", *extra,
-                   "-I", str(RUNTIME / "include"), "-I", str(RUNTIME / "core"), "-I", str(out), *sources, "-o",
-                   str(exe)]
+                   "-I", str(RUNTIME / "include"), "-I", str(RUNTIME / "core"), "-I", str(out), *sources, "-o", str(exe), *libs]
             done = subprocess.run(cmd, capture_output=True, text=True)
             if done.returncode != 0:
                 raise RuntimeError(f"build at {level} failed:\n{done.stdout}{done.stderr}")
@@ -219,17 +200,6 @@ class HosTest(unittest.TestCase):
                 self.assertRegex(done.stderr, r"(?m)^\[rt\] \[census mode\] census: calls per frame written to "
                                               r"\S*census-nvn\.tsv$")
                 self.assertTrue((folder / "census-nvn.tsv").read_text(encoding="utf-8").startswith("#census-mode"))
-
-    def test_the_audio_renderer_signals_its_frame_event_while_it_runs(self) -> None:
-        for level in LEVELS:
-            with self.subTest(level=level):
-                done, _ = self.run_case(level, "audio_events")
-                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-                self.assertIn("ok audio_events", done.stdout)
-                opened = re.findall(r"^\[rt\] audio: stand-in renderer opened: (.*), nothing is mixed$", done.stderr, re.M)
-                self.assertEqual(opened, ["48000 Hz, 480 samples a frame (10.00 ms)"] +
-                                 ["16000 Hz, 160 samples a frame (10.00 ms)"] * 2 +
-                                 ["48000 Hz, 240 samples a frame (5.00 ms)"] * 3, done.stderr)
 
     def test_a_memory_fault_names_the_guest_function_and_the_threads_frames(self) -> None:
         for level in LEVELS:

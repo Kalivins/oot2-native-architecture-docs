@@ -154,6 +154,9 @@ void hos_init(const char *game_folder, const RtGameFile *files, int file_count) 
     g_files = files;
     g_nfiles = file_count;
     ipc_register();
+    srv_audio_register();
+    srv_auddmg_register();
+    srv_audsmx_register();
     boot_register();
     census_init();
     // Overrides no import or definition named: written for a name this game's SDK does not define (drift by name).

@@ -551,6 +551,94 @@ static void g_main_key_order(Cpu *c) {
     exit_thread(c);
 }
 
+// The host lets go of an end of an event it made: rt_kernel_event_close frees the handle and leaves the other end a valid
+// handle, never signalled again; a handle value freed once is no event.
+static void g_main_event_close(Cpu *c) {
+    uint32_t r1, w1 = rt_kernel_event_create(&r1);
+    CHECK(sv(c, 0x11, w1, 0, 0, 0) == 0);
+    rt_kernel_event_close(w1);                                         // the writable end goes
+    CHECK(sv(c, 0x11, w1, 0, 0, 0) == R_INVALID_HANDLE);
+    CHECK(sv(c, 0x17, r1, 0, 0, 0) == 0);                              // the readable end is there, with the signal it had
+    CHECK(sv(c, 0x17, r1, 0, 0, 0) == R_INVALID_STATE);
+    ST32(W(HANDLES) + 0x40, r1);
+    CHECK(sv(c, 0x18, 0, W(HANDLES) + 0x40, 1, 2000000) == R_TIMED_OUT);   // nothing signals it any more
+    CHECK(sv(c, 0x16, r1, 0, 0, 0) == 0);                              // the guest's close frees the event
+    CHECK(sv(c, 0x17, r1, 0, 0, 0) == R_INVALID_HANDLE);
+    uint32_t r2, w2 = rt_kernel_event_create(&r2);
+    rt_kernel_event_close(r2);                                         // the readable end goes first
+    CHECK(sv(c, 0x17, r2, 0, 0, 0) == R_INVALID_HANDLE);
+    CHECK(sv(c, 0x11, w2, 0, 0, 0) == 0);                              // the writable end still signals
+    rt_kernel_event_close(w2);
+    CHECK(sv(c, 0x11, w2, 0, 0, 0) == R_INVALID_HANDLE);
+    uint32_t r3, w3 = rt_kernel_event_create(&r3);   // 512 handles are not leaked by pairs made and closed
+    for (int i = 0; i < 2000; i++) {
+        rt_kernel_event_close(w3);
+        rt_kernel_event_close(r3);
+        w3 = rt_kernel_event_create(&r3);
+    }
+    rt_kernel_event_close(w3);
+    rt_kernel_event_close(r3);
+    exit_thread(c);
+}
+// a handle that is no event
+static void g_main_event_close_bad(Cpu *c) {
+    rt_kernel_event_close(0x12345);   // a handle value no thread or event has
+    exit_thread(c);
+}
+
+// The waiter view (rt_kernel_waiters): a thread blocked on a readable end is listed with the start of its wait; a thread that
+// polls with a timeout stays listed with the start of its run of timeouts, until it stops polling for a while; a thread
+// that was signalled, or waited on other handles, is not.
+static void g_waiter_blocked(Cpu *c) {
+    ST32(W(HANDLES) + 0x40, g_event_r);
+    CHECK(sv(c, 0x18, 0, W(HANDLES) + 0x40, 1, ~0ull) == 0);
+    exit_thread(c);
+}
+static void g_poller(Cpu *c) {
+    uint32_t self = self_handle(c);
+    uint32_t r2, w2 = rt_kernel_event_create(&r2);
+    ST32(W(HANDLES) + 0x80, g_event_r);
+    ST32(W(HANDLES) + 0x84, r2);
+    uint64_t before = plat_now_ns();
+    RtWaiter w[4];
+    for (int i = 0; i < 3; i++) CHECK(sv(c, 0x18, 0, W(HANDLES) + 0x80, 1, 2000000) == R_TIMED_OUT);
+    CHECK(rt_kernel_waiters(g_event_r, w, 4) == 1 && w[0].thread == self && !w[0].blocked && w[0].entry == G(41));
+    uint64_t since = w[0].since_ns;
+    CHECK(since >= before && since <= before + 20000000);   // the start of the first wait, not of the last
+    CHECK(sv(c, 0x18, 0, W(HANDLES) + 0x80, 1, 2000000) == R_TIMED_OUT);
+    CHECK(rt_kernel_waiters(g_event_r, w, 4) == 1 && w[0].since_ns == since);   // the run goes on
+    CHECK(sv(c, 0x18, 0, W(HANDLES) + 0x84, 1, 2000000) == R_TIMED_OUT);      // other handles: a new run
+    CHECK(rt_kernel_waiters(g_event_r, w, 4) == 0 && rt_kernel_waiters(r2, w, 4) == 1);
+    CHECK(sv(c, 0x18, 0, W(HANDLES) + 0x80, 1, 2000000) == R_TIMED_OUT);
+    CHECK(rt_kernel_waiters(g_event_r, w, 4) == 1 && w[0].since_ns > since);
+    CHECK(rt_kernel_waiters(r2, w, 4) == 0);
+    sv(c, 0x0B, 600000000, 0, 0, 0);                              // it stops polling for 600 ms
+    CHECK(rt_kernel_waiters(g_event_r, w, 4) == 0);
+    rt_kernel_event_close(w2);
+    rt_kernel_event_close(r2);
+    exit_thread(c);
+}
+static void g_main_waiters(Cpu *c) {
+    RtWaiter w[4];
+    CHECK(rt_kernel_waiters(g_event_r, w, 4) == 0);
+    uint64_t before = plat_now_ns();
+    uint32_t t = create(c, G(40), 0, 40, 0);
+    start(c, t);   // better priority than main: it runs at once and blocks
+    uint64_t after = plat_now_ns();
+    CHECK(rt_kernel_waiters(g_event_r, w, 4) == 1);
+    CHECK(w[0].thread == t && w[0].blocked && w[0].entry == G(40) && w[0].since_ns >= before && w[0].since_ns <= after);
+    CHECK(rt_kernel_waiters(g_event_r, w, 0) == 0);                          // room for none: none written, none counted
+    CHECK(rt_kernel_waiters(g_event_w, w, 4) == 0);                          // the writable end is not waited on
+    CHECK(sv(c, 0x11, g_event_w, 0, 0, 0) == 0);                              // signalled: the waiter returns and ends
+    join(c, t);
+    CHECK(rt_kernel_waiters(g_event_r, w, 4) == 0);
+    CHECK(sv(c, 0x12, g_event_w, 0, 0, 0) == 0);                              // the poller needs it unsignalled
+    uint32_t p = create(c, G(41), 1, 40, 0);
+    start(c, p);
+    join(c, p);
+    exit_thread(c);
+}
+
 static void guest_end(Cpu *c) { (void)c; }
 
 static const GuestFn g_fns[] = {g_exit_deep, g_exit_mid, g_exit_top, g_main_threads, NULL, g_record_arg,
@@ -559,7 +647,8 @@ static const GuestFn g_fns[] = {g_exit_deep, g_exit_mid, g_exit_top, g_main_thre
                                 g_main_events, g_spinner, g_setter, g_main_spin, g_tight_spin, g_sleeper,
                                 g_main_async, g_counter, g_main_activity, g_nop, g_blocker, g_main_block, g_busy,
                                 g_rest, g_main_times, g_main_info, g_returns, g_main_returns, g_main_svc_arg,
-                                g_main_touch, g_key_watch, g_main_key_order, guest_end};
+                                g_main_touch, g_key_watch, g_main_key_order, g_main_event_close, g_main_event_close_bad, g_waiter_blocked, g_poller,
+                                g_main_waiters, guest_end};
 #define NFN ((int)(sizeof g_fns / sizeof *g_fns))
 static uint64_t g_addrs[NFN];
 static GuestFn g_used[NFN];
@@ -702,6 +791,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "condvar")) run(0x3, 12);
     else if (!strcmp(cs, "arbiter")) run(0x1, 14);
     else if (!strcmp(cs, "events")) run(0x1, 16);
+    else if (!strcmp(cs, "event_close")) run(0x1, 38);
+    else if (!strcmp(cs, "event_close_bad")) run(0x1, 39);
+    else if (!strcmp(cs, "waiters")) run(0x1, 42);
     else if (!strcmp(cs, "spin_gate")) {
         run(0x1, 19);
         CHECK(rt_kernel_stats().spin_handoffs >= 1);

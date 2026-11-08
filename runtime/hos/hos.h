@@ -84,13 +84,6 @@ void hos_gap(Cpu *c, const char *kind, const char *fmt, ...) __attribute__((nore
 // the SDK's own code. Returns the writable end (hos_signal). The same ev gives the same event.
 uint32_t hos_bind_system_event(Cpu *c, uint64_t ev, int autoclear);
 void hos_signal(uint32_t writable);
-// ov_audio.c: the audio stand-in's OpenAudioRenderer after the game's SystemEvent is bound: event is the writable end the
-// renderer's clock thread signals once per frame, handle the guest address that gets the renderer's handle, param the
-// guest address of the AudioRendererParameter. Split from the override so a test can pass a kernel event of its own.
-void hos_audio_renderer_open(Cpu *c, uint32_t event, uint64_t handle, uint64_t param);
-// How many clock threads the stand-in has started: one for the life of the process, however many renderers are opened.
-int hos_audio_clock_threads(void);
-
 // ov_codec.c: the AV1 video decoder service under the SDK's movie library (the movie player). Its submission-ready events are
 // made with hos_bind_system_event; a test gives it a binder of its own (the synthetic module has no SDK to attach
 // through). NULL restores hos_bind_system_event.
@@ -148,3 +141,10 @@ void hos_oe_push_message(uint32_t message);
 void boot_register(void);    // boot.c: the host start function and the three callbacks of nn::init::Start
 void ipc_register(void);     // ipc.c: the service SVCs
 void census_init(void);      // census.c: the stop hook
+void srv_audio_register(void);   // srv_audio.c: aud:u and audren:u behind sm:
+void srv_auddmg_register(void);  // srv_auddmg.c: auddmg:u behind sm:
+void srv_audsmx_register(void);  // srv_audsmx.c: audsmx:u behind sm:
+// srv_audsmx.c: engage (1) or disengage (0) the sound mixer's stream id, as the device manager's attach and detach do: 0, or a
+// Horizon result. The stream's sink, for tests; NULL for an unknown stream.
+uint32_t sysmix_set_engaged(uint32_t id, int engage);
+struct AudioSink *sysmix_stream_sink(uint32_t id);

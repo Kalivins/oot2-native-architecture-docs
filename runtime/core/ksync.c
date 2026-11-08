@@ -14,6 +14,7 @@
 // checks and results (alignment, guest memory, handle kinds, OutOfRange), arbitration and signal types the kernel does
 // not know are named fatals, and a woken thread is queued for a core by its waker (kernel.c).
 #include <stdlib.h>
+#include <string.h>
 
 #include "kern.h"
 
@@ -293,6 +294,16 @@ static void svc_wait_synchronization(Cpu *c, uint64_t pc) {
     klock();
     for (int i = 0; !r && i < n; i++)
         if (h_kind(h[i]) != O_THREAD && h_kind(h[i]) != O_EVENT_R) r = KR_INVALID_HANDLE;
+    if (!r && n) {   // the waiter view: a wait that follows a timed-out wait on the same handles continues its run
+        int same = t->ws_run && t->ws_n == n && !memcmp(t->ws_h, h, 4u * (unsigned)n) && start - t->ws_end < RT_WAIT_RUN_GAP_NS;
+        if (!same) {
+            t->ws_since = start;
+            t->ws_n = n;
+            memcpy(t->ws_h, h, 4u * (unsigned)n);
+        }
+        t->ws_run = 1;
+        t->ws_in = 1;
+    }
     while (!r) {
         if (t->cancel) {
             t->cancel = 0;
@@ -315,9 +326,33 @@ static void svc_wait_synchronization(Cpu *c, uint64_t pc) {
         if (w == KR_TIMED_OUT) r = w;
         else if (w == KR_CANCELLED) r = w, t->cancel = 0;
     }
+    if (n) {
+        t->ws_in = 0;
+        t->ws_end = plat_now_ns();
+        if (r != KR_TIMED_OUT) t->ws_run = 0;   // only timeouts keep a run going
+    }
     kunlock();
     c->x[0] = r;
     c->x[1] = idx >= 0 ? (uint64_t)idx : 0;
+}
+
+// The guest threads that wait on a readable handle (or a thread handle): blocked in a WaitSynchronization that names it, or
+// whose last such wait timed out less than RT_WAIT_RUN_GAP_NS ago, a thread that polls with a timeout. since is the start of
+// the wait, or of the run of timed-out waits on the same handles.
+int rt_kernel_waiters(uint32_t handle, RtWaiter *out, int max) {
+    int n = 0;
+    uint64_t now = plat_now_ns();
+    klock();
+    for (RtThread *t = K.all; t; t = t->all) {
+        if (t->state == T_EXITED || !t->ws_n) continue;
+        int has = 0;
+        for (int i = 0; i < t->ws_n && !has; i++) has = t->ws_h[i] == handle;
+        if (!has || !(t->ws_in || (t->ws_run && now - t->ws_end < RT_WAIT_RUN_GAP_NS))) continue;
+        if (n < max) out[n] = (RtWaiter){t->handle, t->entry, t->ws_since, t->ws_in};
+        n++;
+    }
+    kunlock();
+    return n < max ? n : max;
 }
 
 // 0x19 CancelSynchronization(w0 thread): its WaitSynchronization returns Cancelled, now or at its next one.
@@ -354,6 +389,20 @@ void rt_kernel_event_signal(uint32_t writable) {
     e->signaled = 1;
     kwake_sync();
     kunlock();
+}
+
+// The host's own end of an event it made, either one: the handle goes, and the event goes with its last end (a guest still
+// holding the other end keeps the event until its own CloseHandle).
+void rt_kernel_event_close(uint32_t handle) {
+    klock();
+    int kind = h_kind(handle);
+    KEvent *e = kind == O_EVENT_W || kind == O_EVENT_R ? h_get(handle, kind) : NULL;
+    if (e) {
+        h_free(handle);
+        if (--e->refs == 0) free(e);
+    }
+    kunlock();
+    if (!e) rt_fatal("rt_kernel_event_close(%#x): not an end of an event", handle);
 }
 
 // ---- host objects

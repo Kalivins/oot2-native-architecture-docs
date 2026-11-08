@@ -147,6 +147,7 @@ typedef pthread_cond_t PlatCond;
 #endif
 void plat_mutex_lock(PlatMutex *m);
 void plat_mutex_unlock(PlatMutex *m);
+int plat_mutex_trylock(PlatMutex *m);   // 1 when it took the mutex, 0 when another thread holds it
 void plat_cond_wait(PlatCond *c, PlatMutex *m);
 void plat_cond_wait_ns(PlatCond *c, PlatMutex *m, uint64_t ns);   // returns on a signal, a timeout or spuriously
 void plat_cond_signal(PlatCond *c);

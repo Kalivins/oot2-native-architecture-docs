@@ -203,6 +203,7 @@ _Static_assert(sizeof(PlatCond) == sizeof(CONDITION_VARIABLE), "PlatCond holds a
 
 void plat_mutex_lock(PlatMutex *m) { AcquireSRWLockExclusive((PSRWLOCK)m); }
 void plat_mutex_unlock(PlatMutex *m) { ReleaseSRWLockExclusive((PSRWLOCK)m); }
+int plat_mutex_trylock(PlatMutex *m) { return TryAcquireSRWLockExclusive((PSRWLOCK)m) != 0; }
 void plat_cond_wait(PlatCond *c, PlatMutex *m) { SleepConditionVariableSRW((PCONDITION_VARIABLE)c, (PSRWLOCK)m, INFINITE, 0); }
 
 // The wait counts milliseconds: rounded up, so it never ends early on its own (the caller checks its deadline).
@@ -597,6 +598,7 @@ void plat_unlock_shared(PlatLock *l) { pthread_rwlock_unlock(l); }
 
 void plat_mutex_lock(PlatMutex *m) { pthread_mutex_lock(m); }
 void plat_mutex_unlock(PlatMutex *m) { pthread_mutex_unlock(m); }
+int plat_mutex_trylock(PlatMutex *m) { return pthread_mutex_trylock(m) == 0; }
 void plat_cond_wait(PlatCond *c, PlatMutex *m) { pthread_cond_wait(c, m); }
 
 void plat_cond_wait_ns(PlatCond *c, PlatMutex *m, uint64_t ns) {

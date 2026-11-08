@@ -61,6 +61,10 @@ void rt_kernel_block_end(int token);
 // may signal, host threads included; the guest waits on the readable end (WaitSynchronization).
 uint32_t rt_kernel_event_create(uint32_t *readable);
 void rt_kernel_event_signal(uint32_t writable);
+// The host lets go of an end it holds, either one: the handle is freed, and the event with the last reference to it. The
+// other end, if the guest holds it, stays valid (and is never signalled again) until the guest closes it. Fatal for a
+// handle that is not an end of an event.
+void rt_kernel_event_close(uint32_t handle);
 
 // Handles to host objects (a service session, transfer memory). The close function names the object's kind: get
 // returns the object only for a handle made with the same function, and CloseHandle calls it once the handle is gone,
@@ -83,6 +87,20 @@ void rt_kernel_frame(void);
 int rt_kernel_thread_times(RtThreadTime *out, int max);
 // The handle of the guest thread that calls it, 0 on a host thread (the M1 capture names the submitting thread with it).
 uint32_t rt_kernel_current(void);
+
+// Who waits on a handle (a readable event or a thread): the guest threads blocked in a WaitSynchronization that names it,
+// and the threads whose last such wait timed out less than RT_WAIT_RUN_GAP_NS ago (a thread that polls with a timeout
+// returns each time, so a single wait's start would never age). since_ns, on plat_now_ns's clock, is the start of the wait,
+// or of the run of timed-out waits on the same handles; blocked says the thread is inside the wait now. Returns the number
+// written, at most max.
+#define RT_WAIT_RUN_GAP_NS 500000000ull
+typedef struct RtWaiter {
+    uint32_t thread;
+    uint64_t entry;
+    uint64_t since_ns;
+    int blocked;
+} RtWaiter;
+int rt_kernel_waiters(uint32_t handle, RtWaiter *out, int max);
 
 typedef struct RtKernelStats {
     uint64_t threads_created, threads_live;

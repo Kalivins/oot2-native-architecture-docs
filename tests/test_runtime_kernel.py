@@ -44,12 +44,13 @@ TIMEOUT = 60
 EXIT_FATAL, EXIT_UNIMPLEMENTED, EXIT_GUEST_STOP = 70, 71, 72
 EXIT_HUNG = 3   # kernel_test.c's watchdog: the case had not ended after 20 s; it logs the kernel's state first
 
-PASSING = ("threads", "priority", "mutex", "mutex_order", "condvar", "key_order", "arbiter", "events", "spin_gate",
+PASSING = ("threads", "priority", "mutex", "mutex_order", "condvar", "key_order", "arbiter", "events", "event_close", "waiters", "spin_gate",
            "async", "activity", "block", "times", "info", "npdm")
 
 # case: (exit code, text the FATAL line must contain)
 FAILING = {
     "thread_returns": (EXIT_GUEST_STOP, "returned from its entry"),
+    "event_close_bad": (EXIT_FATAL, "FATAL: rt_kernel_event_close(0x12345): not an end of an event"),
     "svc_outside_mask": (EXIT_GUEST_STOP, "FATAL: guest stop: svc 0x45 CreateEvent: the program's SVC mask does not "
                                           "allow it, so the console's kernel refuses it"),
     "svc_masked": (EXIT_GUEST_STOP, "FATAL: guest stop: svc 0x27 OutputDebugString: the program's SVC mask does not "

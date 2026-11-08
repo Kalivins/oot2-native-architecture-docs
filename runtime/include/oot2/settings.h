@@ -103,6 +103,9 @@ typedef enum RtSettingSource {
       "the height in pixels of the window in windowed mode; resizing the window changes it, and it is remembered")     \
     X(overlay, DISPLAY, BOOL, LIVE, 0, 0, 1, NULL,                                                                     \
       "the frame-time readout drawn over the picture; the Test preset turns it on")                                    \
+    X(audio_sink, AUDIO, ENUM, RESTART, 0, 0, 0, "auto|null|capture|sdl3",                                            \
+      "where the mixed audio goes: auto is the audio device when this build has one, else null; null has no sound and " \
+      "drains on the renderer's clock; capture writes audio-capture.wav in the game folder; sdl3 needs the device")    \
     X(counters, DEBUG, BOOL, LIVE, 0, 0, 1, NULL,                                                                      \
       "the counters list drawn over the picture; the Test preset turns it on")                                         \
     X(page_release, DEBUG, ENUM, RESTART, 0, 0, 0, "off|count|release",                                                \

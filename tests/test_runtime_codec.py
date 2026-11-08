@@ -59,13 +59,14 @@ class CodecTest(unittest.TestCase):
         out = Path(cls.tmp.name)
         layout.write(layout.place({"main": MODULE_SIZE}), out)
         sources = [str(TEST_SOURCE), str(END_SOURCE)]
-        for part in ("core", "nvn", "hos"):
+        for part in ("core", "nvn", "hos", "audio"):
             sources += sorted(str(p) for p in (RUNTIME / part).glob("*.c"))
         extra = ["-Wl,--disable-high-entropy-va"] if os.name == "nt" else ["-pthread"]
+        libs = [] if os.name == "nt" else ["-lm"]   # lrintf in the sink and the tests is not always inlined
         for level in LEVELS:
             exe = out / f"codec_test{level}{'.exe' if os.name == 'nt' else ''}"
             cmd = [cc, "-std=gnu11", level, "-march=x86-64-v3", "-Wall", "-Wextra", "-Werror", *extra,
-                   "-I", str(RUNTIME / "include"), "-I", str(RUNTIME / "core"), "-I", str(out), *sources, "-o", str(exe)]
+                   "-I", str(RUNTIME / "include"), "-I", str(RUNTIME / "core"), "-I", str(out), *sources, "-o", str(exe), *libs]
             done = subprocess.run(cmd, capture_output=True, text=True)
             if done.returncode != 0:
                 raise RuntimeError(f"build at {level} failed:\n{done.stdout}{done.stderr}")

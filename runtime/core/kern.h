@@ -61,6 +61,10 @@ struct RtThread {
     uint64_t waddr, wkey, wseq;
     uint32_t wtag, wres;
     RtThread *wnext;             // K.waiters
+    // the handles of the WaitSynchronization it is in, or was last in when it timed out (rt_kernel_waiters), under K.g
+    uint32_t ws_h[64];
+    int ws_n, ws_in, ws_run;     // handles kept; in a wait now; the run of timed-out waits on this set goes on
+    uint64_t ws_since, ws_end;   // start of the wait, or of the run of timed-out waits on the same set; end of the last wait
     // the virtual core
     int cur_core;                // the core held, -1 for none (written atomically: waiters spin on it)
     int ready, kicked;           // in K.ready_q; asked by a better thread to give its core up
