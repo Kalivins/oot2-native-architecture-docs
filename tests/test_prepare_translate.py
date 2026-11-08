@@ -101,19 +101,19 @@ STUB = textwrap.dedent('''\
     """A stand-in translator: the pool's line protocol, a module that is SPIR-V by its first words, and a description
     the shader pack accepts. What a program's code holds decides what happens: REFUSE fails it, CRASHONCE ends this
     process the first time it is asked, CRASH every time, HANG never answers."""
-    import hashlib, json, os, struct, sys, time
+    import base64, hashlib, json, os, struct, sys, time
     IDENTITY = os.environ.get("STUB_IDENTITY") or hashlib.sha256(open(__file__, "rb").read()).hexdigest()
     if sys.argv[1:] == ["--version"]:
-        print(f"oot2-xlate {IDENTITY} proto={os.environ.get('STUB_PROTO', '1')} spirv=1.3 target=vulkan1.3")
+        print(f"oot2-xlate {IDENTITY} proto={os.environ.get('STUB_PROTO', '2')} spirv=1.3 target=vulkan1.3")
         sys.exit(0)
     for line in sys.stdin:
         request = json.loads(line)
-        job, out = request["job"], request["out"]
+        job = request["job"]
         key = job["key"]
         with open(job["code"], "rb") as f:
             f.seek(job.get("code_offset", 0))
             code = f.read(job.get("code_length", 1 << 20))
-        once = os.path.join(out, key + ".crashed")
+        once = os.path.join(os.path.dirname(os.path.abspath(__file__)), key + ".crashed")
         if b"CRASHONCE" in code and not os.path.exists(once):
             open(once, "w").close()
             os._exit(3)
@@ -131,11 +131,9 @@ STUB = textwrap.dedent('''\
         module = struct.pack("<5I", 0x07230203, 0x00010300, 0, 1, 0) + hashlib.sha256(code).digest()
         res = {"schema": 2, "key": key, "stage": job["stage"], "translator_id": IDENTITY, "spv_bytes": len(module),
                "spv_sha256": hashlib.sha256(module).hexdigest(), "answers": {}}
-        with open(os.path.join(out, key + ".spv"), "wb") as fh:
-            fh.write(module)
-        with open(os.path.join(out, key + ".res.json"), "w") as fh:
-            json.dump(res, fh)
-        print(f"ok {key} 100 {len(module)}", flush=True)
+        m64 = base64.b64encode(module).decode()
+        d64 = base64.b64encode(json.dumps(res, sort_keys=True).encode()).decode()
+        print(f"ok {key} 100 {m64} {d64}", flush=True)
 ''')
 
 
@@ -225,7 +223,7 @@ class RealTranslatorTest(Base):
         self.assertEqual(rec["pack_bytes"], pack.size)
         self.assertEqual(rec["spill_bytes"], rec["module_bytes"] + rec["description_bytes"])
         scratch = self.dest / check.TEMP / translate.SCRATCH
-        for name in (translate.LOOSE, translate.SPILL, translate.RESULTS):
+        for name in (translate.SPILL, translate.RESULTS):
             self.assertFalse((scratch / name).exists(), name)
         modules = {r.key: pack.read(r)[0] for r in pack.rows}
         self.assertIn("translate: kept", self.run_steps(dump, xlatet.EXE)[1])
@@ -269,7 +267,7 @@ class RealTranslatorTest(Base):
     def test_the_check_accepts_the_built_translator(self):
         ctx = Context(self.dest, types.SimpleNamespace(xlate=str(xlatet.EXE)), Reporter(io.StringIO(), io.StringIO()))
         text = check.shader_tools(ctx)
-        self.assertIn(f"translator {xlatet.EXE.resolve()} (protocol 1, identity "
+        self.assertIn(f"translator {xlatet.EXE.resolve()} (protocol 2, identity "
                       f"{hashlib.sha256(xlatet.EXE.read_bytes()).hexdigest()[:16]})", text)
 
 
@@ -327,7 +325,7 @@ class StandInTest(Base):
         self.assertLess(len(first), 30)
         self.assertEqual(sorted(first), sorted(answered))     # every answer was recorded
         scratch = self.dest / check.TEMP / translate.SCRATCH
-        self.assertEqual(list((scratch / translate.LOOSE).iterdir()), [])   # every answer went into the spill
+        self.assertFalse((scratch / "out").exists())     # no loose file: every answer went into the spill
         # The spill cut inside its last entry: that job alone is translated again.
         with open(scratch / translate.RESULTS, encoding="utf-8", newline="") as fh:
             last = max((row for row in csv.DictReader(fh, delimiter="\t") if row["status"] == "ok"),
@@ -426,14 +424,14 @@ class CheckShaderToolsTest(Base):
     @NEEDS_ZSTD
     def test_the_translator_must_give_its_own_identity_and_the_pools_protocol(self):
         identity = hashlib.sha256(self.stub.read_bytes()).hexdigest()
-        self.assertIn(f"translator {self.stub.resolve()} (protocol 1, identity {identity[:16]})",
+        self.assertIn(f"translator {self.stub.resolve()} (protocol 2, identity {identity[:16]})",
                       check.shader_tools(self.ctx(xlate=self.stub)))
         with mock.patch.dict(os.environ, {"STUB_IDENTITY": "0" * 64}):
             with self.assertRaisesRegex(PrepareError, f"gives the identity {'0' * 64}, but the SHA-256 of its file is "
                                                       f"{identity}"):
                 check.shader_tools(self.ctx(xlate=self.stub))
-        with mock.patch.dict(os.environ, {"STUB_PROTO": "2"}):
-            with self.assertRaisesRegex(PrepareError, "speaks protocol 2, and this prepare speaks protocol 1"):
+        with mock.patch.dict(os.environ, {"STUB_PROTO": "1"}):
+            with self.assertRaisesRegex(PrepareError, "speaks protocol 1, and this prepare speaks protocol 2"):
                 check.shader_tools(self.ctx(xlate=self.stub))
         broken = self.root / "broken.py"
         broken.write_text("import sys\nsys.exit(4)\n", encoding="utf-8")

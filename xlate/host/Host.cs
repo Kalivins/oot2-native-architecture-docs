@@ -12,17 +12,21 @@ namespace Oot2.Xlate;
 
 /// <summary>
 /// The request/reply layer of "--serve": one JSON request per line in, one text
-/// reply per line out (job contract v1, tools/shaders/pool.py).
+/// reply per line out (job contract v2, tools/shaders/pool.py).
 ///
-///   ok &lt;key&gt; &lt;micros&gt; &lt;spv_bytes&gt;
+///   ok &lt;key&gt; &lt;micros&gt; &lt;module&gt; &lt;description&gt;   both base64, whole bytes
 ///   fail &lt;key&gt; &lt;micros&gt; &lt;kind&gt;: &lt;message&gt;
 ///
-/// The structure of the loop follows the --serve mode of the reference
-/// translators (DKB tools/xlate, MIT), with the replies of this project's contract.
+/// The translation's two parts ride in the reply itself, so the host writes
+/// no file of its own (a loose file reopened later paid a real-time scanner's
+/// check on the desktop): the caller that wants them on disk lays them down
+/// itself, and the translate step only appends them to its spill. The loop's
+/// structure follows the --serve mode of the reference translators (DKB
+/// tools/xlate, MIT), with the replies of this project's contract.
 /// </summary>
 internal sealed class Host
 {
-    public const int Protocol = 1;
+    public const int Protocol = 2;
     private const int MaxMessage = 400;
 
     private readonly string _translatorId;
@@ -59,7 +63,6 @@ internal sealed class Host
 
             string op = "translate";
             JsonElement jobElement = default;
-            string outDir = null;
             bool hasJob = false;
 
             foreach (JsonProperty p in root.EnumerateObject())
@@ -79,12 +82,8 @@ internal sealed class Host
                         hasJob = true;
                         break;
                     case "out":
-                        if (p.Value.ValueKind != JsonValueKind.String || p.Value.GetString().Length == 0)
-                        {
-                            throw new JobException(Kinds.BadJob, "out is not a folder path");
-                        }
-
-                        outDir = p.Value.GetString();
+                        // Kept for compatibility with earlier contracts: the translation now travels
+                        // in the reply line itself, so nothing is written here.
                         break;
                     default:
                         throw new JobException(Kinds.BadJob, $"unknown request field '{Clip(p.Name)}'");
@@ -105,14 +104,14 @@ internal sealed class Host
                     throw new JobException(Kinds.BadJob, $"unknown op '{Clip(op)}'");
             }
 
-            if (!hasJob || outDir == null)
+            if (!hasJob)
             {
-                throw new JobException(Kinds.BadJob, "a translate request needs 'job' and 'out'");
+                throw new JobException(Kinds.BadJob, "a translate request needs 'job'");
             }
 
             key = Job.PeekKey(jobElement) ?? "-";
 
-            return Translate(jobElement, outDir, ref key, translatorTiming);
+            return Translate(jobElement, ref key, translatorTiming);
         }
         catch (JsonException e)
         {
@@ -137,7 +136,7 @@ internal sealed class Host
         }
     }
 
-    private string Translate(JsonElement jobElement, string outDir, ref string key, TranslatorTiming translatorTiming)
+    private string Translate(JsonElement jobElement, ref string key, TranslatorTiming translatorTiming)
     {
         long wall0 = Stopwatch.GetTimestamp();
         long alloc0 = GC.GetAllocatedBytesForCurrentThread();
@@ -182,9 +181,9 @@ internal sealed class Host
         };
 
         byte[] resJson = ResultWriter.BuildResJson(job, outcome, fix, spirv, _translatorId, timing);
-        ResultWriter.WriteFiles(outDir, job.Key, spirv, resJson);
 
-        return $"ok {job.Key} {timing.TranslatorUs} {spirv.Length}";
+        // Base64 holds no space, newline or control character, so one reply is one line
+        return $"ok {job.Key} {timing.TranslatorUs} {Convert.ToBase64String(spirv)} {Convert.ToBase64String(resJson)}";
     }
 
     // The post-pass decides NonWritable and NonReadable from the module's own

@@ -64,7 +64,7 @@ LOW_RAM = 15 * GiB
 PROBE_SOURCE = Path(__file__).resolve().parent / "hostcheck.c"
 TEMP = "temp"                      # dest/temp: the steps' scratch files
 PROBE_TIMEOUT = 120                # seconds; a broken driver can hang instance creation
-XLATE_PROTOCOL = 1                 # the translator's line protocol (xlate/host/Host.cs, tools/shaders/pool.py)
+XLATE_PROTOCOL = 2                 # the translator's line protocol (xlate/host/Host.cs, tools/shaders/pool.py)
 XLATE_TIMEOUT = 60                 # seconds for the translator's --version
 
 CPU_V2 = (("sse3", "SSE3"), ("ssse3", "SSSE3"), ("sse4_1", "SSE4.1"), ("sse4_2", "SSE4.2"), ("popcnt", "POPCNT"),

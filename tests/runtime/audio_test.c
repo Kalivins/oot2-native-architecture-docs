@@ -1364,8 +1364,11 @@ static void g_stall_lock(Cpu *c) {
     wd_set(WD_START);
     wd_poll(WD_START);   // the lock is free: nothing
     CHECK(stall_count() == 0);
-    plat_mutex_lock(&rr->lock);
     uint64_t first = WD_START + 1000000ull;   // the first poll that finds it held
+    // The clock moves to that poll's instant before the lock is taken: the watchdog's own thread also polls, and a poll of
+    // it between the lock and the line below would otherwise start the bound at WD_START, a millisecond early.
+    wd_set(first);
+    plat_mutex_lock(&rr->lock);
     wd_poll(first);
     CHECK(stall_count() == 0);
     wd_poll(first + BOUND - 1000000);

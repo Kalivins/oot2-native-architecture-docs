@@ -314,12 +314,24 @@ class ServeProtocolTest(Harness):
         status, key, micros, rest = pool.parse_reply(reply)
         self.assertEqual((status, key, micros), ("ok", "hello", 0))
         info = json.loads(rest)
-        self.assertEqual(info["proto"], 1)
+        self.assertEqual(info["proto"], 2)
         self.assertEqual(len(info["translator_id"]), 64)
         self.assertEqual(info["target"], "vulkan1.3")
         self.assertEqual(info["defaults"]["debug"], True)
         version = subprocess.run([str(EXE), "--version"], capture_output=True, text=True, timeout=60).stdout
         self.assertIn(info["translator_id"], version)
+
+    def test_a_translation_rides_in_the_reply_and_the_host_writes_no_file(self):
+        request = json.dumps({"job": compute_job("wire", self.exit_bin), "out": str(self.out)})
+        (reply,) = self.exchange(request)
+        self.assertEqual(reply.count(" "), 4)                       # ok, key, microseconds, module, description
+        status, key, micros, rest = pool.parse_reply(reply)
+        self.assertEqual((status, key), ("ok", "wire"))
+        module, description = pool.decode_ok(key, rest)
+        self.assertEqual(module[:4], bytes.fromhex("03022307"))
+        res = json.loads(description)
+        self.assertEqual((res["schema"], res["key"]), (2, "wire"))
+        self.assertEqual(self.files(), [])                          # the out field is ignored: no loose file
 
     def test_quit_and_end_of_input_exit_cleanly(self):
         self.assertEqual(self.exchange('{"op":"quit"}', '{"op":"hello"}')[0].split()[:2], ["ok", "quit"])
