@@ -46,16 +46,26 @@ static int case_publish(void) {
     return 0;
 }
 
+static int rumble_wakes;
+static void rumble_wake(void) { rumble_wakes++; }
+
 static int case_rumble(void) {
     HidRumble r = {0};
     CHECK(hid_rumble_take(&r) == 0);   // nothing pending at first
+    hid_rumble_set_wake(rumble_wake);
     HidRumble a = {0x1111, 0x2222, 80};
     hid_rumble_publish(&a);
     HidRumble b = {0x3333, 0x4444, 90};
     hid_rumble_publish(&b);   // the newest request replaces the unread older one
+    CHECK(rumble_wakes == 2);
     CHECK(hid_rumble_take(&r) == 1);
     CHECK(r.low == 0x3333 && r.high == 0x4444 && r.duration_ms == 90);
     CHECK(hid_rumble_take(&r) == 0);   // taken, so empty again
+    hid_rumble_set_wake(NULL);
+    hid_rumble_publish(&a);
+    CHECK(rumble_wakes == 2);   // teardown disables notifications without losing the request
+    CHECK(hid_rumble_take(&r) == 1);
+    CHECK(r.low == a.low && r.high == a.high && r.duration_ms == a.duration_ms);
     printf("ok rumble\n");
     return 0;
 }

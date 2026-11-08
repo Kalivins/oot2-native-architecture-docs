@@ -97,5 +97,8 @@ typedef struct HidRumble {
     uint16_t low, high;
     uint32_t duration_ms;
 } HidRumble;
+// Optional window-loop notification, called on the publishing thread under the rumble lock: only post a wake event;
+// do not call back into the rumble API. Clearing it waits for any notification in flight, so teardown is safe.
+void hid_rumble_set_wake(void (*wake)(void));
 void hid_rumble_publish(const HidRumble *r);
 int hid_rumble_take(HidRumble *out);   // 1 with *out when a request is pending, else 0
