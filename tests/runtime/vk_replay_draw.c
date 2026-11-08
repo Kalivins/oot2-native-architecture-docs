@@ -672,8 +672,8 @@ static void run_draw(const Opts *o) {
     VkpFormats formats = {(uint32_t)d.ntargets, {VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT}, d.depth ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED,
                           VK_FORMAT_UNDEFINED};
     VkpStage vs = {.key = ids[0]->key, .shape = ids[0]}, ps = {.key = ids[1]->key, .shape = ids[1]};
-    if (!o->cold) CHECK(vkp_graphics(&vs, &ps, &formats) != VK_NULL_HANDLE);
-    else CHECK(vkp_find_graphics(&vs, &ps, &formats) == VK_NULL_HANDLE);   // a miss, by construction
+    if (!o->cold) CHECK(vkp_graphics(&vs, NULL, &ps, &formats) != VK_NULL_HANDLE);
+    else CHECK(vkp_find_graphics(&vs, NULL, &ps, &formats) == VK_NULL_HANDLE);   // a miss, by construction
 
     // the buffers
     Buf vbuf[4], ibuf = {0}, ubo[MAX_UBO], sbo[MAX_SBO];
