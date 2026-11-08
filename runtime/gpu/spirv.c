@@ -276,3 +276,77 @@ uint32_t *spv_add_outputs(const uint32_t *w, size_t n, const SpvOutput *add, uin
     free(vars), free(types.w), free(decs.w);
     return o;
 }
+
+// ---- zero-initialising workgroup memory
+
+enum { SC_WORKGROUP = 4 };
+
+#define FAIL(...)                                                                                                      \
+    do {                                                                                                               \
+        if (why && cap) snprintf(why, cap, __VA_ARGS__);                                                               \
+        return -1;                                                                                                     \
+    } while (0)
+
+int spv_zero_workgroup(const uint32_t *w, size_t n, uint32_t **out, size_t *out_words, char *why, size_t cap) {
+    *out = NULL, *out_words = 0;
+    if (n < 5 || w[0] != SPV_MAGIC) FAIL("not a SPIR-V module (%zu words)", n);
+    uint32_t bound = w[3];
+    // The type each pointer type points at, and the null constant made for a type, both by id (every id is below bound).
+    uint32_t *pointee = calloc(bound ? bound : 1, sizeof *pointee), *null_of = calloc(bound ? bound : 1, sizeof *null_of);
+    if (!pointee || !null_of) {
+        free(pointee), free(null_of);
+        FAIL("out of memory");
+    }
+    size_t targets = 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > n) {
+            free(pointee), free(null_of);
+            FAIL("malformed instruction at word %zu", i);
+        }
+        if (op == OP_FUNCTION) break;   // the global declarations are over
+        if (op == OP_TYPE_POINTER && len >= 4 && w[i + 1] < bound) pointee[w[i + 1]] = w[i + 3];
+        if (op == OP_VARIABLE && len == 4 && w[i + 3] == SC_WORKGROUP) targets++;
+        i += len;
+    }
+    if (!targets) {
+        free(pointee), free(null_of);
+        return 0;
+    }
+    // Each variable grows by one word (the initializer); a type's null constant is three words, declared right before
+    // the first variable that needs it, which is after the type and before the use, as the logical layout asks.
+    uint32_t *o = malloc((n + targets * 4) * sizeof *o), *q = o;
+    if (!o) {
+        free(pointee), free(null_of);
+        FAIL("out of memory");
+    }
+    memcpy(q, w, 5 * 4), q += 5;
+    uint32_t next = bound;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (op == OP_FUNCTION) {
+            memcpy(q, w + i, (n - i) * 4), q += n - i;
+            break;
+        }
+        if (op == OP_VARIABLE && len == 4 && w[i + 3] == SC_WORKGROUP) {
+            uint32_t t = w[i + 1] < bound ? pointee[w[i + 1]] : 0;
+            if (!t || t >= bound) {
+                uint32_t id = w[i + 2];
+                free(o), free(pointee), free(null_of);
+                FAIL("workgroup variable %u is not of a pointer type this module declares", id);
+            }
+            if (!null_of[t]) {
+                null_of[t] = next++;
+                *q++ = 3u << 16 | OP_CONSTANT_NULL, *q++ = t, *q++ = null_of[t];
+            }
+            *q++ = 5u << 16 | OP_VARIABLE, *q++ = w[i + 1], *q++ = w[i + 2], *q++ = SC_WORKGROUP, *q++ = null_of[t];
+        } else {
+            memcpy(q, w + i, (size_t)len * 4), q += len;
+        }
+        i += len;
+    }
+    o[3] = next;
+    *out = o, *out_words = (size_t)(q - o);
+    free(pointee), free(null_of);
+    return (int)targets;
+}

@@ -47,3 +47,14 @@ typedef struct SpvOutput {
 // the reason in why (not SPIR-V, no entry point or more than one, no annotations and no types, out of memory).
 uint32_t *spv_add_outputs(const uint32_t *words, size_t nwords, const SpvOutput *add, uint32_t nadd, size_t *out_words,
                           char *why, size_t cap);
+
+// The module with every Workgroup variable that has no initializer given the null value of its type. A translated
+// compute module can read workgroup words it never wrote (the title movie's last pass does: with those words zero its
+// picture is right, with NaN bits every tile is black), and a device leaves workgroup memory as the dispatch before left
+// it, so what the module reads depends on what ran before; the console's program is right when the words are finite
+// (Inference). The initializer is the null value, the zero-initialization of workgroup memory a Vulkan 1.3 device offers
+// (VkPhysicalDeviceVulkan13Features::shaderZeroInitializeWorkgroupMemory, which the device must have enabled), done by the
+// driver before the first instruction. Returns how many variables were given one: 0 with *out NULL when the module needs
+// nothing (it has no such variable), else *out is a malloc'd module of *out_words words; -1 with the reason in why (not
+// SPIR-V, a variable whose type this cannot name, out of memory).
+int spv_zero_workgroup(const uint32_t *words, size_t nwords, uint32_t **out, size_t *out_words, char *why, size_t cap);

@@ -72,6 +72,7 @@ static struct {
     VkpCacheState cache_state;
     char cache_path[512];
     VkcList caps;
+    int zero_workgroup;            // the device was made with zero-initialized workgroup memory (an optional feature)
     PlatMutex lock;
     PlatCond cond;
     Obj *tab[BUCKETS];
@@ -543,7 +544,22 @@ static VkPipeline build_compute(void *c) {
     vkp_module(s, SHD_CS, &m);
     require_idle("a compute pipeline would be created", s->key, ((ComputeCtx *)c)->late);
     check_capabilities(s, &m);
-    VkShaderModule sm = make_module(m.code, m.bytes / 4);
+    // A compute module's workgroup memory starts as the null value of its type when the device was made with the
+    // zero-initialization feature (spv_zero_workgroup says why): the module made from the pack's differs from it only in
+    // that, and the pipeline cache keys on what is created.
+    const uint32_t *code = m.code;
+    size_t words = m.bytes / 4, zwords = 0;
+    uint32_t *zeroed = NULL;
+    if (P.zero_workgroup) {
+        char why[256], shape[256];
+        if (spv_zero_workgroup(code, words, &zeroed, &zwords, why, sizeof why) < 0) {
+            shape_text(s, shape, sizeof shape);
+            rt_fatal("gfx: vulkan: stage %s cannot have its workgroup memory zero-initialized: %s (%s)", s->key, why, shape);
+        }
+        if (zeroed) code = zeroed, words = zwords;
+    }
+    VkShaderModule sm = make_module(code, words);
+    free(zeroed);
     VkPipelineCreationFeedback fb = {0}, stage_fb = {0};
     VkPipelineCreationFeedbackCreateInfo fbi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO,
                                                 .pPipelineCreationFeedback = &fb, .pipelineStageCreationFeedbackCount = 1,
@@ -797,6 +813,9 @@ void vkp_open(const char *cache_path) {
     if (!gpu_vk.device) rt_fatal("gfx: vulkan: vkp_open before gpu_vk_open");
     vkp_layouts_create(&P.lay);
     vkc_list(&gpu_vk.facts, &P.caps);
+    Oot2VkFacts en;
+    oot2_vk_enable(&gpu_vk.facts, &en);
+    P.zero_workgroup = en.f13.shaderZeroInitializeWorkgroupMemory == VK_TRUE;
     cache_open(cache_path);
     PipeInfo pi;
     pipe_info(&pi, PART_VERTEX_INPUT, VK_NULL_HANDLE, NULL);

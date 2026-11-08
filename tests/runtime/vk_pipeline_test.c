@@ -11,9 +11,10 @@
 //   binds FILE                   a description's bindings parsed (shd_parse_binds), or the refusal
 //   spvdecl MODULE               the capabilities and extensions a module declares
 //   spvpad IN OUT SPEC           a module with outputs added (SPEC "location:component:components:type,...")
+//   spvzero IN OUT               a module with its workgroup variables given the null initializer: how many, or why not
 //   capcheck MODULE [storage-image-indexing] [drop CAP]   a module judged against the capabilities of a device that has
 //                                every item (with the optional feature when the argument names it; a capability may be dropped)
-//   optional                     the required list's ids and count, and for facts without and with the optional feature:
+//   optional                     the required list's ids and count, and for facts without and with the optional features:
 //                                the items the device has, the features enabled and whether capability 5309 is allowed
 //   cachejudge                   cache file headers judged for a device
 //   store BASE VARIANTS KEY KIND SHAPE   a stage looked up in a pack of packs (VARIANTS "-" for none)
@@ -23,6 +24,8 @@
 //   layouts                      the layouts are made, valid under validation, and destroyed
 //   synth_draw PACK [unpad]      a pair linked for two formats and drawn; the padded input reads (0, 0, 0, 1)
 //   synth_compute PACK           a compute pipeline dispatched
+//   synth_zeroinit PACK          a compute module reads workgroup memory it never wrote, after a dispatch that filled the
+//                                device's workgroup memory with ones: it reads zeros
 //   synth_inflight PACK          a pipeline asked for with a submission in flight: a named fatal
 //   synth_cache PACK FILE PHASE  cold (build and save), warm (build from the file) or tamper (a driver change)
 //   synth_release PACK           a stage's objects released and made again
@@ -245,6 +248,31 @@ static void case_spvpad(const char *in, const char *out, const char *spec) {
     free(o), free(w);
 }
 
+static void case_spvzero(const char *in, const char *out) {
+    size_t n;
+    uint32_t *w = read_all(in, &n);
+    uint32_t *o = NULL;
+    size_t words = 0;
+    char why[256];
+    int changed = spv_zero_workgroup(w, n / 4, &o, &words, why, sizeof why);
+    if (changed < 0) {
+        printf("refused: %s\n", why);
+        free(w);
+        return;
+    }
+    if (!changed) {
+        CHECK(!o && !words);
+        printf("unchanged\n");
+        free(w);
+        return;
+    }
+    FILE *f = fopen(out, "wb");
+    CHECK(f && fwrite(o, 4, words, f) == words);
+    fclose(f);
+    printf("zeroed %d variables, %zu words to %zu\n", changed, n / 4, words);
+    free(o), free(w);
+}
+
 // The facts of a device that has every item of the required list and none of the optional features: the features
 // the items enable (read off oot2_vk_enable of empty facts) with the limits, properties and extensions their tests read.
 static void facts_with_every_item(Oot2VkFacts *f) {
@@ -312,12 +340,14 @@ static void case_optional(void) {
         Oot2VkFacts f, en;
         facts_with_every_item(&f);
         f.f12.shaderStorageImageArrayNonUniformIndexing = present ? VK_TRUE : VK_FALSE;
+        f.f13.shaderZeroInitializeWorkgroupMemory = present ? VK_TRUE : VK_FALSE;
         unsigned char has[OOT2_VK_ITEM_COUNT];
         printf("%s: has %d of %d\n", tag, oot2_vk_judge(&f, has), OOT2_VK_ITEM_COUNT);
         for (int i = 0; i < OOT2_VK_ITEM_COUNT; i++)
             if (!has[i]) printf("%s: lacks %s\n", tag, oot2_vk_item_id(i));
         oot2_vk_enable(&f, &en);
         printf("%s: enabled %d\n", tag, en.f12.shaderStorageImageArrayNonUniformIndexing ? 1 : 0);
+        printf("%s: zero-initialized workgroup memory enabled %d\n", tag, en.f13.shaderZeroInitializeWorkgroupMemory ? 1 : 0);
         VkcList l;
         vkc_list(&f, &l);
         printf("%s: capability 5309 %s\n", tag, vkc_has_cap(&l, 5309) ? "allowed" : "refused");
@@ -440,6 +470,8 @@ static void close_and_report(void) {
 #define PS_KEY "5100000000000002.00000000"
 #define CS_KEY "5100000000000003.00000000"
 #define CS2_KEY "5100000000000004.00000000"
+#define ZP_KEY "5100000000000007.00000000"   // fills each workgroup's shared words with ones and stores nothing
+#define ZR_KEY "5100000000000008.00000000"   // stores the shared word of each invocation, which no invocation wrote
 #define NO_KEY "5100000000000009.00000000"
 
 static void open_all(const char *pack, const char *cache) {
@@ -578,6 +610,36 @@ static void case_synth_compute(const char *pack) {
     print_stats("compute");
     close_and_report();
     printf("ok synth_compute\n");
+}
+
+// A module whose workgroup memory is never written by it reads zeros, whatever the dispatch before left in the device's
+// workgroup memory (the builder gives such a module the null initializer, spv_zero_workgroup): the program that fills the
+// shared words with ones runs first, on as many workgroups as fill the device, so the reader's workgroups land on the
+// memory it left.
+static void case_synth_zeroinit(const char *pack) {
+    open_all(pack, NULL);
+    VkpStage zp = {.key = ZP_KEY}, zr = {.key = ZR_KEY};
+    VkPipeline pp = vkp_compute(&zp), pr = vkp_compute(&zr);
+    CHECK(pp && pr && pp != pr);
+    enum { GROUPS = 512, WORDS = GROUPS * 64, ROUNDS = 8 };
+    uint32_t push[VKP_PUSH_BYTES / 4] = {0};
+    DrawBind pbind = {9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, 16}, rbind = {9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, (size_t)WORDS * 4};
+    DrawBuf dummy = draw_buffer(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, 0);
+    DrawBuf out = draw_buffer((VkDeviceSize)WORDS * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, NULL, 0);
+    unsigned long long nonzero = 0;
+    for (int round = 0; round < ROUNDS; round++) {
+        dispatch_run(pp, &pbind, 1, &dummy, push, GROUPS);
+        memset(out.map, 0xAB, (size_t)WORDS * 4);   // a word the reader did not store would show
+        dispatch_run(pr, &rbind, 1, &out, push, GROUPS);
+        const uint32_t *o = out.map;
+        for (uint32_t i = 0; i < WORDS; i++) nonzero += o[i] != 0;
+    }
+    printf("%llu of %d words read as something other than zero\n", nonzero, ROUNDS * WORDS);
+    CHECK(nonzero == 0);
+    draw_buffer_free(&dummy), draw_buffer_free(&out);
+    print_stats("zeroinit");
+    close_and_report();
+    printf("ok synth_zeroinit\n");
 }
 
 static void case_synth_inflight(const char *pack) {
@@ -962,6 +1024,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cs, "binds") && argc >= 3) case_binds(argv[2]);
     else if (!strcmp(cs, "spvdecl") && argc >= 3) case_spvdecl(argv[2]);
     else if (!strcmp(cs, "spvpad") && argc >= 5) case_spvpad(argv[2], argv[3], argv[4]);
+    else if (!strcmp(cs, "spvzero") && argc >= 4) case_spvzero(argv[2], argv[3]);
     else if (!strcmp(cs, "capcheck") && argc >= 3) case_capcheck(argv[2], argc - 3, argv + 3);
     else if (!strcmp(cs, "optional")) case_optional();
     else if (!strcmp(cs, "cachejudge")) case_cachejudge();
@@ -978,6 +1041,7 @@ int main(int argc, char **argv) {
         if (!strcmp(cs, "layouts")) case_layouts();
         else if (!strcmp(cs, "synth_draw") && argc >= 3) case_synth_draw(argv[2], argc >= 4 && !strcmp(argv[3], "unpad"));
         else if (!strcmp(cs, "synth_compute") && argc >= 3) case_synth_compute(argv[2]);
+        else if (!strcmp(cs, "synth_zeroinit") && argc >= 3) case_synth_zeroinit(argv[2]);
         else if (!strcmp(cs, "synth_inflight") && argc >= 3) case_synth_inflight(argv[2]);
         else if (!strcmp(cs, "synth_cache") && argc >= 5) case_synth_cache(argv[2], argv[3], argv[4]);
         else if (!strcmp(cs, "synth_release") && argc >= 3) case_synth_release(argv[2]);

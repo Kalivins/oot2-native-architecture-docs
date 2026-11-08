@@ -158,10 +158,15 @@
 // `oot2 --vulkan-items` and the probe list the items only). enable is an item's enable: a C expression over f and e,
 // and it copies the feature from f, so the feature stays off where the GPU lacks it. The capability check of the
 // pipeline builder (oot2/vk_caps.h) reads the structure oot2_vk_enable fills, so a capability behind an optional
-// feature is allowed exactly when the feature was enabled.
+// feature is allowed exactly when the feature was enabled. zero_initialize_workgroup_memory is a Vulkan 1.3 core
+// feature, so every device the items choose has it; it stays optional because no capability depends on it: the pipeline
+// builder zero-initializes a compute module's workgroup memory (spv_zero_workgroup) when it was enabled and leaves the
+// module as translated when it was not.
 #define OOT2_VK_OPTIONAL(X)                                                                                            \
     X(storage_image_array_indexing,                                                                                    \
-      (e->f12.shaderStorageImageArrayNonUniformIndexing = f->f12.shaderStorageImageArrayNonUniformIndexing))
+      (e->f12.shaderStorageImageArrayNonUniformIndexing = f->f12.shaderStorageImageArrayNonUniformIndexing))          \
+    X(zero_initialize_workgroup_memory,                                                                                \
+      (e->f13.shaderZeroInitializeWorkgroupMemory = f->f13.shaderZeroInitializeWorkgroupMemory))
 
 // The device extensions the items read, E(id, name), and the ones they depend on below Vulkan 1.4 (pipeline_library
 // for graphics_pipeline_library, maintenance5 for pipeline_binary). The device the back end creates enables every one

@@ -61,9 +61,10 @@ TRANSLATOR = hashlib.sha256(b"synthetic translator of the pipeline builder").hex
 VK_UNIFORM_BUFFER, VK_STORAGE_BUFFER, VK_STORAGE_IMAGE, VK_SAMPLED_IMAGE, VK_SAMPLER = 6, 7, 3, 2, 0
 STAGE_VERTEX, STAGE_FRAGMENT, STAGE_COMPUTE, STAGE_TASK, STAGE_MESH = 0x1, 0x10, 0x20, 0x40, 0x80
 GFX_STAGES = STAGE_VERTEX | STAGE_FRAGMENT | STAGE_TASK | STAGE_MESH
-OP = {"capability": 17, "extension": 10, "memory_model": 14, "entry_point": 15, "decorate": 71, "void": 19, "fn_type": 33,
-      "float": 22, "int": 21, "vector": 23, "pointer": 32, "constant": 43, "composite": 44, "null": 46, "variable": 59,
-      "function": 54, "label": 248, "ret": 253, "fn_end": 56}
+OP = {"capability": 17, "extension": 10, "memory_model": 14, "entry_point": 15, "execution_mode": 16, "decorate": 71,
+      "void": 19, "fn_type": 33, "float": 22, "int": 21, "vector": 23, "array": 28, "pointer": 32, "constant": 43,
+      "composite": 44, "null": 46, "variable": 59, "function": 54, "label": 248, "ret": 253, "fn_end": 56}
+SC_WORKGROUP = 4
 
 _build: dict[str, object] = {}
 
@@ -131,6 +132,36 @@ def vertex_module(extra_caps: tuple[int, ...] = (), extensions: tuple[str, ...] 
         main = 7 + 2 * n
         body += [inst(OP["function"], 1, main, 0, 2), inst(OP["label"], main + 1), inst(OP["ret"]), inst(OP["fn_end"])]
     return module_words(body, 7 + 2 * entry_points)
+
+
+def compute_module(variables: tuple[tuple[int, bool], ...] = ((64, False),), *, undeclared_type: bool = False) -> bytes:
+    """A compute module (SPIR-V 1.3, local size 1) whose function returns at once, with one Workgroup variable for each
+    (words, initialized): an array of that many 32-bit unsigned integers, its pointer type shared by every variable of the
+    same size, and the variable's own initializer (the null value of the array) when initialized."""
+    body = [inst(OP["capability"], 1), inst(OP["memory_model"], 0, 1), inst(OP["entry_point"], 5, 4, *text_words("main")),
+            inst(OP["execution_mode"], 4, 17, 1, 1, 1), inst(OP["void"], 1), inst(OP["fn_type"], 2, 1),
+            inst(OP["int"], 3, 32, 0)]
+    nxt, types, nulls = 5, {}, []
+    for words, _ in variables:
+        if words in types:
+            continue
+        length, arr, ptr = nxt, nxt + 1, nxt + 2
+        nxt += 3
+        types[words] = (arr, ptr)
+        body += [inst(OP["constant"], 3, length, words), inst(OP["array"], arr, 3, length), inst(OP["pointer"], ptr, SC_WORKGROUP, arr)]
+    for words, initialized in variables:
+        arr, ptr = types[words]
+        var = nxt
+        nxt += 1
+        if undeclared_type:
+            body.append(inst(OP["variable"], 99, var, SC_WORKGROUP))
+        elif initialized:
+            body += [inst(OP["null"], arr, nxt), inst(OP["variable"], ptr, var, SC_WORKGROUP, nxt)]
+            nxt += 1
+        else:
+            body.append(inst(OP["variable"], ptr, var, SC_WORKGROUP))
+    body += [inst(OP["function"], 1, 4, 0, 2), inst(OP["label"], nxt), inst(OP["ret"]), inst(OP["fn_end"])]
+    return module_words(body, nxt + 1)
 
 
 def parse_words(data: bytes) -> list[list[int]]:
@@ -723,6 +754,73 @@ class SpirvTest(unittest.TestCase):
             done = subprocess.run([val, "--target-env", "vulkan1.3", str(self.dir / "out.spv")], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, f"{spec}: {done.stdout}{done.stderr}")
 
+    # ---- workgroup memory zeroed (oot2/spirv.h, spv_zero_workgroup)
+
+    def zeroed(self, mod: bytes) -> tuple[subprocess.CompletedProcess, list[list[int]], list[list[int]]]:
+        done = run("spvzero", self.write("in.spv", mod), str(self.dir / "zout.spv"))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        after = parse_words((self.dir / "zout.spv").read_bytes()) if done.stdout.startswith("zeroed") else []
+        return done, parse_words(mod), after
+
+    def test_a_workgroup_variable_gets_the_null_value_of_its_type(self) -> None:
+        mod = compute_module(((64, False), (32, False)))
+        done, before, after = self.zeroed(mod)
+        self.assertIn("zeroed 2 variables", done.stdout)
+        out = (self.dir / "zout.spv").read_bytes()
+        self.check_ids(out)
+        self.assertEqual(struct.unpack("<5I", out[:20])[3], struct.unpack("<5I", mod[:20])[3] + 2)   # a null for each type
+        variables = [i for i in after if i[0] & 0xffff == OP["variable"]]
+        self.assertEqual([len(v) for v in variables], [5, 5])
+        for v in variables:
+            self.assertEqual(v[3], SC_WORKGROUP)
+            null = next(j for j in after if j[0] & 0xffff == OP["null"] and j[2] == v[4])
+            ptr = next(j for j in after if j[0] & 0xffff == OP["pointer"] and j[1] == v[1])
+            self.assertEqual(null[1], ptr[3])   # the null value of the type the pointer points at
+            self.assertLess(after.index(null), after.index(v))   # declared before the variable that uses it
+        # nothing else changed: take the nulls out and the initializers off, and the module is the one that went in
+        stripped = [i for i in after if i[0] & 0xffff != OP["null"]]
+        stripped = [i[:4] if i[0] & 0xffff == OP["variable"] else i for i in stripped]
+        stripped = [[(len(i) << 16) | (i[0] & 0xffff), *i[1:]] for i in stripped]
+        self.assertEqual(stripped, before)
+
+    def test_variables_of_one_type_share_one_null_constant(self) -> None:
+        done, _, after = self.zeroed(compute_module(((64, False), (64, False), (64, False))))
+        self.assertIn("zeroed 3 variables", done.stdout)
+        nulls = [i for i in after if i[0] & 0xffff == OP["null"]]
+        self.assertEqual(len(nulls), 1)
+        self.assertEqual({v[4] for v in after if v[0] & 0xffff == OP["variable"]}, {nulls[0][2]})
+
+    def test_a_variable_that_has_an_initializer_is_left_as_it_is(self) -> None:
+        done, before, after = self.zeroed(compute_module(((64, True), (32, False))))
+        self.assertIn("zeroed 1 variables", done.stdout)
+        self.assertEqual(len([i for i in after if i[0] & 0xffff == OP["null"]]), 2)   # the module's own, and one new
+        done, _, _ = self.zeroed(compute_module(((64, True),)))
+        self.assertEqual(done.stdout, "unchanged\n")
+
+    def test_a_module_with_no_workgroup_variable_is_unchanged(self) -> None:
+        self.assertEqual(self.zeroed(vertex_module())[0].stdout, "unchanged\n")
+        self.assertEqual(self.zeroed(compute_module(()))[0].stdout, "unchanged\n")
+
+    def test_what_cannot_be_zeroed_is_refused_by_name(self) -> None:
+        done, _, _ = self.zeroed(compute_module(((64, False),), undeclared_type=True))
+        self.assertIn("refused: workgroup variable", done.stdout)
+        bad = bytearray(compute_module())
+        bad[0] ^= 1
+        done = run("spvzero", self.write("bad.spv", bytes(bad)), str(self.dir / "o.spv"))
+        self.assertIn("refused: not a SPIR-V module", done.stdout)
+        cut = struct.pack("<8I", SPIRV_MAGIC, 0x00010300, 0, 5, 0, (2 << 16) | 17, 1, (9 << 16) | 17)
+        done = run("spvzero", self.write("cut.spv", cut), str(self.dir / "o.spv"))
+        self.assertIn("refused: malformed instruction", done.stdout)
+
+    def test_a_zeroed_module_passes_the_validator(self) -> None:
+        val = self.spirv_val()
+        orig = self.write("orig.spv", compute_module(((64, False), (32, False), (64, False))))
+        self.assertEqual(subprocess.run([val, "--target-env", "vulkan1.3", orig], capture_output=True, text=True).returncode, 0)
+        done, _, _ = self.zeroed((self.dir / "orig.spv").read_bytes())
+        self.assertIn("zeroed 3 variables", done.stdout)
+        done = subprocess.run([val, "--target-env", "vulkan1.3", str(self.dir / "zout.spv")], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
 
 def header_required_ids() -> list[str]:
     """The ids of OOT2_VK_ITEMS as the header text lists them, apart from anything the C preprocessor does."""
@@ -744,6 +842,11 @@ class OptionalFeatureTest(unittest.TestCase):
         self.assertIn("present: enabled 1", self.lines)
         self.assertIn("present: capability 5309 allowed", self.lines)
 
+    def test_zero_initialized_workgroup_memory_is_enabled_where_the_gpu_reports_it_and_never_required(self) -> None:
+        self.assertIn("present: zero-initialized workgroup memory enabled 1", self.lines)
+        self.assertIn("absent: zero-initialized workgroup memory enabled 0", self.lines)
+        self.assertEqual([l for l in self.lines if l.startswith(("present: lacks", "absent: lacks"))], [])
+
     def test_facts_without_the_feature_keep_the_device_acceptable_and_the_feature_off(self) -> None:
         count = len(header_required_ids())
         self.assertIn(f"absent: has {count} of {count}", self.lines)
@@ -756,9 +859,11 @@ class OptionalFeatureTest(unittest.TestCase):
         self.assertGreater(len(ids), 19)
         self.assertEqual(len(set(ids)), len(ids))
         self.assertEqual([l[len("item "):] for l in self.lines if l.startswith("item ")], ids)   # contents and order
-        self.assertIn(f"items {len(ids)} optional 1", self.lines)
-        self.assertEqual([l for l in self.lines if l.startswith("optional ")], ["optional storage_image_array_indexing"])
+        self.assertIn(f"items {len(ids)} optional 2", self.lines)
+        self.assertEqual([l for l in self.lines if l.startswith("optional ")],
+                         ["optional storage_image_array_indexing", "optional zero_initialize_workgroup_memory"])
         self.assertNotIn("storage_image_array_indexing", ids)
+        self.assertNotIn("zero_initialize_workgroup_memory", ids)
         self.assertEqual([l for l in self.lines if l.startswith("present: lacks")], [])   # the feature changes no item
 
 
@@ -916,10 +1021,34 @@ layout(local_size_x = 32) in;
 layout(set = 1, binding = 9) buffer Out { uint v[]; } o;
 void main() { o.v[gl_GlobalInvocationID.x] = 1u; }
 """,
+    # fills the workgroup's shared words with ones and stores nothing (the store is for a value the shared words never hold)
+    "zp.comp": """#version 450
+layout(local_size_x = 64) in;
+shared uint s[64];
+layout(set = 1, binding = 9) buffer Out { uint v[]; } o;
+void main() {
+    s[gl_LocalInvocationIndex] = 0xFFFFFFFFu;
+    barrier();
+    if (s[(gl_LocalInvocationIndex + 1u) & 63u] == 0u) o.v[0] = 1u;
+}
+""",
+    # stores the shared word of each invocation, which no invocation writes (the push constant that would write one is zero,
+    # so the compiler cannot know the variable is never written)
+    "zr.comp": """#version 450
+layout(local_size_x = 64) in;
+shared uint s[64];
+layout(set = 1, binding = 9) buffer Out { uint v[]; } o;
+layout(push_constant) uniform Push { uvec4 words[8]; } pc;
+void main() {
+    if (pc.words[0].x == 1u) s[(gl_LocalInvocationIndex + 7u) & 63u] = 5u;
+    o.v[gl_GlobalInvocationID.x] = s[gl_LocalInvocationIndex];
+}
+""",
 }
 SYNTH_KEYS = {"vs.vert": "5100000000000001.00000000", "ps.frag": "5100000000000002.00000000",
-              "cs.comp": "5100000000000003.00000000", "cs2.comp": "5100000000000004.00000000"}
-SYNTH_STAGE = {"vs.vert": "vs", "ps.frag": "ps", "cs.comp": "cs", "cs2.comp": "cs"}
+              "cs.comp": "5100000000000003.00000000", "cs2.comp": "5100000000000004.00000000",
+              "zp.comp": "5100000000000007.00000000", "zr.comp": "5100000000000008.00000000"}
+SYNTH_STAGE = {"vs.vert": "vs", "ps.frag": "ps", "cs.comp": "cs", "cs2.comp": "cs", "zp.comp": "cs", "zr.comp": "cs"}
 
 
 def synthetic_pack(directory: Path) -> Path:
@@ -1015,6 +1144,12 @@ class DeviceTest(DeviceTestCase):
         self.assert_clean(done, "synth_compute")
         self.assertIn("128 values written by the dispatch: 3 * i + 7", done.stdout)
         self.assertEqual(self.stats(done.stdout, "compute")["computes"], 1)
+
+    def test_workgroup_memory_no_invocation_wrote_reads_as_zero_after_a_dispatch_filled_it_with_ones(self) -> None:
+        done = self.gpu("synth_zeroinit", str(self.pack))
+        self.assert_clean(done, "synth_zeroinit")
+        self.assertIn("0 of 262144 words read as something other than zero", done.stdout)
+        self.assertEqual(self.stats(done.stdout, "zeroinit")["computes"], 2)
 
     def test_a_pipeline_asked_for_with_a_submission_in_flight_is_a_named_fatal(self) -> None:
         done = self.gpu("synth_inflight", str(self.pack), validation="off")
