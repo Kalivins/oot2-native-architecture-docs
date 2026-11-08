@@ -564,6 +564,22 @@ REPORTS = [
 
 
 class ReportsTest(ReplayBase):
+    def test_an_old_unfinished_report_survives_more_than_1024_later_reports(self) -> None:
+        out = self.passing("many_pending_reports")
+        self.assertIn("first draws 1", out.splitlines())
+        self.assertIn("second draws 1", out.splitlines())
+        self.assertIn("third draws 2", out.splitlines())
+
+        mutant = self.passing("many_pending_reports", "--mutant", "nopending")
+        self.assertIn("first draws 0", mutant.splitlines())
+        self.assertIn("second draws 1", mutant.splitlines())
+
+    def test_an_unfinished_report_survives_later_submissions(self) -> None:
+        out = self.passing("pending_across_frames")
+        self.assertIn("draws 1", out.splitlines())
+        mutant = self.passing("pending_across_frames", "--mutant", "nopending")
+        self.assertIn("draws 0", mutant.splitlines())
+
     def test_reports_events_and_conditions_complete_in_op_stream_order(self) -> None:
         out = self.passing("reports")
         for line in REPORTS:
