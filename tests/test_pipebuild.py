@@ -101,7 +101,7 @@ class PipeBuildTest(DeviceTestCase):
         tmp, segments = self.folder()
         w = Worker(self.exe, self.pack, segments)
         self.assertRegex(w.ready, r"^ready vendor=[0-9a-f]{4} device=[0-9a-f]{4} driver=[0-9a-f]{8} api=1\.\d+\.\d+ "
-                                  r"cache_uuid=[0-9a-f]{32} cache=none seeded=\d+ name=")
+                                  r"cache_uuid=[0-9a-f]{32} cache=none seeded=\d+ zero_workgroup=1 name=")
         built = {}
         for kind, key in (("vs", VS), ("ps", PS), ("cs", CS)):
             reply = w.ask(f"build {kind} {key}").split()

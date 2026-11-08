@@ -60,7 +60,9 @@ def serve(args):
         sys.stderr.write("FATAL: gfx: vulkan: stand-in has no device\n")
         sys.exit(70)
     say(f"ready vendor={cfg.get('vendor', '10de')} device={cfg.get('device', '2486')} driver={cfg.get('driver', '0009a000')} "
-        f"api=1.4.351 cache_uuid={cfg.get('uuid', 'ab' * 16)} cache=none seeded=0 name=Stand-in")
+        f"api=1.4.351 cache_uuid={cfg.get('uuid', 'ab' * 16)} cache=none seeded=0"
+        + ("" if cfg.get("older_runtime") else f" zero_workgroup={cfg.get('zero_workgroup', 1)}")
+        + " name=Stand-in")
     built = []
     for line in sys.stdin:
         w = line.split()
@@ -440,6 +442,43 @@ class StepTest(unittest.TestCase):
         env.standin(driver="0009b000")
         status, ctx = env.run(ctx)
         self.assertEqual(len(env.builds()), 2 * done)
+
+    def test_the_record_names_the_runtime_the_builder_said_and_the_key_names_what_the_step_requires(self) -> None:
+        env = Env(self)
+        status, ctx = env.run()
+        self.assertEqual(status, "ok", env.say(ctx))
+        self.assertEqual(ctx.state["steps"]["pipelines"]["runtime"], {"zero_workgroup": "1"})
+        base = Pipelines().key(ctx)
+        with mock.patch.dict(pipelines.RUNTIME_SAYS, {"zero_workgroup": "0"}):
+            self.assertNotEqual(base, Pipelines().key(ctx))              # a runtime that asked for less is another key
+
+    def test_a_record_of_an_earlier_runtime_is_not_current_and_the_step_builds_again(self) -> None:
+        env = Env(self)
+        _, ctx = env.run()
+        rec = dict(ctx.state["steps"]["pipelines"])
+        self.assertTrue(Pipelines().current(ctx, rec))
+        for said in ({}, {"zero_workgroup": "0"}, None):
+            old = dict(rec)
+            if said is None:
+                del old["runtime"]                                       # made before the builder said anything
+            else:
+                old["runtime"] = said
+            self.assertFalse(Pipelines().current(ctx, old), said)
+        done = len(env.builds())
+        del ctx.state["steps"]["pipelines"]["runtime"]
+        env.run(ctx)
+        self.assertEqual(len(env.builds()), 2 * done)                    # the cache of the earlier runtime was built again
+
+    def test_a_builder_whose_runtime_does_not_zero_workgroup_memory_stops_the_step(self) -> None:
+        for config in ({"zero_workgroup": 0}, {"older_runtime": True}):
+            env = Env(self, config=config)
+            status, ctx = env.run()
+            self.assertEqual(status, "failed", config)
+            said = env.say(ctx)
+            self.assertIn("another runtime than the one prepare ships", said)
+            self.assertIn("zero_workgroup", said)
+            self.assertEqual(env.builds(), [])
+            self.assertFalse((env.dest / "pipelines" / "pipeline.cache").exists())
 
     def test_a_missing_cache_runs_the_step_again(self) -> None:
         env = Env(self)

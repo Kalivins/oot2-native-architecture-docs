@@ -806,6 +806,8 @@ int vkp_cache_flush(const char *path, size_t *bytes, char *why, size_t cap) {
 
 VkpCacheState vkp_cache_state(void) { return P.cache_state; }
 
+int vkp_zero_workgroup(void) { return P.zero_workgroup; }
+
 // ---------- open and close
 
 void vkp_open(const char *cache_path) {

@@ -371,9 +371,11 @@ class Pool:
                  on_failed: Callable[[Result], None], next_segment: int = 1, flush_seconds: float | None = None,
                  timeout: float | None = None, start_timeout: float | None = None, env: dict | None = None,
                  on_result: Callable[[Result], None] | None = None, final_flush: bool = True,
-                 expect: dict[str, str] | None = None):
+                 expect: dict[str, str] | None = None, runtime: dict[str, str] | None = None):
         self.final_flush = final_flush   # a warm pass has nothing to save: its cache is the file it was seeded from
         self.expect = expect or {}       # fields of the builder's ready line (vendor, device, driver, cache_uuid)
+        self.runtime = runtime or {}     # fields of it that name the runtime the builder was linked with (zero_workgroup)
+        self.runtime_seen: dict[str, str] = {}
         self.command, self.workers, self.gov = command, workers, governor
         self.logs, self.segments = Path(logs), Path(segments)
         self.on_saved, self.on_failed, self.on_result = on_saved, on_failed, on_result
@@ -438,7 +440,16 @@ class Pool:
             raise SchedError("the pipeline builder opened another device than the one prepare chose "
                              f"({', '.join(f'{k} {v} for {self.expect[k]}' for k, v in wrong.items())}). Choose the "
                              "device with OOT2_VK_DEVICE, or disable the implicit Vulkan layers that reorder devices.")
+        stale = {k: got.get(k, "") for k, v in self.runtime.items() if got.get(k, "") != v}
+        if stale:
+            # A cache is valid for the runtime that will read it: modules built any other way are other modules to the driver.
+            child.close(kill=True)
+            raise SchedError("the pipeline builder was made with another runtime than the one prepare ships "
+                             f"({', '.join(f'{k}={v or chr(45)}, expected {self.runtime[k]}' for k, v in stale.items())}): it would "
+                             "build the compute modules in a form a launch never asks for, and every program with "
+                             "workgroup memory would build again, cold, at the first launch.")
         with self.lock:
+            self.runtime_seen = {k: got[k] for k in self.runtime}
             self.children[wid] = child
             if attempt:
                 self.stats.restarts += 1

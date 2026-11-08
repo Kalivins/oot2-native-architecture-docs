@@ -18,6 +18,12 @@ that switch is on the same finding fails the step. The device's identity (vendor
 cache UUID, API version) is in the step's key, so a driver update builds everything again: a cache is valid only for
 the driver that wrote it.
 
+Which runtime. A cache is valid only for the runtime that reads it too: the runtime rewrites each compute module (its
+workgroup memory starts zeroed) before the driver sees it, and the driver's cache keys on the module. The builder says in
+its ready line what it does (`zero_workgroup`); the key names what the step requires (RUNTIME_SAYS), a builder that says
+anything else stops the step with the reason, and the record keeps what the builder said, so a record made by an earlier
+runtime is not current and the step builds again.
+
 What it does not build. Task and mesh pipelines wait for the mesh draws ticket and are counted as not built, so the
 totals are a lower bound. Vertex libraries are built as translated, without padding: a pixel stage that reads an
 output its vertex stage does not write needs a padded vertex library, and those pairs are known only from play
@@ -60,6 +66,12 @@ import layout  # noqa: E402  (tools/layout.py)
 from . import translate  # noqa: E402
 
 FORMAT = 1                       # changes when the outputs change shape: the step runs again
+# The runtime the cache must come from, as the builder's ready line says it: the runtime zero-initializes the workgroup memory
+# of every compute module before the driver sees it (spv_zero_workgroup), so a cache written by a runtime that did not holds
+# other modules than a launch asks for, and the programs with workgroup memory would build again, cold, once. The step's key
+# names it, a builder that does not say it is refused, and the record keeps what the builder said; a record without it (made
+# by an earlier runtime) is not current.
+RUNTIME_SAYS = {"zero_workgroup": "1"}
 HERE = Path(__file__).resolve().parent
 RUNTIME = build_game.RUNTIME
 SOURCE = TOOLS / "pipebuild" / "pipebuild.c"
@@ -169,6 +181,7 @@ class Pipelines(Step):
         device, why = usable_device(ctx.state.get("host") or {})
         listed = list_keys(getattr(ctx.options, "pipelines_list", None))
         return fingerprint(f"pipelines-{FORMAT}", f"device={device.identity if device else 'skipped: ' + why}",
+                           f"runtime={','.join(f'{k}={v}' for k, v in sorted(RUNTIME_SAYS.items()))}",
                            f"skip={bool(getattr(ctx.options, 'skip_pipelines', False))}",
                            f"list={hashlib.sha256(chr(10).join(sorted(listed)).encode()).hexdigest() if listed else 'all'}",
                            HERE / "pipelines.py", HERE / "pipesched.py", *key_files())
@@ -176,6 +189,8 @@ class Pipelines(Step):
     def current(self, ctx: Context, record: dict) -> bool:
         if record.get("skipped"):
             return True
+        if record.get("runtime") != RUNTIME_SAYS:
+            return False                        # built by a runtime that did not say it zeroes workgroup memory
         try:
             return (ctx.dest / OUT / CACHE).stat().st_size == record["cache_bytes"] and (ctx.dest / OUT / TIMES).is_file()
         except (OSError, KeyError, TypeError):
@@ -261,7 +276,7 @@ class Pipelines(Step):
         p = pipesched.Pool(lambda wid: builder + ["serve", "--pack", str(pack), "--segments", str(segments)], todo,
                            workers, gov, logs, segments, lambda rs, seg, size: record(rs), lambda r: record([r]),
                            next_segment=pipesched.next_segment_number(segments), env=env, on_result=shown.add,
-                           expect=device.expect())
+                           expect=device.expect(), runtime=RUNTIME_SAYS)
         t0 = time.monotonic()
         try:
             if todo:
@@ -337,6 +352,7 @@ class Pipelines(Step):
             "validation_warnings": p.stats.validation_warnings,
             "device": {"index": device.index, "name": device.name, "identity": device.identity},
             "builder": builder_id,
+            "runtime": dict(p.runtime_seen) or dict(RUNTIME_SAYS),     # no worker ran when every item was kept: the key held it
         }
 
 
@@ -510,7 +526,8 @@ def warm_pass(ctx: Context, items: list[pipesched.Item], cache: Path, workers: i
                                               str(scratch / "warm-segments")],
                        pipesched.order(items), workers, gov, scratch / "warm-logs", scratch / "warm-segments",
                        lambda rs, seg, size: None, failed.append, env=env, on_result=rows.append, final_flush=False,
-                       flush_seconds=float("inf"), expect=device.expect())
+                       flush_seconds=float("inf"), expect=device.expect(),
+                       runtime=RUNTIME_SAYS)
     (scratch / "warm-segments").mkdir(exist_ok=True)
     t0 = time.monotonic()
     p.run()

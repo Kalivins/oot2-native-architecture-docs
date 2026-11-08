@@ -98,10 +98,12 @@ static void print_ready(void) {
     const VkPhysicalDeviceProperties *p = &gpu_vk.facts.props;
     char uuid[2 * VK_UUID_SIZE + 1];
     hex(p->pipelineCacheUUID, VK_UUID_SIZE, uuid);
-    reply("ready vendor=%04x device=%04x driver=%08x api=%u.%u.%u cache_uuid=%s cache=%s seeded=%llu name=%s", p->vendorID,
-          p->deviceID, p->driverVersion, VK_API_VERSION_MAJOR(p->apiVersion), VK_API_VERSION_MINOR(p->apiVersion),
+    // zero_workgroup says what this runtime does to a compute module before the driver sees it: a cache built by a
+    // runtime that did not zero them holds other modules than the ones a launch asks for (tools/prepare/pipelines.py).
+    reply("ready vendor=%04x device=%04x driver=%08x api=%u.%u.%u cache_uuid=%s cache=%s seeded=%llu zero_workgroup=%d name=%s",
+          p->vendorID, p->deviceID, p->driverVersion, VK_API_VERSION_MAJOR(p->apiVersion), VK_API_VERSION_MINOR(p->apiVersion),
           VK_API_VERSION_PATCH(p->apiVersion), uuid, cache_state_name(vkp_cache_state()),
-          (unsigned long long)vkp_cache_size(), p->deviceName);
+          (unsigned long long)vkp_cache_size(), vkp_zero_workgroup(), p->deviceName);
 }
 
 // A named fatal of the runtime (a module that does not fit, a capability the device lacks, a failed Vulkan call) stops the

@@ -122,6 +122,9 @@ void vkp_open(const char *cache_path);
 void vkp_close(void);
 const VkpLayouts *vkp_layouts(void);
 VkpCacheState vkp_cache_state(void);
+// 1 when compute modules are built with their workgroup memory zero-initialized (spv_zero_workgroup: the device was
+// made with shaderZeroInitializeWorkgroupMemory), else 0. After vkp_open. The pipeline builder says it in its ready line.
+int vkp_zero_workgroup(void);
 // Write the cache to the path vkp_open was given, through a temporary file and a rename, so that an interrupted write
 // leaves the old file whole. 1, or 0 with the reason in why.
 int vkp_cache_save(char *why, size_t cap);
