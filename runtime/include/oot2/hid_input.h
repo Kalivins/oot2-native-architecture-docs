@@ -102,5 +102,8 @@ typedef struct HidRumble {
 } HidRumble;
 // SDL has one motor per frequency rather than one per guest side; retain the strongest amplitude of either side.
 HidRumble hid_rumble_mix(float left_low, float left_high, float right_low, float right_high);
+// Optional window-loop notification, called on the publishing thread under the rumble lock: only post a wake event;
+// do not call back into the rumble API. Clearing it waits for any notification in flight, so teardown is safe.
+void hid_rumble_set_wake(void (*wake)(void));
 void hid_rumble_publish(const HidRumble *r);
 int hid_rumble_take(HidRumble *out);   // 1 with *out when a request is pending, else 0

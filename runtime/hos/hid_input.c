@@ -14,6 +14,7 @@ static atomic_flag g_lock = ATOMIC_FLAG_INIT;
 
 static HidRumble g_rumble;
 static int g_rumble_pending;
+static void (*g_rumble_wake)(void);
 static atomic_flag g_rumble_lock = ATOMIC_FLAG_INIT;
 
 void hid_host_input_publish(const HidHostInput *in) {
@@ -76,10 +77,17 @@ HidRumble hid_rumble_mix(float left_low, float left_high, float right_low, float
     return (HidRumble){ll > rl ? ll : rl, lh > rh ? lh : rh, 100};
 }
 
+void hid_rumble_set_wake(void (*wake)(void)) {
+    while (atomic_flag_test_and_set_explicit(&g_rumble_lock, memory_order_acquire)) {}
+    g_rumble_wake = wake;
+    atomic_flag_clear_explicit(&g_rumble_lock, memory_order_release);
+}
+
 void hid_rumble_publish(const HidRumble *r) {
     while (atomic_flag_test_and_set_explicit(&g_rumble_lock, memory_order_acquire)) {}
     g_rumble = *r;
     g_rumble_pending = 1;
+    if (g_rumble_wake) g_rumble_wake();
     atomic_flag_clear_explicit(&g_rumble_lock, memory_order_release);
 }
 

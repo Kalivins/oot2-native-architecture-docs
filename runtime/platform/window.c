@@ -385,6 +385,13 @@ static void apply_rumble(SDL_Gamepad **pads) {
     if (hid_rumble_take(&r)) SDL_RumbleGamepad(g, r.low, r.high, r.duration_ms);
 }
 
+static void wake_rumble(void) {
+    SDL_Event e;
+    SDL_zero(e);
+    e.type = g_ev_wake;
+    SDL_PushEvent(&e);   // the mailbox retains the request even if the event queue is full
+}
+
 static void thread_main(void *arg) {
     (void)arg;
     SDL_SetMainReady();
@@ -395,6 +402,10 @@ static void thread_main(void *arg) {
     }
     g_thread_id = SDL_GetCurrentThreadID();
     g_ev_wake = SDL_RegisterEvents(2);
+    if (!g_ev_wake) {
+        fail("SDL_RegisterEvents");
+        goto quit;
+    }
     g_ev_job = g_ev_wake + 1;
     if (!SDL_Vulkan_LoadLibrary(NULL)) {
         fail("SDL_Vulkan_LoadLibrary");
@@ -424,6 +435,7 @@ static void thread_main(void *arg) {
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
     for (int i = 0; ids && i < n; i++) open_pad(ids[i], pads);
     SDL_free(ids);
+    hid_rumble_set_wake(wake_rumble);
     plat_mutex_lock(&g_mu);
     g_ready = 1;
     plat_cond_broadcast(&g_cv);
@@ -450,8 +462,8 @@ static void thread_main(void *arg) {
             if (in.resized && st.mode == WIN_WINDOWED && !st.minimised && st.width > 0)
                 in.resized(st.width, st.height);
         }
-        publish_input(pads);
         apply_rumble(pads);
+        publish_input(pads);
     }
     {   // a job queued as the loop ended still runs: its caller waits for it
         SDL_Event e;
@@ -463,6 +475,7 @@ static void thread_main(void *arg) {
     SDL_DestroyWindow(g_win);
     g_win = NULL;
 quit:
+    hid_rumble_set_wake(NULL);
     SDL_Vulkan_UnloadLibrary();
     SDL_Quit();
 done:
