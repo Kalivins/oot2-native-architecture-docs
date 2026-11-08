@@ -176,3 +176,17 @@ Changes of this project:
   tree before and after the AST optimizer, with a `counts.tsv` of the shared
   memory, barrier, shuffle, HMMA and call operations at each stage, which
   shows the stage where a kind of operation goes missing.
+- `Translation/Optimizations/Optimizer.cs`, `RemoveNode`: when a removed
+  node was the last reader of a result, the cleanup went on into the node that
+  made the result and dropped that node's uses of its own sources, so that the
+  next sweep could delete their producers. It did so for any producer without
+  an effect, also one with several results of which another is still read: an
+  operation that stays in the block then lost its claim on its sources. It now
+  goes on only into a producer whose every result is unused (`IsUnused`). The
+  matrix multiply-add of HMMA has two results, and a program that read one of
+  them kept its last HMMA while the earlier HMMA and the shared memory loads
+  of LDS and LDSM that fed it were deleted, the kept one reading values nothing
+  defined. On the 4,125 compute programs of the corpus split 8 modules change:
+  the 5 that lose HMMA (one lost 45 of its 46), which now have as many helper
+  calls as the program has HMMA, and 3 without HMMA that get back arithmetic
+  fed by one result of an image load.

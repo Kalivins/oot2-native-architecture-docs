@@ -408,7 +408,11 @@ namespace Ryujinx.Graphics.Shader.Translation.Optimizations
                         // nxnative (from MacNativeGames' translator patch 0002, after Ryujinx_Optime 01a1e37f): follow only into a producer that will be removed
                         // itself. One with side effects (an atomic, a call) stays in the block when its result is unused, so its sources are still live; dropping
                         // their uses here let the next dead-code pass delete the chain that feeds it, and the atomic then read undefined values.
-                        if (!HasSideEffects(src.AsgOp))
+                        //
+                        // oot2-native: and only into one whose every result is unused. An operation with several results (an image load, the matrix multiply-add
+                        // of HMMA) stays in the block while one result is read, and dropping its uses of its sources let the cleanup delete the producers of
+                        // those sources: the loads and the earlier HMMA that fed a kept HMMA were lost, and it read values nothing defined.
+                        if (IsUnused(src.AsgOp))
                         {
                             nodes.Enqueue(src.AsgOp);
                         }
